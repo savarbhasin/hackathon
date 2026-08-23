@@ -103,32 +103,40 @@ export default function AgentsPage() {
     });
   }
 
-  function setConnectorEnabled(connector: ConnectorOption, enabled: boolean) {
-    if (!draft || connector.name === CORE_CONNECTOR) return;
-    const rest = draft.mcpServers.filter((server) => server.name !== connector.name);
-    updateDraft({ mcpServers: enabled ? [...rest, {
-      name: connector.name,
-      enableTools: connector.tools.map((tool) => tool.name),
-      requireApprovalForTools: [],
-    }] : rest });
-  }
-
   function replaceServer(next: McpServerConfig) {
     if (!draft) return;
-    updateDraft({ mcpServers: draft.mcpServers.map((server) => server.name === next.name ? next : server) });
+    const exists = draft.mcpServers.some((server) => server.name === next.name);
+    updateDraft({ mcpServers: exists
+      ? draft.mcpServers.map((server) => server.name === next.name ? next : server)
+      : [...draft.mcpServers, next] });
   }
 
   function setToolEnabled(connector: ConnectorOption, toolName: string, enabled: boolean) {
     if (!draft || isCoreTool(connector.name, toolName)) return;
     const server = draft.mcpServers.find((item) => item.name === connector.name);
-    if (!server) return;
-    const current = selectedToolNames(server, connector);
+    const current = server ? selectedToolNames(server, connector) : [];
     const enableTools = enabled ? unique([...current, toolName]) : current.filter((name) => name !== toolName);
     replaceServer({
+      name: connector.name,
       ...server,
       enableTools,
-      disableTools: (server.disableTools ?? []).filter((name) => name !== toolName && name !== "@all"),
-      requireApprovalForTools: (server.requireApprovalForTools ?? []).filter((name) => enableTools.includes(name)),
+      disableTools: (server?.disableTools ?? []).filter((name) => name !== toolName && name !== "@all"),
+      requireApprovalForTools: (server?.requireApprovalForTools ?? []).filter((name) => enableTools.includes(name)),
+    });
+  }
+
+  function setAllTools(connector: ConnectorOption, enabled: boolean) {
+    if (!draft || connector.name === CORE_CONNECTOR) return;
+    const server = draft.mcpServers.find((item) => item.name === connector.name);
+    const enableTools = enabled ? connector.tools.map((tool) => tool.name) : [];
+    replaceServer({
+      name: connector.name,
+      ...server,
+      enableTools,
+      disableTools: (server?.disableTools ?? []).filter((name) => name !== "@all" && !connector.tools.some((tool) => tool.name === name)),
+      requireApprovalForTools: enabled
+        ? (server?.requireApprovalForTools ?? []).filter((name) => enableTools.includes(name))
+        : [],
     });
   }
 
@@ -287,9 +295,9 @@ export default function AgentsPage() {
                     const server = draft.mcpServers.find((item) => item.name === connector.name);
                     const required = connector.name === CORE_CONNECTOR;
                     return <ConnectorEditor key={connector.name} connector={connector} server={server}
-                      selected={required || Boolean(server)} required={required}
-                      onToggle={(checked) => setConnectorEnabled(connector, checked)}
+                      required={required}
                       onToolToggle={(tool, checked) => setToolEnabled(connector, tool, checked)}
+                      onAllToolsToggle={(checked) => setAllTools(connector, checked)}
                       onApprovalToggle={(tool, checked) => setToolApproval(connector, tool, checked)} />;
                   })}
                   {connectors.length === 1 && <p className="rounded-md border border-dashed border-line px-4 py-5 text-xs leading-relaxed text-ink-faint">
@@ -361,34 +369,37 @@ function CapabilityToggle({ label, description, checked, disabled = false, onCha
   </button>;
 }
 
-function ConnectorEditor({ connector, server, selected, required, onToggle, onToolToggle, onApprovalToggle }: {
+function ConnectorEditor({ connector, server, required, onToolToggle, onAllToolsToggle, onApprovalToggle }: {
   connector: ConnectorOption;
   server?: McpServerConfig;
-  selected: boolean;
   required: boolean;
-  onToggle: (checked: boolean) => void;
   onToolToggle: (tool: string, checked: boolean) => void;
+  onAllToolsToggle: (checked: boolean) => void;
   onApprovalToggle: (tool: string, checked: boolean) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
+  const [search, setSearch] = useState("");
   const enabledTools = server ? selectedToolNames(server, connector) : [];
   const approvals = server?.requireApprovalForTools ?? [];
   const label = connectorLabel(connector.name);
   const toolsId = `connector-tools-${connector.name.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
-  return <div className={`overflow-hidden rounded-md border ${selected ? "border-line-strong bg-panel/75" : "border-line bg-deck/45"}`}>
+  const enabledCount = connector.tools.filter((tool) => isCoreTool(connector.name, tool.name) || enabledTools.includes(tool.name)).length;
+  const visibleTools = connector.tools.filter((tool) => {
+    const term = search.trim().toLowerCase();
+    return !term || tool.name.toLowerCase().includes(term) || tool.description?.toLowerCase().includes(term);
+  });
+  const hasExternalTools = connector.tools.some((tool) => !isCoreTool(connector.name, tool.name));
+  return <div className={`overflow-hidden rounded-md border ${enabledCount > 0 ? "border-line-strong bg-panel/75" : "border-line bg-deck/45"}`}>
     <div className="flex min-h-14 items-stretch">
-      <label className={`flex shrink-0 items-center px-4 ${required ? "cursor-not-allowed" : "cursor-pointer"}`}>
-        <input type="checkbox" checked={selected} disabled={required} onChange={(event) => onToggle(event.target.checked)}
-          aria-label={required ? `${label} access is required` : `${selected ? "Remove" : "Give"} ${label} connector access`}
-          className="accent-[var(--color-signal)]" />
-      </label>
       <button type="button" onClick={() => setExpanded((current) => !current)} aria-expanded={expanded}
         aria-controls={toolsId}
-        className="flex min-w-0 flex-1 items-center gap-3 py-3.5 pr-4 text-left transition-colors hover:bg-panel-hi/60 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-signal">
+        className="flex min-w-0 flex-1 items-center gap-3 px-4 py-3.5 text-left transition-colors hover:bg-panel-hi/60 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-signal">
         <span className="min-w-0 flex-1">
           <span className="block truncate text-xs font-semibold text-ink">{label}</span>
           <span className="mt-0.5 block font-mono text-[8px] uppercase tracking-[0.1em] text-ink-faint">
-            {required ? "Required for every specialist" : `${connector.tools.length} ${connector.tools.length === 1 ? "tool" : "tools"}`}
+            {enabledCount > 0
+              ? `Uses ${enabledCount} of ${connector.tools.length} ${connector.tools.length === 1 ? "tool" : "tools"}`
+              : "Not used"}
           </span>
         </span>
         {required && <span className="rounded border border-line px-2 py-1 font-mono text-[8px] uppercase tracking-[0.12em] text-ink-faint">Core</span>}
@@ -398,16 +409,29 @@ function ConnectorEditor({ connector, server, selected, required, onToggle, onTo
         </svg>
       </button>
     </div>
-    {expanded && <div id={toolsId} className={`border-t border-line ${selected ? "" : "bg-deck/30"}`}>
+    {expanded && <div id={toolsId} className="border-t border-line">
       {connector.tools.length > 0 ? <>
-        <div className="grid grid-cols-[minmax(0,1fr)_70px] gap-3 border-b border-line/70 px-4 py-2 font-mono text-[8px] uppercase tracking-[0.12em] text-ink-faint">
-          <span>{selected ? "Enabled tools" : "Select connector to enable tools"}</span><span className="text-center">Approval</span>
+        <div className="flex flex-col gap-3 border-b border-line/70 px-4 py-3 sm:flex-row sm:items-center">
+          <label className="relative min-w-0 flex-1">
+            <span className="sr-only">Search {label} tools</span>
+            <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search tools"
+              className="w-full rounded-md border border-line bg-deck px-3 py-2 text-xs text-ink outline-none placeholder:text-ink-faint focus:border-signal" />
+          </label>
+          {required ? <span className="font-mono text-[8px] uppercase tracking-[0.12em] text-ink-faint">Core tools stay enabled</span> : <div className="flex shrink-0 gap-2">
+            <button type="button" onClick={() => onAllToolsToggle(true)} disabled={!hasExternalTools}
+              className="rounded border border-line px-2.5 py-2 font-mono text-[8px] uppercase tracking-[0.1em] text-ink-soft transition-colors hover:border-line-strong hover:text-ink disabled:cursor-not-allowed disabled:opacity-40">Select all</button>
+            <button type="button" onClick={() => onAllToolsToggle(false)} disabled={enabledCount === 0}
+              className="rounded border border-line px-2.5 py-2 font-mono text-[8px] uppercase tracking-[0.1em] text-ink-soft transition-colors hover:border-line-strong hover:text-ink disabled:cursor-not-allowed disabled:opacity-40">Deselect all</button>
+          </div>}
         </div>
-        {connector.tools.map((tool) => {
+        <div className="grid grid-cols-[minmax(0,1fr)_70px] gap-3 border-b border-line/70 px-4 py-2 font-mono text-[8px] uppercase tracking-[0.12em] text-ink-faint">
+          <span>Enabled tools</span><span className="text-center">Approval</span>
+        </div>
+        {visibleTools.map((tool) => {
           const core = isCoreTool(connector.name, tool.name);
-          const enabled = selected && (core || enabledTools.includes(tool.name));
-          const toolLocked = !selected || core;
-          return <div key={tool.name} className={`grid grid-cols-[minmax(0,1fr)_70px] items-center gap-3 border-b border-line/50 px-4 py-3 last:border-b-0 ${selected ? "" : "opacity-50"}`}>
+          const enabled = core || enabledTools.includes(tool.name);
+          const toolLocked = core;
+          return <div key={tool.name} className="grid grid-cols-[minmax(0,1fr)_70px] items-center gap-3 border-b border-line/50 px-4 py-3 last:border-b-0">
             <label className={`flex items-start gap-3 ${toolLocked ? "cursor-not-allowed" : "cursor-pointer"}`}>
               <input type="checkbox" checked={enabled} disabled={toolLocked}
                 onChange={(event) => onToolToggle(tool.name, event.target.checked)}
@@ -420,12 +444,13 @@ function ConnectorEditor({ connector, server, selected, required, onToggle, onTo
             </label>
             <label className={`flex justify-center ${enabled && !core ? "cursor-pointer" : "cursor-not-allowed opacity-35"}`}
               title={core ? "Mission Control core tools run without an approval gate" : "Pause before this tool runs"}>
-              <input type="checkbox" checked={selected && approvals.includes(tool.name)} disabled={!enabled || core}
+              <input type="checkbox" checked={approvals.includes(tool.name)} disabled={!enabled || core}
                 onChange={(event) => onApprovalToggle(tool.name, event.target.checked)}
                 aria-label={`Require approval for ${tool.name}`} className="accent-[var(--color-state-approval)]" />
             </label>
           </div>;
         })}
+        {visibleTools.length === 0 && <p className="px-4 py-5 text-xs text-ink-faint">No tools match {search}.</p>}
       </> : <p className="px-4 py-4 text-[10px] leading-relaxed text-ink-faint">
         This connector did not report any tools.
       </p>}
