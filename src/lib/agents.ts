@@ -1,7 +1,12 @@
 import type { TrueForgeApi } from "@truefoundry/trueforge-sdk";
 import { TrueForgeError } from "@truefoundry/trueforge-sdk";
 import { db } from "./db";
-import { MCP_SERVER_NAME, ROLES } from "./fleet";
+import {
+  MCP_SERVER_NAME,
+  ROLES,
+  stripSpecialistRuntimeInstructions,
+  withSpecialistRuntimeInstructions,
+} from "./fleet";
 import { tf } from "./tf";
 
 const REQUIRED_MISSION_CONTROL_TOOLS = ["mark_done", "create_doc", "update_doc", "get_doc"] as const;
@@ -161,11 +166,11 @@ export async function updateAgentDefinition(
   }
 
   const currentMetadata = await db.agentProfile.findUnique({ where: { slug: remote.name } });
-  const manifest = buildManifest(input, remote.manifest);
+  const role = ROLES[remote.name];
+  const manifest = buildManifest(input, remote.manifest, Boolean(role || currentMetadata));
   validateMissionControlTools(manifest.mcpServers ?? []);
   const { data: updated } = await tf().agents.update(remote.id, { manifest });
 
-  const role = ROLES[remote.name];
   const displayName = optionalText(input.name, 64) ?? currentMetadata?.name ?? role?.label ?? humanize(remote.name);
   const description =
     optionalText(input.description, 240) ??
@@ -242,12 +247,20 @@ function presetManifest(role: (typeof ROLES)[string]): TrueForgeApi.AgentSpec {
 
 function buildManifest(
   input: AgentWriteInput,
-  current?: TrueForgeApi.AgentSpec
+  current?: TrueForgeApi.AgentSpec,
+  managedByMissionControl = false
 ): TrueForgeApi.AgentSpec {
-  const instructions = optionalText(input.instructions, 12000) ?? current?.instructions ?? "";
-  if (instructions.length < 40) {
+  const currentEditableInstructions = stripStoredRuntimeInstructions(
+    current?.instructions ?? "",
+    managedByMissionControl
+  );
+  const editableInstructions = input.instructions === undefined
+    ? currentEditableInstructions.trim()
+    : optionalText(input.instructions, 12000) ?? "";
+  if (editableInstructions.length < 40) {
     throw new AgentInputError("System instructions must contain at least 40 characters.");
   }
+  const instructions = withSpecialistRuntimeInstructions(editableInstructions);
 
   const modelName = optionalText(input.model, 200) ?? current?.model.name ?? DEFAULT_MODEL;
   const mcpServers = input.mcpServers === undefined
@@ -363,13 +376,17 @@ function toDefinition(
   }
 ): AgentDefinition {
   const role = ROLES[agent.name];
+  const managedByMissionControl = Boolean(role || metadata);
   return {
     id: agent.id,
     slug: agent.name,
     name: metadata?.name ?? role?.label ?? humanize(agent.name),
     description:
       metadata?.description ?? role?.description ?? "Reusable TrueForge specialist agent.",
-    instructions: agent.manifest.instructions ?? "",
+    instructions: stripStoredRuntimeInstructions(
+      agent.manifest.instructions ?? "",
+      managedByMissionControl
+    ),
     isDefault: Boolean(role),
     enabled: metadata?.enabled ?? true,
     updatedAt: metadata?.updatedAt ?? null,
@@ -378,6 +395,19 @@ function toDefinition(
     sandboxEnabled: agent.manifest.config?.sandbox?.enabled ?? false,
     subagentsEnabled: agent.manifest.config?.dynamicSubAgents?.enabled ?? true,
   };
+}
+
+function stripStoredRuntimeInstructions(
+  storedInstructions: string,
+  managedByMissionControl: boolean
+): string {
+  const current = stripSpecialistRuntimeInstructions(storedInstructions);
+  if (current !== storedInstructions || !managedByMissionControl) return current;
+
+  const runtimeMarker = "You are a specialist agent in a fleet managed by Mission Control.\n";
+  if (!storedInstructions.startsWith(runtimeMarker)) return storedInstructions;
+  const boundary = storedInstructions.indexOf("\n\n");
+  return boundary === -1 ? storedInstructions : storedInstructions.slice(boundary + 2);
 }
 
 function requiredText(value: string | undefined, field: string, max: number): string {

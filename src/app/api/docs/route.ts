@@ -23,6 +23,7 @@ export async function POST(req: Request) {
       title: body.title?.slice(0, 160) || "Untitled document",
       content: body.content ?? "",
       authorRole: "user",
+      kind: "user",
     },
   });
   return Response.json(document, { status: 201 });
