@@ -5,7 +5,6 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { z } from "zod";
 import { Cron } from "croner";
 import { db } from "../src/lib/db";
-import { ROLES } from "../src/lib/fleet";
 import { getAgentDefinition, listAgentDefinitions } from "../src/lib/agents";
 import { dispatchTask, getBoard, sweep } from "../src/lib/engine";
 import { orchestratorSay } from "../src/lib/orchestrator";
@@ -215,18 +214,13 @@ function buildServer(): McpServer {
       role: z
         .string()
         .min(1)
-        .describe(`Preset roles: ${Object.keys(ROLES).join(", ")}. Other short role names are allowed with agent_prompt.`),
-      agent_prompt: z
-        .string()
-        .min(20)
-        .optional()
-        .describe("System instructions for a custom role, or extra specialization for a preset role"),
+        .describe("Immutable TrueForge agent name from list_agents"),
       depends_on: z.array(z.string()).default([]).describe("Task ids that must finish before this one starts"),
     },
-    async ({ mission_id, title, detail, role, agent_prompt, depends_on }) => {
+    async ({ mission_id, title, detail, role, depends_on }) => {
       const profile = await getAgentDefinition(role);
-      if (!profile?.enabled && !agent_prompt) {
-        return text(`Unknown or disabled agent "${role}". Use list_agents or pass agent_prompt.`);
+      if (!profile?.enabled) {
+        return text(`Unknown or disabled agent "${role}". Use list_agents.`);
       }
       const count = await db.task.count({ where: { missionId: mission_id } });
       const task = await db.task.create({
@@ -234,8 +228,8 @@ function buildServer(): McpServer {
           missionId: mission_id,
           title,
           detail,
-          role,
-          agentPrompt: agent_prompt ?? profile?.instructions ?? null,
+          role: profile.slug,
+          agentPrompt: null,
           dependsOn: JSON.stringify(depends_on),
           position: count,
         },

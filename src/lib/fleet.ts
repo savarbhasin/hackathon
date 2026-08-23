@@ -1,3 +1,5 @@
+import type { TrueForgeApi } from "@truefoundry/trueforge-sdk";
+
 export const MCP_SERVER_NAME = "mission-control";
 
 export const ORCHESTRATOR_MODEL = "openai/gpt-5-5";
@@ -7,36 +9,37 @@ export const TITLE_MODEL = SPECIALIST_MODEL;
 const SPECIALIST_PREAMBLE = `You are a specialist agent in a fleet managed by Mission Control.
 Complete only the assignment in your kickoff message. Do not broaden the mission or create more tasks.
 Use create_doc when the useful output is a research note, brief, comparison, or other document that people should be able to read later. Pass your TASK_ID so Mission Control links the document to your task and mission.
-When your work is complete, call mark_done exactly once. Write a factual summary. Add a handoff when another task depends on yours, including the findings, decisions, document titles, and URLs that the next agent needs.`;
+When your work is complete, call mark_done exactly once. Keep the summary to two to four factual sentences. Put extensive output in a document instead of the summary.
+If you create subagents, give each one a self-contained assignment and tell it not to call mark_done. Only you, the parent specialist, may finish the Mission Control task.
+Add a handoff only when another task depends on unpublished context that is not already in a linked document.`;
 
 export interface RoleDef {
   id: string;
   label: string;
   description: string;
   instructions: string;
-  spec: {
-    model: { name: string };
-    instructions: string;
-    mcp_servers: Array<{
-      name: string;
-      enable_tools?: string[];
-      require_approval_for_tools?: string[];
-    }>;
-  };
+  spec: TrueForgeApi.AgentSpec;
 }
+
+type AgentMcpServers = NonNullable<TrueForgeApi.AgentSpec["mcpServers"]>;
 
 function specialistSpec(
   instructions: string,
-  servers: RoleDef["spec"]["mcp_servers"] = []
+  servers: AgentMcpServers = [],
+  capabilities: { sandbox?: boolean; dynamicSubAgents?: boolean } = {}
 ): RoleDef["spec"] {
   return {
     model: { name: SPECIALIST_MODEL },
     instructions: `${SPECIALIST_PREAMBLE}\n\n${instructions}`,
-    mcp_servers: [
+    config: {
+      sandbox: { enabled: capabilities.sandbox ?? false },
+      dynamicSubAgents: { enabled: capabilities.dynamicSubAgents ?? false },
+    },
+    mcpServers: [
       ...servers,
       {
         name: MCP_SERVER_NAME,
-        enable_tools: ["mark_done", "create_doc", "update_doc"],
+        enableTools: ["mark_done", "create_doc", "update_doc", "get_doc"],
       },
     ],
   };
@@ -65,7 +68,8 @@ Separate sourced facts from your own inference. Record dates, material caveats, 
     spec: specialistSpec(
       `Investigate the assigned question with web search. Prefer primary sources and current material. Check important claims against a second source.
 Separate sourced facts from your own inference. Record dates, material caveats, and direct links. Put substantial findings in a document with clear headings and source links. Use a handoff only when a successor needs your findings, and include the document title plus decision-ready conclusions.`,
-      [{ name: "exa" }]
+      [{ name: "exa" }],
+      { sandbox: true, dynamicSubAgents: true }
     ),
   },
   coder: {
@@ -78,7 +82,9 @@ Use a handoff only when another task depends on implementation details that are 
     spec: specialistSpec(
       `Implement only the assigned change. Inspect the existing code and project instructions before editing, and preserve unrelated work.
 Choose the smallest coherent design that fits the current architecture. Handle failure states at system boundaries. Run focused checks for the behavior you changed and report the exact files and checks in your summary. Do not claim a check passed unless you ran it.
-Use a handoff only when another task depends on implementation details that are not already clear from the changed files.`
+Use a handoff only when another task depends on implementation details that are not already clear from the changed files.`,
+      [],
+      { sandbox: true, dynamicSubAgents: true }
     ),
   },
   reviewer: {
@@ -115,7 +121,7 @@ Preserve factual meaning, keep claims tied to the evidence you received, and cal
       [
         {
           name: "linear",
-          enable_tools: [
+          enableTools: [
             "list_teams",
             "get_team",
             "get_workspace",
@@ -127,61 +133,47 @@ Preserve factual meaning, keep claims tied to the evidence you received, and cal
             "list_issue_labels",
             "save_issue",
           ],
-          require_approval_for_tools: ["save_issue"],
+          requireApprovalForTools: ["save_issue"],
         },
       ]
     ),
   },
 };
 
-export function getRole(id: string, customPrompt?: string | null): RoleDef {
-  const preset = ROLES[id];
-  if (!customPrompt) return preset ?? ROLES.writer;
-
-  const externalServers =
-    preset?.spec.mcp_servers.filter((server) => server.name !== MCP_SERVER_NAME) ?? [];
-  return {
-    id,
-    label: preset?.label ?? id,
-    description: preset?.description ?? "Custom specialist agent.",
-    instructions: customPrompt,
-    spec: specialistSpec(customPrompt, externalServers),
-  };
-}
-
 export const ORCHESTRATOR_INSTRUCTIONS = `You run the agent fleet in Mission Control.
 
 Decide first whether the request needs delegated work. Answer simple questions yourself. For work that has distinct steps or benefits from specialists, create one mission and a small set of tasks.
 
-Agent choices:
-- planner turns ambiguous work into an execution plan
-- researcher searches the web, checks sources, and can publish research documents
-- coder implements a scoped code change and verifies it
-- reviewer audits work for concrete defects without editing by default
-- writer turns supplied context into a written deliverable
-- filer works in Linear; save_issue pauses until a person approves it
-- custom agents created in Mission Control are also available. Call list_agents before delegating when the best role is unclear. Custom agents can write Mission Control documents but do not receive external connectors.
+Agent selection:
+- Call list_agents before creating delegated tasks. It is the source of truth for available agents and their specialties.
+- Choose the narrowest agent that has the tools required for the assignment.
+- Never invent an agent name or assume a connector is available.
 
 Workflow:
 1. Call create_mission once.
-2. Call create_task once per task. Put everything that agent needs in detail. Set depends_on only when a task truly needs a predecessor's output. Independent tasks should run in parallel.
-3. Use an agent from list_agents when it fits. Use agent_prompt only when this task needs instructions that should not become a reusable agent.
+2. Call create_task once per task. Its detail must name the concrete outcome, supplied inputs, expected artifact, constraints, and acceptance check.
+3. Set depends_on only when a task truly needs a predecessor's output. Independent tasks should run in parallel.
 4. Call dispatch_ready after creating all tasks. Mission Control starts tasks with satisfied dependencies and keeps the rest in Backlog.
 5. Use list_board for live status. Use list_docs or get_doc when you need a saved research artifact.
 
 Rules:
 - Keep each task small enough for one agent to finish.
+- Ask for a document when the useful output is extensive research, a reusable plan, a script, or finished prose. The task result should remain a concise record of what the agent did.
 - Never invent task ids, mission ids, board state, or document contents.
 - Do not dispatch a task manually unless the user asks you to override dependencies.
 - State what you created or found in plain language. Do not dump raw tool output.`;
 
-export const ORCHESTRATOR_SPEC = {
+export const ORCHESTRATOR_SPEC: TrueForgeApi.AgentSpec = {
   model: { name: ORCHESTRATOR_MODEL },
   instructions: ORCHESTRATOR_INSTRUCTIONS,
-  mcp_servers: [
+  config: {
+    sandbox: { enabled: false },
+    dynamicSubAgents: { enabled: false },
+  },
+  mcpServers: [
     {
       name: MCP_SERVER_NAME,
-      enable_tools: [
+      enableTools: [
         "list_board",
         "list_agents",
         "get_task",
