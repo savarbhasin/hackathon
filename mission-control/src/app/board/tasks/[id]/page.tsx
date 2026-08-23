@@ -18,6 +18,7 @@ interface TaskDocument {
   title: string;
   updatedAt: string;
   authorRole: string;
+  kind: string;
 }
 
 interface Predecessor {
@@ -531,7 +532,19 @@ function DocumentsSection({ documents }: { documents: TaskDocument[] }) {
                   <path d="M12 3.5v3h3M7.5 10h5M7.5 12.5h4" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
                 </svg>
                 <span className="min-w-0">
-                  <span className="block line-clamp-2 text-sm font-semibold leading-5 text-ink group-hover:text-white">{document.title}</span>
+                  <span className="flex flex-wrap items-center gap-2">
+                    <span className="block line-clamp-2 text-sm font-semibold leading-5 text-ink group-hover:text-white">{document.title}</span>
+                    {document.kind === "handoff" && (
+                      <span className="rounded border border-role-researcher/30 bg-role-researcher/[0.08] px-1.5 py-0.5 font-mono text-[7px] font-semibold uppercase tracking-[0.14em] text-role-researcher">
+                        Handoff
+                      </span>
+                    )}
+                  </span>
+                  {document.kind === "handoff" && (
+                    <span className="mt-1.5 block text-[11px] leading-4 text-ink-soft">
+                      Context passed to dependent tasks
+                    </span>
+                  )}
                   <span className="mt-2 block font-mono text-[8px] uppercase tracking-[0.12em] text-ink-faint">{roleLabel(document.authorRole)} / {formatShortDate(document.updatedAt)}</span>
                 </span>
               </span>

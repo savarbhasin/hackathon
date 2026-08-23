@@ -71,6 +71,7 @@ model Document {
   title      String
   content    String
   authorRole String
+  kind       String   @default("artifact")
   missionId  String?
   mission    Mission? @relation(fields: [missionId], references: [id], onDelete: SetNull)
   taskId     String?
@@ -80,6 +81,7 @@ model Document {
 
   @@index([missionId])
   @@index([taskId])
+  @@index([kind])
   @@index([updatedAt])
 }
 

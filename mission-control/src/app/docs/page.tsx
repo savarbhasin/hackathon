@@ -14,6 +14,7 @@ interface AgentDocument {
   title: string;
   content: string;
   authorRole: string;
+  kind: string;
   createdAt: string;
   updatedAt: string;
   mission: { id: string; title: string } | null;
@@ -62,8 +63,19 @@ export default function DocsPage() {
   );
   const documentGroups = useMemo(
     () => [
-      { label: "Yours", items: sortedDocuments.filter((document) => document.authorRole === "user") },
-      { label: "Agent output", items: sortedDocuments.filter((document) => document.authorRole !== "user") },
+      {
+        label: "Yours",
+        items: sortedDocuments.filter(
+          (document) => document.kind !== "handoff" && (document.kind === "user" || document.authorRole === "user")
+        ),
+      },
+      { label: "Handoffs", items: sortedDocuments.filter((document) => document.kind === "handoff") },
+      {
+        label: "Agent output",
+        items: sortedDocuments.filter(
+          (document) => document.kind !== "handoff" && document.kind !== "user" && document.authorRole !== "user"
+        ),
+      },
     ].filter((group) => group.items.length > 0),
     [sortedDocuments]
   );
@@ -93,7 +105,7 @@ export default function DocsPage() {
     const response = await fetch("/api/docs", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ title: "Untitled document", content: "" }),
+      body: JSON.stringify({ title: "Untitled document", content: "", kind: "user" }),
     });
     if (!response.ok) {
       setError("Could not create the document.");

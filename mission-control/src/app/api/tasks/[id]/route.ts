@@ -14,7 +14,7 @@ export async function GET(_req: Request, ctx: { params: Promise<{ id: string }> 
       events: { orderBy: { createdAt: "asc" } },
       documents: {
         orderBy: { updatedAt: "desc" },
-        select: { id: true, title: true, updatedAt: true, authorRole: true },
+        select: { id: true, title: true, updatedAt: true, authorRole: true, kind: true },
       },
     },
   });
