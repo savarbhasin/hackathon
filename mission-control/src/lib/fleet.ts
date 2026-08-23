@@ -46,6 +46,7 @@ function specialistSpec(
     config: {
       sandbox: { enabled: capabilities.sandbox ?? false },
       dynamicSubAgents: { enabled: capabilities.dynamicSubAgents ?? false },
+      generativeUi: { enabled: false },
     },
     mcpServers: [
       ...servers,
@@ -181,6 +182,7 @@ export const ORCHESTRATOR_SPEC: TrueForgeApi.AgentSpec = {
   config: {
     sandbox: { enabled: false },
     dynamicSubAgents: { enabled: false },
+    generativeUi: { enabled: false },
   },
   mcpServers: [
     {
