@@ -34,7 +34,7 @@ export function MarkdownDocumentEditor({ value, onChange }: { value: string; onC
       onChange={(markdown) => onChange(markdown)}
       placeholder="Start writing..."
       contentEditableClassName="markdown-document-content"
-      className="markdown-document-editor"
+      className="markdown-document-editor mdxeditor-full-height"
       plugins={[
         headingsPlugin({ allowedHeadingLevels: [1, 2, 3] }),
         listsPlugin(),
