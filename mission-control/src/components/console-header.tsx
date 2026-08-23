@@ -52,7 +52,7 @@ function NavLinks({ mobile = false }: { mobile?: boolean }) {
             aria-current={active ? "page" : undefined}
             className={mobile
               ? `relative flex min-w-0 flex-col items-center gap-1 px-1 py-2.5 text-[10px] font-medium transition-colors ${active ? "text-ink" : "text-ink-faint"}`
-              : `group flex items-start gap-3 rounded-lg border px-3 py-3 transition-colors focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-signal ${active ? "border-line-strong bg-panel-hi text-ink" : "border-transparent bg-deck/35 text-ink-faint hover:border-line hover:bg-panel-hi/70 hover:text-ink-soft"}`
+              : `group flex items-start gap-3 rounded-lg border px-3 py-3 transition-colors focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-signal ${active ? "border-line-strong bg-panel-hi text-ink" : "border-transparent bg-transparent text-ink-faint hover:border-line hover:text-ink-soft"}`
             }
           >
             <span className={mobile
