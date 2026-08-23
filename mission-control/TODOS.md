@@ -43,7 +43,7 @@
 # Next next improvements
 lets commit what we have already done, start a new branch from here where we do this
 
-- [ ] agents are supported by truefoundry, so instead of generating agent ourselves, i think we should shift to that , there we will be able to customize tools for agents as well so that ll be good.
+- [x] agents are supported by truefoundry, so instead of generating agent ourselves, i think we should shift to that , there we will be able to customize tools for agents as well so that ll be good.
 so we can have an agent called issue tracker agent which only has tools linear, jira, and github issues
 a coder agent which will have access to sandbox and also allowed to spwan subagents
 researcher agent only exa web search and (sandbox?) along with subagents thing

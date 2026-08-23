@@ -1,6 +1,5 @@
 import { db } from "./db";
 import { tf } from "./tf";
-import { getRole } from "./fleet";
 import { isEventDelta, mergeEventDelta } from "@truefoundry/trueforge-sdk";
 
 export type Column = "backlog" | "working" | "blocked" | "approval" | "settled";
@@ -94,15 +93,13 @@ export async function dispatchTask(taskId: string): Promise<{ ok: boolean; reaso
   if (task.sessionId) return { ok: false, reason: "already_dispatched" };
   if (task.column !== "backlog") return { ok: false, reason: `column=${task.column}` };
 
-  const role = getRole(task.role, task.agentPrompt);
-
   const claim = await db.task.updateMany({
     where: { id: taskId, sessionId: null },
     data: { column: "working", pendingActions: null },
   });
   if (claim.count === 0) return { ok: false, reason: "lost_race" };
 
-  const { data: session } = await tf().sessions.create({ agent: { spec: role.spec as never } });
+  const { data: session } = await tf().sessions.create({ agent: { name: task.role } });
 
   const dependsOn = JSON.parse(task.dependsOn || "[]") as string[];
   const kickoff = buildKickoff({

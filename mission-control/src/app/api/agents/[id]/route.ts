@@ -1,48 +1,19 @@
-import { db } from "@/lib/db";
-import { agentSlug } from "@/lib/agents";
-import { ROLES } from "@/lib/fleet";
+import {
+  registryError,
+  updateAgentDefinition,
+  type AgentWriteInput,
+} from "@/lib/agents";
 
 export const runtime = "nodejs";
 
 export async function PATCH(req: Request, ctx: { params: Promise<{ id: string }> }) {
   const { id } = await ctx.params;
-  const body = (await req.json().catch(() => null)) as {
-    slug?: string;
-    name?: string;
-    description?: string;
-    instructions?: string;
-    enabled?: boolean;
-  } | null;
-  const name = body?.name?.trim() ?? "";
-  const description = body?.description?.trim() ?? "";
-  const instructions = body?.instructions?.trim() ?? "";
-  const presetSlug = id.startsWith("preset:") ? agentSlug(id.slice(7)) : "";
-  const slug = presetSlug || agentSlug(body?.slug ?? "");
-
-  if (!slug || !name || !description || instructions.length < 40) {
-    return Response.json(
-      { error: "Name, description, and at least 40 characters of instructions are required." },
-      { status: 400 }
-    );
-  }
-
-  const data = {
-    name: name.slice(0, 64),
-    description: description.slice(0, 240),
-    instructions: instructions.slice(0, 12000),
-    enabled: body?.enabled ?? true,
-  };
-
+  const body = (await req.json().catch(() => null)) as AgentWriteInput | null;
+  if (!body) return Response.json({ error: "A JSON agent definition is required." }, { status: 400 });
   try {
-    const agent = presetSlug
-      ? await db.agentProfile.upsert({
-          where: { slug },
-          create: { slug, ...data, isDefault: Boolean(ROLES[slug]) },
-          update: data,
-        })
-      : await db.agentProfile.update({ where: { id }, data });
-    return Response.json(agent);
-  } catch {
-    return Response.json({ error: "Agent not found." }, { status: 404 });
+    return Response.json(await updateAgentDefinition(id, body));
+  } catch (error) {
+    const failure = registryError(error);
+    return Response.json({ error: failure.message }, { status: failure.status });
   }
 }
