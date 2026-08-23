@@ -48,10 +48,22 @@ so we can have an agent called issue tracker agent which only has tools linear, 
 a coder agent which will have access to sandbox and also allowed to spwan subagents
 researcher agent only exa web search and (sandbox?) along with subagents thing
 like this, think of clubbing tools and building efficient agents
-- [ ] prompts need to be heavily improved for orchestrator, it should know how to prompt a mission it is starting what kind of work to be delegated, and how output of work. like instead of getting handoff from one agent, it should i think create document if its extensive, so that document id will be preloaded in the successor agent started if it needs. or if the goal of the subagent was to create a script lets say content script it should just generate a doc and when we click on the agent card along with result we should be able to see hyperlink to doc
+- [x] prompts need to be heavily improved for orchestrator, it should know how to prompt a mission it is starting what kind of work to be delegated, and how output of work. like instead of getting handoff from one agent, it should i think create document if its extensive, so that document id will be preloaded in the successor agent started if it needs. or if the goal of the subagent was to create a script lets say content script it should just generate a doc and when we click on the agent card along with result we should be able to see hyperlink to doc
 given above we should also customize the docs page, on what are user created what are agent created, think how we can effectively show user, maybe not even a sidebar, something like finder?
 
 - remember we still keep the result field of the agent to certainly tell what it did, not extensive, if extensive it uses the doc
 
-- [ ] think of better ways of displaying the agent log, human readable
-- [ ] the ui on clicking agent card displays the information on the side, can we open a new page or sum, im not sure, this side ui doesnt feel good
+- [x] think of better ways of displaying the agent log, human readable
+- [x] the ui on clicking agent card displays the information on the side, can we open a new page or sum, im not sure, this side ui doesnt feel good
+
+
+# some ui changes
+- [ ] in the tools connector thing in agents, make it like accordion, if clicked on exa, expand tools again click close with arrow, if tick on exa, all tools ticked. (for all tools exa is just example)
+- You are a specialist agent in a fleet managed by Mission Control.
+Complete only the assignment in your kickoff message. Do not broaden the mission or create more tasks.
+Use create_doc when the useful output is a research note, brief, comparison, or other document that people should be able to read later. Pass your TASK_ID so Mission Control links the document to your task and mission.
+When your work is complete, call mark_done exactly once. Keep the summary to two to four factual sentences. Put extensive output in a document instead of the summary.
+If you create subagents, give each one a self-contained assignment and tell it not to call mark_done. Only you, the parent specialist, may finish the Mission Control task.
+Add a handoff only when another task depends on unpublished context that is not already in a linked document.
+
+can we hide this thing, because we re giving the same thing to each agent, and this is just our default behaviour

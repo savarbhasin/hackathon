@@ -54,7 +54,13 @@ export function buildKickoff(input: {
   taskTitle: string;
   taskDetail?: string | null;
   taskId: string;
-  predecessors: Array<{ role: string; title: string; context: string }>;
+  predecessors: Array<{
+    role: string;
+    title: string;
+    result: string | null;
+    handoff: string | null;
+    documents: Array<{ id: string; title: string }>;
+  }>;
 }): string {
   const parts = [
     `MISSION: ${input.missionTitle}`,
@@ -68,8 +74,20 @@ export function buildKickoff(input: {
   if (input.predecessors.length > 0) {
     parts.push("", "CONTEXT FROM COMPLETED PREDECESSORS:");
     for (const p of input.predecessors) {
-      parts.push(`← [${p.role}] ${p.title}: ${p.context}`);
+      parts.push(`← [${p.role}] ${p.title}`);
+      if (p.result) parts.push(`  Result: ${p.result}`);
+      if (p.handoff) parts.push(`  Handoff: ${p.handoff}`);
     }
+  }
+  const documents = input.predecessors.flatMap((predecessor) =>
+    predecessor.documents.map((document) => ({ ...document, predecessor: predecessor.title }))
+  );
+  if (documents.length > 0) {
+    parts.push("", "PRELOADED DOCUMENTS FROM PREDECESSORS:");
+    for (const document of documents) {
+      parts.push(`- ${document.title} (DOC_ID: ${document.id}, from: ${document.predecessor})`);
+    }
+    parts.push("Use get_doc with a DOC_ID when a document contains inputs you need for this assignment.");
   }
   parts.push("", "Begin work now. When finished, call mark_done.");
   return parts.join("\n");
@@ -77,13 +95,18 @@ export function buildKickoff(input: {
 
 async function predecessorContexts(dependsOn: string[]) {
   if (dependsOn.length === 0) return [];
-  const deps = await db.task.findMany({ where: { id: { in: dependsOn } } });
+  const deps = await db.task.findMany({
+    where: { id: { in: dependsOn } },
+    include: { documents: { select: { id: true, title: true }, orderBy: { createdAt: "asc" } } },
+  });
   return deps
     .filter((d) => d.column === "settled")
     .map((d) => ({
       role: d.role,
       title: d.title,
-      context: d.handoff ?? d.output ?? "(no handoff recorded)",
+      result: d.output,
+      handoff: d.handoff,
+      documents: d.documents,
     }));
 }
 
@@ -112,6 +135,10 @@ export async function dispatchTask(taskId: string): Promise<{ ok: boolean; reaso
   });
 
   await db.task.update({ where: { id: taskId }, data: { sessionId: session.id } });
+  await logEvent(taskId, 0, "activity.started", {
+    title: "Agent started work",
+    role: task.role,
+  });
   void runPump(taskId, session.id, [{ type: "user.message", content: kickoff }]);
   return { ok: true };
 }
@@ -155,8 +182,13 @@ async function runPump(taskId: string, sessionId: string, input: Array<Record<st
       }
     }
   } catch (err) {
-    await setColumn(taskId, "blocked", { error: String(err).slice(0, 500) });
-    await logEvent(taskId, lastSeq + 1, "pump.error", { message: String(err) });
+    const message = String(err).slice(0, 500);
+    await setColumn(taskId, "blocked", { error: message });
+    await logEvent(taskId, lastSeq + 1, "pump.error", { message });
+    await logEvent(taskId, lastSeq + 2, "activity.failed", {
+      title: "Agent run failed",
+      message,
+    });
   }
 }
 
@@ -172,13 +204,23 @@ async function handleDone(
     done.state?.requiredActions ?? done.state?.required_actions ?? [];
 
   if (status === "done" && requiredActions.length === 0) {
-    const output =
+    const fallbackOutput =
       done.state?.output?.content ??
       done.state?.output?.text ??
       null;
+    const current = await db.task.findUnique({
+      where: { id: taskId },
+      select: { output: true },
+    });
+    const recordedSummary = current?.output?.trim() ? current.output : null;
+    const output = recordedSummary ?? (fallbackOutput ? truncate(String(fallbackOutput), 8000) : null);
     await db.task.update({
       where: { id: taskId },
-      data: { column: "settled", output: output ? truncate(String(output), 8000) : null, error: null, lastSeq },
+      data: { column: "settled", output, error: null, lastSeq },
+    });
+    await logEvent(taskId, lastSeq + 1, "activity.completed", {
+      title: "Task completed",
+      summary: output,
     });
     await sweep();
     return;
@@ -186,11 +228,20 @@ async function handleDone(
 
   if (status === "cancelled") {
     await setColumn(taskId, "backlog", { error: `cancelled: ${done.state?.reason ?? ""}` });
+    await logEvent(taskId, lastSeq + 1, "activity.cancelled", {
+      title: "Agent run cancelled",
+      reason: done.state?.reason ?? null,
+    });
     return;
   }
 
   if (status === "error") {
-    await setColumn(taskId, "blocked", { error: truncate(String(done.state?.message ?? "unknown")) });
+    const message = truncate(String(done.state?.message ?? "unknown"));
+    await setColumn(taskId, "blocked", { error: message });
+    await logEvent(taskId, lastSeq + 1, "activity.failed", {
+      title: "Agent run failed",
+      message,
+    });
     return;
   }
 
@@ -222,8 +273,21 @@ async function handleDone(
     }),
   }));
   await logEvent(taskId, lastSeq + 1, "pause.pending", enriched);
-  await db.task.update({ where: { id: taskId }, data: { pendingActions: JSON.stringify(enriched) } });
-  await setColumn(taskId, enriched.some((a) => a.type === "tool.approval_required") ? "approval" : "blocked");
+  const waitingForApproval = enriched.some((action) => action.type === "tool.approval_required");
+  await logEvent(
+    taskId,
+    lastSeq + 2,
+    waitingForApproval ? "activity.waiting_approval" : "activity.waiting_response",
+    {
+      title: waitingForApproval ? "Waiting for approval" : "Waiting for a response",
+      tools: activityToolNames(enriched),
+    }
+  );
+  await db.task.update({
+    where: { id: taskId },
+    data: { pendingActions: JSON.stringify(enriched), lastSeq },
+  });
+  await setColumn(taskId, waitingForApproval ? "approval" : "blocked");
   void sessionId;
 }
 
@@ -272,6 +336,20 @@ export async function resolvePause(
   }
   if (approvals.length === 0 && responses.length === 0) return { ok: false, reason: "decision_mismatch" };
 
+  const tools = activityToolNames(pending);
+  if (decision.kind === "approve") {
+    await logEvent(taskId, task.lastSeq + 1, "activity.approval_resolved", {
+      title: decision.allow ? "Approval granted" : "Approval denied",
+      allowed: decision.allow,
+      reason: decision.reason ?? null,
+      tools,
+    });
+  } else {
+    await logEvent(taskId, task.lastSeq + 1, "activity.response_sent", {
+      title: "Response sent to agent",
+      tools,
+    });
+  }
   await db.task.update({ where: { id: taskId }, data: { pendingActions: null } });
   await setColumn(taskId, "working", { error: null });
   void runPumpResume(taskId, task.sessionId, [...approvals, ...responses]);
@@ -282,6 +360,10 @@ interface EnrichedAction {
   type: string;
   threadId?: string | null;
   calls: Array<{ id: string; threadId?: string | null; name?: string; args?: string }>;
+}
+
+function activityToolNames(actions: EnrichedAction[]): string[] {
+  return [...new Set(actions.flatMap((action) => action.calls.map((call) => call.name).filter(Boolean)))] as string[];
 }
 
 async function runPumpResume(taskId: string, sessionId: string, input: Array<Record<string, unknown>>) {
