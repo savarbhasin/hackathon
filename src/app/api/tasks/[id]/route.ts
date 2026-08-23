@@ -11,7 +11,27 @@ export async function GET(_req: Request, ctx: { params: Promise<{ id: string }> 
     include: { events: { orderBy: { seq: "desc" }, take: 60 } },
   });
   if (!task) return Response.json({ error: "not_found" }, { status: 404 });
-  return Response.json(task);
+
+  const ids = depIds(task.dependsOn);
+  const predecessors = ids.length
+    ? await db.task.findMany({
+        where: { id: { in: ids } },
+        select: { id: true, title: true, column: true },
+      })
+    : [];
+
+  return Response.json({ ...task, predecessors });
+}
+
+function depIds(raw: string): string[] {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return Array.isArray(parsed)
+      ? parsed.filter((x): x is string => typeof x === "string")
+      : [];
+  } catch {
+    return [];
+  }
 }
 
 interface Body {
