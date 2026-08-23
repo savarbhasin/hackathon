@@ -240,8 +240,8 @@ export default function DocsPage() {
             </div>
           </nav>
 
-          <div className="grid min-h-0 flex-1 grid-cols-1 lg:grid-cols-[256px_minmax(0,1fr)]">
-            <aside className="scrollbar-none order-1 max-h-48 overflow-y-auto border-b border-line bg-panel/35 p-2 lg:order-none lg:max-h-none lg:border-b-0 lg:border-r lg:p-3">
+          <div className="grid min-h-0 flex-1 grid-cols-1 lg:grid-cols-[minmax(0,1fr)_256px]">
+            <aside className="scrollbar-none order-1 max-h-48 overflow-y-auto border-b border-line bg-panel/35 p-2 lg:order-2 lg:max-h-none lg:border-b-0 lg:border-l lg:p-3">
               <div className="flex items-start justify-between gap-3 px-2 pb-3 pt-1">
                 <div>
                   <p className="font-mono text-[8px] uppercase tracking-[0.16em] text-ink-faint">{documentGroups.find((group) => group.id === activeGroup)?.shortLabel}</p>
@@ -260,7 +260,7 @@ export default function DocsPage() {
             </aside>
 
             {selected && draft ? (
-              <section className="console-grid order-2 flex min-h-0 flex-col bg-deck lg:order-none">
+              <section className="console-grid order-2 flex min-h-0 flex-col bg-deck lg:order-1">
                 <div className="flex shrink-0 items-center gap-3 border-b border-line bg-deck/95 px-4 py-3 sm:px-6">
                 <input value={draft.title} onChange={(event) => updateDraft({ title: event.target.value })} placeholder="Untitled document" className="min-w-0 flex-1 border-0 bg-transparent text-lg font-semibold tracking-[-0.025em] text-ink outline-none placeholder:text-ink-faint" />
                 <span className="shrink-0 font-mono text-[9px] uppercase tracking-[0.14em] text-ink-faint">
@@ -288,7 +288,7 @@ export default function DocsPage() {
                 {error && <p className="shrink-0 border-t border-state-blocked/30 bg-state-blocked/[0.04] px-4 py-2 text-xs text-state-blocked">{error}</p>}
               </section>
             ) : (
-              <section className="console-grid order-2 flex min-h-0 items-center bg-deck px-8 py-12 lg:order-none lg:px-16">
+              <section className="console-grid order-2 flex min-h-0 items-center bg-deck px-8 py-12 lg:order-1 lg:px-16">
                 <div className="max-w-md border-l border-line-strong pl-5">
                   <p className="font-mono text-[9px] uppercase tracking-[0.18em] text-ink-faint">{activeDocumentGroup?.shortLabel}</p>
                   <h2 className="mt-3 text-2xl font-semibold tracking-[-0.03em] text-ink">Nothing saved here yet.</h2>
