@@ -43,7 +43,8 @@ export default function DocsPage() {
       })
       .then((items) => {
         setDocuments(items);
-        setSelectedId(items[0]?.id ?? null);
+        const requestedId = new URLSearchParams(window.location.search).get("document");
+        setSelectedId(items.some((document) => document.id === requestedId) ? requestedId : items[0]?.id ?? null);
       })
       .catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)))
       .finally(() => setLoading(false));
@@ -59,10 +60,25 @@ export default function DocsPage() {
     () => [...documents].sort((a, b) => +new Date(b.updatedAt) - +new Date(a.updatedAt)),
     [documents]
   );
+  const documentGroups = useMemo(
+    () => [
+      { label: "Yours", items: sortedDocuments.filter((document) => document.authorRole === "user") },
+      { label: "Agent output", items: sortedDocuments.filter((document) => document.authorRole !== "user") },
+    ].filter((group) => group.items.length > 0),
+    [sortedDocuments]
+  );
 
   function updateDraft(next: Partial<DocumentDraft>) {
     if (!selected || !draft) return;
     setDrafts((current) => ({ ...current, [selected.id]: { ...draft, ...next } }));
+  }
+
+  function selectDocument(id: string | null) {
+    setSelectedId(id);
+    const url = new URL(window.location.href);
+    if (id) url.searchParams.set("document", id);
+    else url.searchParams.delete("document");
+    window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
   }
 
   function updateDocumentContent(id: string, base: DocumentDraft, content: string) {
@@ -85,7 +101,7 @@ export default function DocsPage() {
     }
     const document = (await response.json()) as AgentDocument;
     setDocuments((current) => [document, ...current]);
-    setSelectedId(document.id);
+    selectDocument(document.id);
   }
 
   async function deleteDocument() {
@@ -106,7 +122,7 @@ export default function DocsPage() {
     });
     if (selectedId === deleteTarget.id) {
       const nextDocument = sortedDocuments.find((document) => document.id !== deleteTarget.id);
-      setSelectedId(nextDocument?.id ?? null);
+      selectDocument(nextDocument?.id ?? null);
     }
     setDeleteTarget(null);
     setDeleting(false);
@@ -171,12 +187,19 @@ export default function DocsPage() {
       ) : (
         <div className="grid min-h-0 flex-1 grid-cols-1 md:grid-cols-[minmax(0,1fr)_270px]">
           <aside className="scrollbar-none order-1 max-h-48 overflow-y-auto border-b border-line bg-panel/60 p-3 md:order-2 md:max-h-none md:border-b-0 md:border-l">
-            <p className="px-2 pb-2 font-mono text-[8px] uppercase tracking-[0.16em] text-ink-faint">All documents</p>
-            {sortedDocuments.map((document) => (
-              <button key={document.id} type="button" onClick={() => setSelectedId(document.id)} className={`mb-1 block w-full rounded-md border px-3 py-3 text-left transition-colors ${document.id === selectedId ? "border-line-strong bg-panel-hi text-ink" : "border-transparent text-ink-soft hover:border-line hover:bg-panel-hi hover:text-ink"}`}>
-                <span className="line-clamp-2 text-xs font-semibold leading-snug">{drafts[document.id]?.title || document.title}</span>
-                <span className="mt-1.5 block font-mono text-[8px] uppercase tracking-[0.12em] text-ink-faint">{document.authorRole === "user" ? "Yours" : document.authorRole} / {new Date(document.updatedAt).toLocaleDateString()}</span>
-              </button>
+            {documentGroups.map((group) => (
+              <section key={group.label} className="mb-4 last:mb-0">
+                <div className="flex items-center px-2 pb-2 font-mono text-[8px] uppercase tracking-[0.16em] text-ink-faint">
+                  <span>{group.label}</span>
+                  <span className="ml-auto tabular-nums">{group.items.length}</span>
+                </div>
+                {group.items.map((document) => (
+                  <button key={document.id} type="button" onClick={() => selectDocument(document.id)} className={`mb-1 block w-full rounded-md border px-3 py-3 text-left transition-colors ${document.id === selectedId ? "border-line-strong bg-panel-hi text-ink" : "border-transparent text-ink-soft hover:border-line hover:bg-panel-hi hover:text-ink"}`}>
+                    <span className="line-clamp-2 text-xs font-semibold leading-snug">{drafts[document.id]?.title || document.title}</span>
+                    <span className="mt-1.5 block font-mono text-[8px] uppercase tracking-[0.12em] text-ink-faint">{document.authorRole === "user" ? "Edited by you" : roleLabel(document.authorRole)} / {new Date(document.updatedAt).toLocaleDateString()}</span>
+                  </button>
+                ))}
+              </section>
             ))}
           </aside>
 
@@ -227,4 +250,10 @@ export default function DocsPage() {
 
 function pickDraft(document: AgentDocument): DocumentDraft {
   return { title: document.title, content: document.content };
+}
+
+function roleLabel(role: string): string {
+  if (role === "squad-lead") return "Squad lead";
+  if (role === "filer") return "Issue filer";
+  return role.replace(/[_-]+/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
 }

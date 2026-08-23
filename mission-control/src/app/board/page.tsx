@@ -1,32 +1,20 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import Link from "next/link";
+import { useEffect, useState } from "react";
 
 interface Task {
   id: string;
-  missionId: string;
   title: string;
-  detail: string | null;
   role: string;
-  agentPrompt: string | null;
   column: string;
-  sessionId: string | null;
   dependsOn: string;
-  handoff: string | null;
-  output: string | null;
   error: string | null;
   pendingActions?: string | null;
-  createdAt: string;
   updatedAt: string;
-  predecessors?: Array<{ id: string; title: string; column: string }>;
 }
 
 interface Mission {
-  id: string;
-  title: string;
-  goal: string;
-  status: string;
-  createdAt: string;
   tasks: Task[];
 }
 
@@ -38,13 +26,8 @@ const COLUMNS = [
   { key: "settled", label: "Settled", rail: "bg-state-settled", text: "text-state-settled" },
 ] as const;
 
-const COLUMN_TEXT: Record<string, string> = Object.fromEntries(
-  COLUMNS.map((c) => [c.key, c.text])
-);
-
 export default function Board() {
   const [missions, setMissions] = useState<Mission[]>([]);
-  const [selected, setSelected] = useState<string | null>(null);
   const [connected, setConnected] = useState(false);
   const [now, setNow] = useState(() => Date.now());
 
@@ -129,15 +112,13 @@ export default function Board() {
                   </div>
 
                   <div className="min-h-0 flex-1 overflow-y-auto p-2.5">
-                    <StateTaskGroups tasks={tasks} now={now} onSelect={setSelected} />
+                    <StateTaskGroups tasks={tasks} now={now} />
                   </div>
                 </section>
               );
           })}
         </div>
       </div>
-
-      {selected && <Drawer taskId={selected} onClose={() => setSelected(null)} />}
     </main>
   );
 }
@@ -145,11 +126,9 @@ export default function Board() {
 function StateTaskGroups({
   tasks,
   now,
-  onSelect,
 }: {
   tasks: Task[];
   now: number;
-  onSelect: (taskId: string) => void;
 }) {
   const [today, ...olderGroups] = groupTasksByDate(tasks, now);
 
@@ -160,7 +139,7 @@ function StateTaskGroups({
   return (
     <div className="space-y-2">
       {today.tasks.map((task) => (
-        <Card key={task.id} task={task} now={now} onClick={() => onSelect(task.id)} />
+        <Card key={task.id} task={task} now={now} />
       ))}
 
       {today.tasks.length === 0 && (
@@ -168,7 +147,7 @@ function StateTaskGroups({
       )}
 
       {olderGroups.filter((group) => group.tasks.length > 0).map((group) => (
-        <TaskDateGroup key={group.label} group={group} now={now} onSelect={onSelect} />
+        <TaskDateGroup key={group.label} group={group} now={now} />
       ))}
     </div>
   );
@@ -177,19 +156,18 @@ function StateTaskGroups({
 function Card({
   task,
   now,
-  onClick,
 }: {
   task: Task;
   now: number;
-  onClick: () => void;
 }) {
   const gated = task.column === "approval";
-  const toolName = gated ? firstPendingTool(task.pendingActions) : null;
+  const blocked = task.column === "blocked";
+  const toolName = gated || blocked ? firstPendingTool(task.pendingActions) : null;
   const dependencyCount = safeDependencyCount(task.dependsOn);
 
   return (
-    <button
-      onClick={onClick}
+    <Link
+      href={`/board/tasks/${task.id}`}
       className="group block w-full rounded-md border border-line bg-panel p-3.5 text-left transition-colors focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-signal hover:border-line-strong hover:bg-panel-hi"
     >
       <div className="mb-2.5 flex items-center gap-2">
@@ -214,30 +192,33 @@ function Card({
           Approval required{toolName ? ` / ${toolName}` : ""}
         </p>
       )}
+      {blocked && (
+        <p className="mt-3 font-mono text-[8px] font-medium uppercase tracking-[0.14em] text-state-blocked">
+          Response required{toolName ? ` / ${toolName}` : ""}
+        </p>
+      )}
       {task.error && (
         <p className="mt-1 line-clamp-2 font-mono text-[10px] leading-relaxed text-state-blocked">
           {task.error}
         </p>
       )}
-    </button>
+    </Link>
   );
 }
 
 function TaskDateGroup({
   group,
   now,
-  onSelect,
 }: {
   group: { label: string; tasks: Task[] };
   now: number;
-  onSelect: (taskId: string) => void;
 }) {
   const initiallyOpen = group.label === "Yesterday" || group.label === "Past week";
   const [open, setOpen] = useState(initiallyOpen);
   const cards = (
     <div className="space-y-2">
       {group.tasks.map((task) => (
-        <Card key={task.id} task={task} now={now} onClick={() => onSelect(task.id)} />
+        <Card key={task.id} task={task} now={now} />
       ))}
     </div>
   );
@@ -255,271 +236,6 @@ function TaskDateGroup({
       </summary>
       <div className="mt-2">{cards}</div>
     </details>
-  );
-}
-
-interface TaskEvent {
-  id: string;
-  seq: number;
-  type: string;
-  payload: string;
-  createdAt: string;
-}
-
-function Drawer({ taskId, onClose }: { taskId: string; onClose: () => void }) {
-  const [task, setTask] = useState<(Task & { events: TaskEvent[] }) | null>(null);
-  const [answer, setAnswer] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [showLog, setShowLog] = useState(false);
-
-  const fetchTask = useCallback(async (): Promise<(Task & { events: TaskEvent[] }) | null> => {
-    const res = await fetch(`/api/tasks/${taskId}`);
-    return res.ok ? ((await res.json()) as Task & { events: TaskEvent[] }) : null;
-  }, [taskId]);
-
-  useEffect(() => {
-    let alive = true;
-    const poll = () =>
-      void fetchTask().then((data) => {
-        if (alive && data) setTask(data);
-      });
-    poll();
-    const t = setInterval(poll, 2000);
-    return () => {
-      alive = false;
-      clearInterval(t);
-    };
-  }, [fetchTask]);
-
-  async function act(body: Record<string, unknown>) {
-    setBusy(true);
-    try {
-      await fetch(`/api/tasks/${taskId}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      await new Promise((r) => setTimeout(r, 500));
-      const data = await fetchTask();
-      if (data) setTask(data);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
-
-  const pendingCalls = safeParseActions(task?.pendingActions);
-
-  return (
-    <div
-      className="fixed inset-0 z-50 flex justify-end bg-black/70 backdrop-blur-[2px]"
-      onClick={onClose}
-      role="dialog"
-      aria-modal="true"
-    >
-      <aside
-        className="scrollbar-none flex w-full max-w-[520px] flex-col overflow-y-auto border-l border-line bg-panel p-5 shadow-[-18px_0_50px_rgba(0,0,0,0.4)] sm:p-6"
-        onClick={(e) => e.stopPropagation()}
-      >
-        {!task ? (
-          <p className="font-mono text-xs text-ink-soft">Loading task...</p>
-        ) : (
-          <>
-            <div className="mb-3 flex items-start justify-between gap-3">
-              <div className="flex items-center gap-2 pt-0.5">
-                <span className="agent-role font-mono text-[9px] font-bold uppercase tracking-[0.12em]">
-                  {roleLabel(task.role)}
-                </span>
-              </div>
-              <button
-                onClick={onClose}
-                aria-label="Close task details"
-                  className="flex h-8 w-8 items-center justify-center rounded-md border border-line font-mono text-sm text-ink-soft transition-colors hover:border-line-strong hover:bg-panel-hi hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-signal"
-              >
-                <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" aria-hidden="true"><path d="m4 4 8 8m0-8-8 8" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" /></svg>
-              </button>
-            </div>
-
-            <h3 className="font-sans text-xl font-semibold leading-snug tracking-[-0.025em] text-ink">
-              {task.title}
-            </h3>
-
-            {task.detail && (
-              <p className="mt-4 whitespace-pre-wrap border-l border-line-strong pl-4 text-xs leading-relaxed text-ink-soft">
-                {task.detail}
-              </p>
-            )}
-            {task.agentPrompt && (
-              <details className="mt-4 rounded-md border border-line bg-deck/40 p-3">
-                <summary className="cursor-pointer font-mono text-[9px] font-semibold uppercase tracking-[0.18em] text-ink-soft">
-                  Agent instructions
-                </summary>
-                <p className="mt-2 whitespace-pre-wrap text-xs leading-relaxed text-ink-soft">
-                  {task.agentPrompt}
-                </p>
-              </details>
-            )}
-            {task.error && (
-              <p className="mt-4 rounded-md border border-state-blocked/30 bg-state-blocked/[0.04] p-3 font-mono text-xs leading-relaxed text-state-blocked">
-                {task.error}
-              </p>
-            )}
-
-            {pendingCalls.map((a) =>
-              a.calls.map((call) => (
-                <section
-                  key={call.id}
-                  className="relative mt-5 overflow-hidden rounded-md border border-state-blocked/40 bg-state-blocked/[0.035]"
-                >
-                  <span className="absolute inset-y-0 left-0 w-px bg-state-blocked" />
-                  <div className="p-3 pl-4">
-                    <p className="font-mono text-[9px] font-medium uppercase tracking-[0.16em] text-state-blocked">
-                      {a.type === "tool.approval_required" ? "Irreversible action" : "Agent question"}
-                      {call.name ? ` / ${call.name}` : ""}
-                    </p>
-                    {call.args && (
-                      <pre className="mt-3 max-h-44 overflow-y-auto whitespace-pre-wrap break-all rounded-md border border-line bg-deck p-3 font-mono text-[10px] leading-relaxed text-ink-soft">
-                        {prettyArgs(call.args)}
-                      </pre>
-                    )}
-                    {a.type === "tool.approval_required" ? (
-                      <div className="mt-3 grid grid-cols-2 gap-2">
-                        <button
-                          disabled={busy}
-                          onClick={() => act({ action: "approve", allow: true })}
-                          className="rounded-md bg-ink px-3 py-2.5 font-mono text-[10px] font-medium uppercase tracking-[0.15em] text-deck transition-colors hover:bg-white disabled:opacity-40 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-signal"
-                        >
-                          Approve
-                        </button>
-                        <button
-                          disabled={busy}
-                          onClick={() => act({ action: "approve", allow: false, reason: "denied from board" })}
-                          className="rounded-md border border-line-strong bg-transparent px-3 py-2.5 font-mono text-[10px] font-medium uppercase tracking-[0.15em] text-ink-soft transition-colors hover:border-ink-faint hover:text-ink disabled:opacity-40 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-signal"
-                        >
-                          Deny
-                        </button>
-                      </div>
-                    ) : (
-                      <form
-                        className="mt-3 flex gap-2"
-                        onSubmit={(e) => {
-                          e.preventDefault();
-                          if (!answer.trim()) return;
-                          void act({ action: "answer", content: answer.trim() });
-                          setAnswer("");
-                        }}
-                      >
-                        <input
-                          value={answer}
-                          onChange={(e) => setAnswer(e.target.value)}
-                          placeholder="Your answer"
-                          className="min-w-0 flex-1 rounded-md border border-line-strong bg-deck px-2.5 py-2.5 text-xs text-ink outline-none placeholder:text-ink-faint focus:border-signal"
-                        />
-                        <button
-                          disabled={busy || !answer.trim()}
-                          className="rounded-md bg-signal px-3 py-2.5 font-mono text-[10px] font-medium uppercase tracking-[0.15em] text-deck transition-colors hover:brightness-110 disabled:opacity-40 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-signal"
-                        >
-                          Reply
-                        </button>
-                      </form>
-                    )}
-                  </div>
-                </section>
-              ))
-            )}
-
-            {task.column === "backlog" && (
-              <button
-                disabled={busy}
-                onClick={() => act({ action: "dispatch" })}
-                className="mt-5 rounded-md bg-signal px-3 py-2.5 font-mono text-[10px] font-medium uppercase tracking-[0.15em] text-deck transition-colors hover:brightness-110 disabled:opacity-40 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-signal"
-              >
-                Dispatch now
-              </button>
-            )}
-
-            {(task.handoff || task.output) && task.column === "settled" && (
-              <div className="mt-5 rounded-md border border-line bg-deck/40 p-4">
-                <p className="font-mono text-[8px] font-medium uppercase tracking-[0.16em] text-ink-faint">
-                  Result
-                </p>
-                <p className="mt-1.5 whitespace-pre-wrap text-xs leading-relaxed text-ink-soft">
-                  {task.handoff ?? task.output}
-                </p>
-              </div>
-            )}
-
-            {task.predecessors && task.predecessors.length > 0 && (
-              <section className="mt-6">
-                <h4 className="mb-1.5 font-mono text-[9px] font-semibold uppercase tracking-[0.22em] text-ink-faint">
-                  Predecessors
-                </h4>
-                <ul className="space-y-1">
-                  {task.predecessors.map((p) => (
-                    <li
-                      key={p.id}
-                      className="flex items-center gap-2.5 rounded-md border border-line bg-deck/40 px-3 py-2"
-                    >
-                      <span
-                        className={`shrink-0 font-mono text-[9px] font-semibold uppercase tracking-[0.14em] ${
-                          COLUMN_TEXT[p.column] ?? "text-ink-soft"
-                        }`}
-                      >
-                        {p.column}
-                      </span>
-                      <span className="truncate text-xs font-medium text-ink">{p.title}</span>
-                    </li>
-                  ))}
-                </ul>
-              </section>
-            )}
-
-            <div className="mt-7 border-t border-line">
-              <button
-                onClick={() => setShowLog((v) => !v)}
-                aria-expanded={showLog}
-                className="flex w-full items-center gap-2 px-1 py-3 font-mono text-[8px] font-medium uppercase tracking-[0.2em] text-ink-faint transition-colors hover:text-ink focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-signal"
-              >
-                <span
-                  aria-hidden="true"
-                  className={`inline-block transition-transform duration-100 ${showLog ? "rotate-90" : ""}`}
-                >
-                  ›
-                </span>
-                Event log
-                <span className="ml-auto tabular-nums">{task.events.length}</span>
-              </button>
-              {showLog && (
-                <div className="pb-8">
-                  {[...task.events].reverse().map((e) => (
-                    <details key={e.id} className="group border-t border-line/60 first:border-t-0">
-                      <summary className="cursor-pointer list-none px-1 py-1.5 font-mono text-[10px] text-ink-soft transition-colors hover:bg-panel-hi hover:text-ink focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-signal">
-                        <span className="tabular-nums text-ink-faint">
-                          {new Date(e.createdAt).toLocaleTimeString()}{" "}
-                        </span>
-                        <span className="mr-1 text-[8px] uppercase tracking-[0.1em] text-ink-faint">{eventLabel(e.type)}</span>
-                        {e.type}
-                      </summary>
-                      <pre className="mx-1 mb-1.5 max-h-48 overflow-y-auto whitespace-pre-wrap break-all rounded-md border border-line bg-deck p-2.5 font-mono text-[10px] leading-relaxed text-ink-soft">
-                        {prettyPayload(e.payload)}
-                      </pre>
-                    </details>
-                  ))}
-                  {task.events.length === 0 && (
-                    <p className="px-1 py-2 font-mono text-[10px] text-ink-faint">No events yet</p>
-                  )}
-                </div>
-              )}
-            </div>
-          </>
-        )}
-      </aside>
-    </div>
   );
 }
 
@@ -598,33 +314,5 @@ function groupTasksByDate(tasks: Task[], now: number): Array<{ label: string; ta
 }
 
 interface PendingAction {
-  type: string;
-  calls: Array<{ id: string; name?: string; args?: string }>;
-}
-
-function prettyArgs(args?: string): string {
-  try {
-    return JSON.stringify(JSON.parse(args ?? "{}"), null, 2);
-  } catch {
-    return args ?? "";
-  }
-}
-
-function prettyPayload(payload: string): string {
-  try {
-    const obj = JSON.parse(payload);
-    if (typeof obj === "string") return obj.slice(0, 1500);
-    return JSON.stringify(obj, null, 2).slice(0, 1500);
-  } catch {
-    return payload.slice(0, 1500);
-  }
-}
-
-function eventLabel(type: string): string {
-  if (type.includes("approval") || type === "pause.pending") return "Gate";
-  if (type.startsWith("tool")) return "Tool";
-  if (type.startsWith("thread")) return "Run";
-  if (type === "sandbox.created") return "Box";
-  if (type === "turn.done") return "Done";
-  return "Event";
+  calls: Array<{ name?: string }>;
 }

@@ -48,10 +48,10 @@ function buildServer(): McpServer {
           return false;
         }
       });
-      const storedHandoff = hasSuccessor ? handoff : null;
+      const storedHandoff = hasSuccessor ? handoff?.trim() || null : null;
       const task = await db.task.update({
         where: { id: task_id },
-        data: { handoff: storedHandoff, output: summary },
+        data: { handoff: storedHandoff, output: summary.trim() },
       });
       await db.taskEvent.create({
         data: {
@@ -121,6 +121,14 @@ function buildServer(): McpServer {
           taskId: task.id,
         },
       });
+      await db.taskEvent.create({
+        data: {
+          taskId: task.id,
+          seq: task.lastSeq + 1,
+          type: "activity.document_created",
+          payload: JSON.stringify({ title: `Created document: ${doc.title}`, documentId: doc.id }),
+        },
+      });
       return text(`Document created. id=${doc.id} title="${doc.title}"`);
     }
   );
@@ -141,6 +149,15 @@ function buildServer(): McpServer {
       const doc = await db.document.update({
         where: { id: doc_id },
         data: { title, content },
+      });
+      const task = await db.task.findUnique({ where: { id: task_id }, select: { lastSeq: true } });
+      await db.taskEvent.create({
+        data: {
+          taskId: task_id,
+          seq: (task?.lastSeq ?? 0) + 1,
+          type: "activity.document_updated",
+          payload: JSON.stringify({ title: `Updated document: ${doc.title}`, documentId: doc.id }),
+        },
       });
       return text(`Document updated. id=${doc.id} title="${doc.title}"`);
     }
