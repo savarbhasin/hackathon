@@ -24,6 +24,27 @@ interface PendingAction {
   toolCalls: Array<{ id: string; sourceEventId?: string }>;
 }
 
+interface PumpToolCall {
+  id: string;
+  toolInfo?: { name?: string };
+  function?: { name?: string; arguments?: string };
+}
+
+interface PumpEvent extends Record<string, unknown> {
+  id: string;
+  type: string;
+  turnId?: string;
+  toolCalls?: PumpToolCall[];
+  state?: {
+    status?: string;
+    requiredActions?: PendingAction[];
+    required_actions?: PendingAction[];
+    output?: { content?: string; text?: string } | null;
+    reason?: string;
+    message?: string;
+  };
+}
+
 async function setColumn(taskId: string, column: Column, extra: Partial<{ turnId: string; error: string | null }> = {}) {
   await db.task.update({ where: { id: taskId }, data: { column, ...extra } });
 }
@@ -73,13 +94,14 @@ export async function dispatchTask(taskId: string): Promise<{ ok: boolean; reaso
   if (task.sessionId) return { ok: false, reason: "already_dispatched" };
   if (task.column !== "backlog") return { ok: false, reason: `column=${task.column}` };
 
+  const role = getRole(task.role, task.agentPrompt);
+
   const claim = await db.task.updateMany({
     where: { id: taskId, sessionId: null },
     data: { column: "working", pendingActions: null },
   });
   if (claim.count === 0) return { ok: false, reason: "lost_race" };
 
-  const role = getRole(task.role);
   const { data: session } = await tf().sessions.create({ agent: { spec: role.spec as never } });
 
   const dependsOn = JSON.parse(task.dependsOn || "[]") as string[];
@@ -101,12 +123,12 @@ async function runPump(taskId: string, sessionId: string, input: Array<Record<st
   let lastSeq = 0;
   try {
     const stream = await tf().sessions.createTurnStream(sessionId, { input: input as never });
-    const events = new Map<string, Record<string, unknown>>();
+    const events = new Map<string, PumpEvent>();
 
     for await (const { data: event, id } of stream.withMetadata()) {
       if (id != null) lastSeq = Number(id);
-      const ev = event as Record<string, any>;
-      const type = ev.type as string;
+      const ev = event as unknown as PumpEvent;
+      const type = ev.type;
 
       if (isEventDelta(event)) {
         const base = events.get(ev.id);
@@ -144,8 +166,8 @@ async function runPump(taskId: string, sessionId: string, input: Array<Record<st
 async function handleDone(
   taskId: string,
   sessionId: string,
-  done: Record<string, any>,
-  events: Map<string, Record<string, unknown>>,
+  done: PumpEvent,
+  events: Map<string, PumpEvent>,
   lastSeq: number
 ) {
   const status = done.state?.status;
@@ -180,7 +202,7 @@ async function handleDone(
     ...ra,
     calls: ra.toolCalls.map((ref) => {
       const msg = ref.sourceEventId ? events.get(ref.sourceEventId) : undefined;
-      const call = (msg?.toolCalls as Array<Record<string, any>> | undefined)?.find((tc) => tc.id === ref.id);
+      const call = msg?.toolCalls?.find((toolCall) => toolCall.id === ref.id);
       let name: string | undefined = call ? (call.toolInfo?.name ?? call.function?.name) : undefined;
       let args = call?.function?.arguments;
       if ((!name || name === "call_tool") && args) {

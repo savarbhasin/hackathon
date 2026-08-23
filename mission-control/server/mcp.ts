@@ -5,8 +5,8 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { z } from "zod";
 import { Cron } from "croner";
 import { db } from "../src/lib/db";
-import { tf } from "../src/lib/tf";
 import { ROLES } from "../src/lib/fleet";
+import { getAgentDefinition, listAgentDefinitions } from "../src/lib/agents";
 import { dispatchTask, getBoard, sweep } from "../src/lib/engine";
 import { orchestratorSay } from "../src/lib/orchestrator";
 
@@ -33,15 +33,40 @@ function buildServer(): McpServer {
         .describe("Key findings/decisions/artifacts downstream tasks need to continue without repeating your work"),
     },
     async ({ task_id, summary, handoff }) => {
+      const existing = await db.task.findUnique({ where: { id: task_id } });
+      if (!existing) return text(`Unknown task_id ${task_id}`);
+      const possibleSuccessors = handoff
+        ? await db.task.findMany({
+            where: { missionId: existing.missionId },
+            select: { dependsOn: true },
+          })
+        : [];
+      const hasSuccessor = possibleSuccessors.some((candidate) => {
+        try {
+          const dependencies = JSON.parse(candidate.dependsOn) as unknown;
+          return Array.isArray(dependencies) && dependencies.includes(task_id);
+        } catch {
+          return false;
+        }
+      });
+      const storedHandoff = hasSuccessor ? handoff : null;
       const task = await db.task.update({
         where: { id: task_id },
-        data: { handoff: handoff ?? null, output: summary },
-      }).catch(() => null);
-      if (!task) return text(`Unknown task_id ${task_id}`);
-      await db.taskEvent.create({
-        data: { taskId: task_id, seq: 900000, type: "specialist.mark_done", payload: JSON.stringify({ summary, handoff }) },
+        data: { handoff: storedHandoff, output: summary },
       });
-      return text(`Recorded. Task ${task.title} will settle when your turn ends.`);
+      await db.taskEvent.create({
+        data: {
+          taskId: task_id,
+          seq: 900000,
+          type: "specialist.mark_done",
+          payload: JSON.stringify({ summary, handoff: storedHandoff }),
+        },
+      });
+      return text(
+        `Recorded. Task ${task.title} will settle when your turn ends.${
+          handoff && !hasSuccessor ? " No handoff was stored because no task depends on this one." : ""
+        }`
+      );
     }
   );
 
@@ -50,6 +75,18 @@ function buildServer(): McpServer {
     "Current state of all missions and tasks on the kanban board.",
     {},
     async () => text(await getBoard())
+  );
+
+  server.tool(
+    "list_agents",
+    "List the reusable specialist agents available for tasks, including user-created agents.",
+    {},
+    async () =>
+      text(
+        (await listAgentDefinitions())
+          .filter((agent) => agent.enabled)
+          .map(({ slug, name, description, isDefault }) => ({ slug, name, description, isDefault }))
+      )
   );
 
   server.tool(
@@ -62,6 +99,99 @@ function buildServer(): McpServer {
         include: { events: { orderBy: { seq: "desc" }, take: 20 } },
       });
       return text(task ?? `No task ${task_id}`);
+    }
+  );
+
+  server.tool(
+    "create_doc",
+    "Create a Markdown document linked to your assigned task and its mission.",
+    {
+      task_id: z.string().describe("The TASK_ID given in your assignment"),
+      title: z.string().min(1).max(160),
+      content: z.string().min(1).describe("The complete document in Markdown"),
+    },
+    async ({ task_id, title, content }) => {
+      const task = await db.task.findUnique({ where: { id: task_id } });
+      if (!task) return text(`Unknown task_id ${task_id}`);
+      const doc = await db.document.create({
+        data: {
+          title,
+          content,
+          authorRole: task.role,
+          missionId: task.missionId,
+          taskId: task.id,
+        },
+      });
+      return text(`Document created. id=${doc.id} title="${doc.title}"`);
+    }
+  );
+
+  server.tool(
+    "update_doc",
+    "Replace the title or Markdown content of a document created by your task.",
+    {
+      task_id: z.string().describe("The TASK_ID given in your assignment"),
+      doc_id: z.string(),
+      title: z.string().min(1).max(160).optional(),
+      content: z.string().min(1).optional(),
+    },
+    async ({ task_id, doc_id, title, content }) => {
+      if (title == null && content == null) return text("Provide title or content.");
+      const existing = await db.document.findFirst({ where: { id: doc_id, taskId: task_id } });
+      if (!existing) return text(`No document ${doc_id} belongs to task ${task_id}`);
+      const doc = await db.document.update({
+        where: { id: doc_id },
+        data: { title, content },
+      });
+      return text(`Document updated. id=${doc.id} title="${doc.title}"`);
+    }
+  );
+
+  server.tool(
+    "save_document",
+    "Create or update a Markdown document by title (orchestrator-level, not tied to a task).",
+    {
+      title: z.string().min(1).max(160),
+      content: z.string().min(1).describe("The complete document in Markdown"),
+    },
+    async ({ title, content }) => {
+      const existing = await db.document.findFirst({ where: { title } });
+      const doc = existing
+        ? await db.document.update({ where: { id: existing.id }, data: { content } })
+        : await db.document.create({ data: { title, content, authorRole: "squad-lead" } });
+      return text(`Document saved. id=${doc.id} title="${doc.title}"`);
+    }
+  );
+
+  server.tool(
+    "list_docs",
+    "List saved agent documents with their mission and task names.",
+    {},
+    async () =>
+      text(
+        await db.document.findMany({
+          include: {
+            mission: { select: { title: true } },
+            task: { select: { title: true, role: true } },
+          },
+          orderBy: { updatedAt: "desc" },
+        })
+      )
+  );
+
+  server.tool(
+    "get_doc",
+    "Read one saved agent document.",
+    { doc_id: z.string() },
+    async ({ doc_id }) => {
+      const doc = await db.document.findUnique({
+        where: { id: doc_id },
+        include: {
+          mission: { select: { title: true } },
+          task: { select: { title: true, role: true } },
+        },
+      });
+      return text(doc ?? `No document ${doc_id}`);
     }
   );
 
@@ -82,10 +212,22 @@ function buildServer(): McpServer {
       mission_id: z.string(),
       title: z.string(),
       detail: z.string().describe("Self-contained instructions for the assigned agent"),
-      role: z.enum(["researcher", "writer", "filer"]).describe(`Available roles: ${Object.keys(ROLES).join(", ")}`),
+      role: z
+        .string()
+        .min(1)
+        .describe(`Preset roles: ${Object.keys(ROLES).join(", ")}. Other short role names are allowed with agent_prompt.`),
+      agent_prompt: z
+        .string()
+        .min(20)
+        .optional()
+        .describe("System instructions for a custom role, or extra specialization for a preset role"),
       depends_on: z.array(z.string()).default([]).describe("Task ids that must finish before this one starts"),
     },
-    async ({ mission_id, title, detail, role, depends_on }) => {
+    async ({ mission_id, title, detail, role, agent_prompt, depends_on }) => {
+      const profile = await getAgentDefinition(role);
+      if (!profile?.enabled && !agent_prompt) {
+        return text(`Unknown or disabled agent "${role}". Use list_agents or pass agent_prompt.`);
+      }
       const count = await db.task.count({ where: { missionId: mission_id } });
       const task = await db.task.create({
         data: {
@@ -93,6 +235,7 @@ function buildServer(): McpServer {
           title,
           detail,
           role,
+          agentPrompt: agent_prompt ?? profile?.instructions ?? null,
           dependsOn: JSON.stringify(depends_on),
           position: count,
         },
@@ -153,8 +296,17 @@ function registerJob(id: string, cronExpr: string, prompt: string) {
   jobs.get(id)?.stop();
   const job = new Cron(cronExpr).schedule(() => {
     void db.schedule
-      .update({ where: { id }, data: { lastRunAt: new Date() } })
-      .then(() => orchestratorSay(prompt))
+      .findUnique({ where: { id } })
+      .then((schedule) => {
+        if (!schedule?.enabled) {
+          jobs.get(id)?.stop();
+          jobs.delete(id);
+          return null;
+        }
+        return db.schedule
+          .update({ where: { id }, data: { lastRunAt: new Date() } })
+          .then(() => orchestratorSay(prompt));
+      })
       .catch((e) => console.error("[schedule]", id, e));
   });
   jobs.set(id, job);
