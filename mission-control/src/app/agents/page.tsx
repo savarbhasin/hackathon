@@ -289,13 +289,16 @@ export default function AgentsPage() {
                       </svg>
                     </div>
                   </FieldLabel>
-                  <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-1 xl:grid-cols-2">
-                    <CapabilityToggle label="Sandbox"
-                      description={catalog.capabilities.sandbox ? "Files, commands, and code execution" : "Unavailable in TrueForge"}
-                      checked={draft.sandboxEnabled} disabled={!catalog.capabilities.sandbox}
-                      onChange={(checked) => updateDraft({ sandboxEnabled: checked })} />
-                    <CapabilityToggle label="Dynamic subagents" description="Can split work into parallel specialist threads"
-                      checked={draft.subagentsEnabled} onChange={(checked) => updateDraft({ subagentsEnabled: checked })} />
+                  <div>
+                    <p className="mb-2 font-mono text-[9px] uppercase tracking-[0.13em] text-ink-faint">Capabilities</p>
+                    <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-1 xl:grid-cols-2">
+                      <CapabilityToggle label="Sandbox"
+                        description={catalog.capabilities.sandbox ? "Files, commands, and code execution" : "Unavailable in TrueForge"}
+                        checked={draft.sandboxEnabled} disabled={!catalog.capabilities.sandbox}
+                        onChange={(checked) => updateDraft({ sandboxEnabled: checked })} />
+                      <CapabilityToggle label="Dynamic subagents" description="Can split work into parallel specialist threads"
+                        checked={draft.subagentsEnabled} onChange={(checked) => updateDraft({ subagentsEnabled: checked })} />
+                    </div>
                   </div>
                 </div>
               </EditorSection>
