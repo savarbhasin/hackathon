@@ -191,7 +191,7 @@ select:not(:disabled) {
   --baseBgHover: #1a202a;
   --baseBgActive: #252d38;
   --baseText: var(--color-ink);
-  --baseTextContrast: var(--color-deck);
+  --baseTextContrast: var(--color-ink);
   --baseBorder: var(--color-line);
   --baseBorderHover: var(--color-ink-soft);
   --baseSolid: var(--color-ink-soft);
