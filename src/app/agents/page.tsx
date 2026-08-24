@@ -36,7 +36,7 @@ interface AgentCatalog {
 }
 interface DraftAgent extends Omit<AgentProfile, "id" | "updatedAt"> { id: string | null }
 
-const CHEAP_MODEL = "openai/gpt-5-4-mini";
+const CHEAP_MODEL = "openai/gpt-5-6-luna";
 const CORE_CONNECTOR = "mission-control";
 const CORE_TOOLS = ["mark_done", "create_doc", "update_doc", "get_doc"];
 const EMPTY_CATALOG: AgentCatalog = { agents: [], connectors: [], models: [], capabilities: { sandbox: false } };
