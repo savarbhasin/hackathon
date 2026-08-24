@@ -8,6 +8,7 @@ interface Task {
   title: string;
   detail: string | null;
   role: string;
+  agentPrompt: string | null;
   column: string;
   sessionId: string | null;
   dependsOn: string;
@@ -15,6 +16,9 @@ interface Task {
   output: string | null;
   error: string | null;
   pendingActions?: string | null;
+  createdAt: string;
+  updatedAt: string;
+  predecessors?: Array<{ id: string; title: string; column: string }>;
 }
 
 interface Mission {
@@ -22,27 +26,27 @@ interface Mission {
   title: string;
   goal: string;
   status: string;
+  createdAt: string;
   tasks: Task[];
 }
 
 const COLUMNS = [
-  { key: "backlog", label: "Backlog", accent: "text-neutral-400" },
-  { key: "working", label: "Working", accent: "text-sky-400" },
-  { key: "blocked", label: "Blocked", accent: "text-amber-400" },
-  { key: "approval", label: "⚠ Licence Required", accent: "text-red-400" },
-  { key: "settled", label: "Settled", accent: "text-emerald-400" },
+  { key: "backlog", label: "Backlog", rail: "bg-state-backlog", text: "text-state-backlog" },
+  { key: "working", label: "Working", rail: "bg-state-working", text: "text-state-working" },
+  { key: "blocked", label: "Blocked", rail: "bg-state-blocked", text: "text-state-blocked" },
+  { key: "approval", label: "Needs approval", rail: "bg-state-approval", text: "text-state-approval" },
+  { key: "settled", label: "Settled", rail: "bg-state-settled", text: "text-state-settled" },
 ] as const;
 
-const ROLE_COLORS: Record<string, string> = {
-  researcher: "border-cyan-800 bg-cyan-950/60 text-cyan-300",
-  writer: "border-violet-800 bg-violet-950/60 text-violet-300",
-  filer: "border-pink-800 bg-pink-950/60 text-pink-300",
-};
+const COLUMN_TEXT: Record<string, string> = Object.fromEntries(
+  COLUMNS.map((c) => [c.key, c.text])
+);
 
 export default function Board() {
   const [missions, setMissions] = useState<Mission[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [connected, setConnected] = useState(false);
+  const [now, setNow] = useState(() => Date.now());
 
   useEffect(() => {
     const es = new EventSource("/api/stream");
@@ -59,53 +63,78 @@ export default function Board() {
     return () => es.close();
   }, []);
 
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 30_000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  const activeCount = missions.reduce(
+    (count, mission) => count + mission.tasks.filter((task) => task.column === "working").length,
+    0
+  );
+
   return (
-    <main className="flex h-dvh flex-col bg-neutral-950 text-neutral-100">
-      <header className="flex items-center justify-between border-b border-neutral-800 px-6 py-3">
-        <div className="flex items-center gap-3">
-          <a href="/" className="text-sm text-neutral-400 transition hover:text-white">
-            ← Chat
-          </a>
-          <span className="text-lg font-semibold tracking-tight">Fleet Board</span>
+    <main className="flex h-full flex-col bg-deck">
+      <header className="flex h-16 shrink-0 items-center gap-5 border-b border-line bg-deck px-5 sm:px-6">
+        <div>
+          <p className="font-mono text-[8px] uppercase tracking-[0.2em] text-ink-faint">Live operations</p>
+          <h1 className="mt-0.5 text-[15px] font-semibold tracking-[-0.02em] text-ink">Agent fleet</h1>
         </div>
-        <span
-          className={`rounded-full border px-2 py-0.5 text-[10px] uppercase tracking-widest ${
-            connected
-              ? "border-emerald-700 bg-emerald-950 text-emerald-400"
-              : "border-red-800 bg-red-950 text-red-400"
-          }`}
-        >
-          {connected ? "live" : "reconnecting"}
-        </span>
+        <div className="hidden items-center gap-5 border-l border-line pl-5 font-mono text-[9px] uppercase tracking-[0.12em] text-ink-faint sm:flex">
+          <span><b className="font-medium text-state-working">{activeCount}</b> running</span>
+        </div>
+        <div className="ml-auto flex items-center gap-2">
+          <span className={`hidden items-center gap-1.5 font-mono text-[9px] uppercase tracking-[0.16em] sm:flex ${connected ? "text-state-settled" : "text-state-blocked"}`}>
+            <span className={`h-1.5 w-1.5 rounded-full ${connected ? "bg-state-settled led-live" : "bg-signal"}`} />
+            {connected ? "Live" : "Reconnecting"}
+          </span>
+        </div>
       </header>
 
-      <div className="grid flex-1 grid-cols-5 gap-3 overflow-hidden p-3">
-        {COLUMNS.map((col) => {
-          const tasks = missions.flatMap((m) =>
-            m.tasks.filter((t) => t.column === col.key).map((t) => ({ task: t, mission: m }))
-          );
-          return (
-            <section
-              key={col.key}
-              className="flex min-h-0 flex-col rounded-xl border border-neutral-800 bg-neutral-900/40"
-            >
-              <h2 className={`flex items-center justify-between px-3 py-2.5 text-xs font-semibold uppercase tracking-widest ${col.accent}`}>
-                {col.label}
-                <span className="rounded-full bg-neutral-800 px-1.5 text-[10px] text-neutral-400">
-                  {tasks.length}
-                </span>
-              </h2>
-              <div className="min-h-0 flex-1 space-y-2 overflow-y-auto px-2 pb-2">
-                {tasks.map(({ task, mission }) => (
-                  <Card key={task.id} task={task} missionTitle={mission.title} onClick={() => setSelected(task.id)} />
-                ))}
-                {tasks.length === 0 && (
-                  <p className="px-1 py-4 text-center text-[11px] text-neutral-700">empty</p>
-                )}
-              </div>
-            </section>
-          );
-        })}
+      <div className="console-grid min-h-0 flex-1 overflow-x-auto overflow-y-hidden">
+        <div className="flex h-full min-w-[1080px]">
+          {COLUMNS.map((col) => {
+              const tasks = missions.flatMap((m) =>
+                m.tasks.filter((t) => t.column === col.key)
+              );
+              const isGate = col.key === "approval";
+              const pausedStateHint = pausedStateHintFor(col.key);
+              return (
+                <section
+                  key={col.key}
+                  className={`flex min-h-0 min-w-0 flex-1 flex-col ${isGate ? "bg-state-blocked/[0.025]" : ""} border-l border-line first:border-l-0`}
+                >
+                  <div className={`h-px shrink-0 opacity-80 ${col.rail}`} />
+                  <div
+                    className="group/state relative flex h-11 shrink-0 items-center gap-2 border-b border-line bg-deck/70 px-3 backdrop-blur-sm"
+                    tabIndex={pausedStateHint ? 0 : undefined}
+                  >
+                    <span aria-hidden="true" className={`h-1.5 w-1.5 rounded-full ${col.rail}`} />
+                    <h2
+                      className={`truncate whitespace-nowrap font-mono text-[9px] font-medium uppercase tracking-[0.16em] ${col.text}`}
+                    >
+                      {col.label}
+                    </h2>
+                    <span className="ml-auto font-mono text-[9px] tabular-nums text-ink-faint">
+                      {tasks.length}
+                    </span>
+                    {pausedStateHint && (
+                      <p
+                        role="tooltip"
+                        className="pointer-events-none absolute left-2 top-full z-30 w-64 translate-y-1 rounded-md border border-line-strong bg-panel p-3 text-[11px] leading-relaxed text-ink-soft opacity-0 shadow-2xl transition-opacity group-hover/state:opacity-100 group-focus/state:opacity-100"
+                      >
+                        {pausedStateHint}
+                      </p>
+                    )}
+                  </div>
+
+                  <div className="min-h-0 flex-1 overflow-y-auto p-2.5">
+                    <StateTaskGroups tasks={tasks} now={now} onSelect={setSelected} />
+                  </div>
+                </section>
+              );
+          })}
+        </div>
       </div>
 
       {selected && <Drawer taskId={selected} onClose={() => setSelected(null)} />}
@@ -113,35 +142,119 @@ export default function Board() {
   );
 }
 
-function Card({ task, missionTitle, onClick }: { task: Task; missionTitle: string; onClick: () => void }) {
+function StateTaskGroups({
+  tasks,
+  now,
+  onSelect,
+}: {
+  tasks: Task[];
+  now: number;
+  onSelect: (taskId: string) => void;
+}) {
+  const [today, ...olderGroups] = groupTasksByDate(tasks, now);
+
+  if (tasks.length === 0) {
+    return <p className="py-6 text-center font-mono text-[9px] uppercase tracking-[0.14em] text-ink-faint">Empty</p>;
+  }
+
+  return (
+    <div className="space-y-2">
+      {today.tasks.map((task) => (
+        <Card key={task.id} task={task} now={now} onClick={() => onSelect(task.id)} />
+      ))}
+
+      {today.tasks.length === 0 && (
+        <p className="py-3 text-center font-mono text-[8px] uppercase tracking-[0.14em] text-ink-faint">No tasks today</p>
+      )}
+
+      {olderGroups.filter((group) => group.tasks.length > 0).map((group) => (
+        <TaskDateGroup key={group.label} group={group} now={now} onSelect={onSelect} />
+      ))}
+    </div>
+  );
+}
+
+function Card({
+  task,
+  now,
+  onClick,
+}: {
+  task: Task;
+  now: number;
+  onClick: () => void;
+}) {
+  const gated = task.column === "approval";
+  const toolName = gated ? firstPendingTool(task.pendingActions) : null;
+  const dependencyCount = safeDependencyCount(task.dependsOn);
+
   return (
     <button
       onClick={onClick}
-      className={`block w-full rounded-lg border p-3 text-left transition hover:border-neutral-500 ${
-        task.column === "approval"
-          ? "border-red-900 bg-red-950/30"
-          : "border-neutral-800 bg-neutral-900"
-      }`}
+      className="group block w-full rounded-md border border-line bg-panel p-3.5 text-left transition-colors focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-signal hover:border-line-strong hover:bg-panel-hi"
     >
-      <div className="mb-1.5 flex items-center gap-1.5">
-        <span className={`rounded border px-1.5 py-0.5 font-mono text-[10px] ${ROLE_COLORS[task.role] ?? "border-neutral-700 bg-neutral-800 text-neutral-300"}`}>
-          {task.role}
+      <div className="mb-2.5 flex items-center gap-2">
+        <span className="agent-role font-mono text-[9px] font-bold uppercase tracking-[0.12em]">
+          {roleLabel(task.role)}
         </span>
-        {task.dependsOn !== "[]" && (
-          <span className="font-mono text-[10px] text-neutral-600" title={task.dependsOn}>
-            ⛓ deps
-          </span>
-        )}
+        <span className="ml-auto font-mono text-[8px] uppercase tracking-[0.1em] text-ink-faint">
+          {relativeTime(task.updatedAt, now)}
+        </span>
       </div>
-      <p className="text-xs font-medium leading-snug text-neutral-200">{task.title}</p>
-      <p className="mt-1 truncate text-[10px] text-neutral-600">{missionTitle}</p>
-      {(task.handoff || task.output) && task.column === "settled" && (
-        <p className="mt-1.5 line-clamp-2 text-[10px] italic text-emerald-500/80">
-          ↳ {task.handoff ?? task.output}
+
+      <p className="font-sans text-[13px] font-medium leading-snug text-ink">{task.title}</p>
+
+      {dependencyCount > 0 && (
+        <p className="mt-3 border-t border-line/70 pt-2.5 font-mono text-[8px] uppercase tracking-[0.1em] text-ink-faint">
+          {dependencyCount} {dependencyCount === 1 ? "dependency" : "dependencies"}
         </p>
       )}
-      {task.error && <p className="mt-1 line-clamp-2 text-[10px] text-amber-600">{task.error}</p>}
+
+      {gated && (
+        <p className="mt-3 font-mono text-[8px] font-medium uppercase tracking-[0.14em] text-state-approval">
+          Approval required{toolName ? ` / ${toolName}` : ""}
+        </p>
+      )}
+      {task.error && (
+        <p className="mt-1 line-clamp-2 font-mono text-[10px] leading-relaxed text-state-blocked">
+          {task.error}
+        </p>
+      )}
     </button>
+  );
+}
+
+function TaskDateGroup({
+  group,
+  now,
+  onSelect,
+}: {
+  group: { label: string; tasks: Task[] };
+  now: number;
+  onSelect: (taskId: string) => void;
+}) {
+  const initiallyOpen = group.label === "Yesterday" || group.label === "Past week";
+  const [open, setOpen] = useState(initiallyOpen);
+  const cards = (
+    <div className="space-y-2">
+      {group.tasks.map((task) => (
+        <Card key={task.id} task={task} now={now} onClick={() => onSelect(task.id)} />
+      ))}
+    </div>
+  );
+
+  return (
+    <details
+      open={open}
+      onToggle={(event) => setOpen((event.currentTarget as HTMLDetailsElement).open)}
+      className="group mt-3"
+    >
+      <summary className="flex h-7 cursor-pointer list-none items-center gap-1.5 px-1 font-mono text-[8px] font-medium uppercase tracking-[0.14em] text-ink-faint transition-colors hover:text-ink [&::-webkit-details-marker]:hidden">
+        <svg viewBox="0 0 12 12" className="h-3 w-3 transition-transform group-open:rotate-90" aria-hidden="true"><path d="m4.5 2.5 3.5 3.5-3.5 3.5" fill="none" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round" /></svg>
+        {group.label}
+        <span className="ml-auto tabular-nums">{group.tasks.length}</span>
+      </summary>
+      <div className="mt-2">{cards}</div>
+    </details>
   );
 }
 
@@ -157,17 +270,26 @@ function Drawer({ taskId, onClose }: { taskId: string; onClose: () => void }) {
   const [task, setTask] = useState<(Task & { events: TaskEvent[] }) | null>(null);
   const [answer, setAnswer] = useState("");
   const [busy, setBusy] = useState(false);
+  const [showLog, setShowLog] = useState(false);
 
-  const load = useCallback(async () => {
+  const fetchTask = useCallback(async (): Promise<(Task & { events: TaskEvent[] }) | null> => {
     const res = await fetch(`/api/tasks/${taskId}`);
-    if (res.ok) setTask(await res.json());
+    return res.ok ? ((await res.json()) as Task & { events: TaskEvent[] }) : null;
   }, [taskId]);
 
   useEffect(() => {
-    void load();
-    const t = setInterval(() => void load(), 2000);
-    return () => clearInterval(t);
-  }, [load]);
+    let alive = true;
+    const poll = () =>
+      void fetchTask().then((data) => {
+        if (alive && data) setTask(data);
+      });
+    poll();
+    const t = setInterval(poll, 2000);
+    return () => {
+      alive = false;
+      clearInterval(t);
+    };
+  }, [fetchTask]);
 
   async function act(body: Record<string, unknown>) {
     setBusy(true);
@@ -178,144 +300,221 @@ function Drawer({ taskId, onClose }: { taskId: string; onClose: () => void }) {
         body: JSON.stringify(body),
       });
       await new Promise((r) => setTimeout(r, 500));
-      await load();
+      const data = await fetchTask();
+      if (data) setTask(data);
     } finally {
       setBusy(false);
     }
   }
 
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
   const pendingCalls = safeParseActions(task?.pendingActions);
 
   return (
-    <div className="fixed inset-0 z-50 flex justify-end bg-black/60" onClick={onClose}>
+    <div
+      className="fixed inset-0 z-50 flex justify-end bg-black/70 backdrop-blur-[2px]"
+      onClick={onClose}
+      role="dialog"
+      aria-modal="true"
+    >
       <aside
-        className="flex w-[480px] flex-col overflow-y-auto border-l border-neutral-800 bg-neutral-950 p-5"
+        className="scrollbar-none flex w-full max-w-[520px] flex-col overflow-y-auto border-l border-line bg-panel p-5 shadow-[-18px_0_50px_rgba(0,0,0,0.4)] sm:p-6"
         onClick={(e) => e.stopPropagation()}
       >
         {!task ? (
-          <p className="text-sm text-neutral-500">loading…</p>
+          <p className="font-mono text-xs text-ink-soft">Loading task...</p>
         ) : (
           <>
-            <div className="mb-3 flex items-start justify-between">
-              <div>
-                <span className={`mr-2 rounded border px-1.5 py-0.5 font-mono text-[10px] ${ROLE_COLORS[task.role]}`}>
-                  {task.role}
+            <div className="mb-3 flex items-start justify-between gap-3">
+              <div className="flex items-center gap-2 pt-0.5">
+                <span className="agent-role font-mono text-[9px] font-bold uppercase tracking-[0.12em]">
+                  {roleLabel(task.role)}
                 </span>
-                <span className="font-mono text-[10px] text-neutral-600">{task.id}</span>
               </div>
-              <button onClick={onClose} className="text-neutral-500 hover:text-white">
-                ✕
+              <button
+                onClick={onClose}
+                aria-label="Close task details"
+                  className="flex h-8 w-8 items-center justify-center rounded-md border border-line font-mono text-sm text-ink-soft transition-colors hover:border-line-strong hover:bg-panel-hi hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-signal"
+              >
+                <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" aria-hidden="true"><path d="m4 4 8 8m0-8-8 8" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" /></svg>
               </button>
             </div>
 
-            <h3 className="text-base font-semibold leading-snug">{task.title}</h3>
+            <h3 className="font-sans text-xl font-semibold leading-snug tracking-[-0.025em] text-ink">
+              {task.title}
+            </h3>
+
             {task.detail && (
-              <p className="mt-2 whitespace-pre-wrap rounded-lg border border-neutral-800 bg-neutral-900 p-3 text-xs leading-relaxed text-neutral-400">
+              <p className="mt-4 whitespace-pre-wrap border-l border-line-strong pl-4 text-xs leading-relaxed text-ink-soft">
                 {task.detail}
               </p>
             )}
+            {task.agentPrompt && (
+              <details className="mt-4 rounded-md border border-line bg-deck/40 p-3">
+                <summary className="cursor-pointer font-mono text-[9px] font-semibold uppercase tracking-[0.18em] text-ink-soft">
+                  Agent instructions
+                </summary>
+                <p className="mt-2 whitespace-pre-wrap text-xs leading-relaxed text-ink-soft">
+                  {task.agentPrompt}
+                </p>
+              </details>
+            )}
             {task.error && (
-              <p className="mt-2 rounded-lg border border-amber-900 bg-amber-950/40 p-3 text-xs text-amber-400">
+              <p className="mt-4 rounded-md border border-state-blocked/30 bg-state-blocked/[0.04] p-3 font-mono text-xs leading-relaxed text-state-blocked">
                 {task.error}
               </p>
             )}
 
-            {pendingCalls.length > 0 && (
-              <div className="mt-4 space-y-3">
-                {pendingCalls.map((a) =>
-                  a.calls.map((call) => (
-                    <div key={call.id} className="rounded-lg border border-red-900 bg-red-950/30 p-3">
-                      <p className="font-mono text-[10px] uppercase tracking-wider text-red-400">
-                        {a.type === "tool.approval_required" ? "irreversible action" : "agent asks"}
-                        {call.name ? ` · ${call.name}` : ""}
-                      </p>
-                      {call.args && (
-                        <pre className="mt-2 max-h-40 overflow-y-auto whitespace-pre-wrap break-all text-[10px] text-neutral-400">
-                          {prettyArgs(call.args)}
-                        </pre>
-                      )}
-                      {a.type === "tool.approval_required" ? (
-                        <div className="mt-3 flex gap-2">
-                          <button
-                            disabled={busy}
-                            onClick={() => act({ action: "approve", allow: true })}
-                            className="flex-1 rounded-md bg-emerald-600 px-3 py-2 text-xs font-medium hover:bg-emerald-500 disabled:opacity-40"
-                          >
-                            Approve
-                          </button>
-                          <button
-                            disabled={busy}
-                            onClick={() => act({ action: "approve", allow: false, reason: "denied from board" })}
-                            className="flex-1 rounded-md bg-neutral-800 px-3 py-2 text-xs font-medium text-neutral-300 hover:bg-neutral-700 disabled:opacity-40"
-                          >
-                            Deny
-                          </button>
-                        </div>
-                      ) : (
-                        <form
-                          className="mt-3 flex gap-2"
-                          onSubmit={(e) => {
-                            e.preventDefault();
-                            if (!answer.trim()) return;
-                            void act({ action: "answer", content: answer.trim() });
-                            setAnswer("");
-                          }}
+            {pendingCalls.map((a) =>
+              a.calls.map((call) => (
+                <section
+                  key={call.id}
+                  className="relative mt-5 overflow-hidden rounded-md border border-state-blocked/40 bg-state-blocked/[0.035]"
+                >
+                  <span className="absolute inset-y-0 left-0 w-px bg-state-blocked" />
+                  <div className="p-3 pl-4">
+                    <p className="font-mono text-[9px] font-medium uppercase tracking-[0.16em] text-state-blocked">
+                      {a.type === "tool.approval_required" ? "Irreversible action" : "Agent question"}
+                      {call.name ? ` / ${call.name}` : ""}
+                    </p>
+                    {call.args && (
+                      <pre className="mt-3 max-h-44 overflow-y-auto whitespace-pre-wrap break-all rounded-md border border-line bg-deck p-3 font-mono text-[10px] leading-relaxed text-ink-soft">
+                        {prettyArgs(call.args)}
+                      </pre>
+                    )}
+                    {a.type === "tool.approval_required" ? (
+                      <div className="mt-3 grid grid-cols-2 gap-2">
+                        <button
+                          disabled={busy}
+                          onClick={() => act({ action: "approve", allow: true })}
+                          className="rounded-md bg-ink px-3 py-2.5 font-mono text-[10px] font-medium uppercase tracking-[0.15em] text-deck transition-colors hover:bg-white disabled:opacity-40 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-signal"
                         >
-                          <input
-                            value={answer}
-                            onChange={(e) => setAnswer(e.target.value)}
-                            placeholder="Your answer…"
-                            className="flex-1 rounded-md border border-neutral-700 bg-neutral-900 px-2 py-2 text-xs outline-none focus:border-neutral-500"
-                          />
-                          <button
-                            disabled={busy || !answer.trim()}
-                            className="rounded-md bg-sky-600 px-3 py-2 text-xs font-medium hover:bg-sky-500 disabled:opacity-40"
-                          >
-                            Reply
-                          </button>
-                        </form>
-                      )}
-                    </div>
-                  ))
-                )}
-              </div>
+                          Approve
+                        </button>
+                        <button
+                          disabled={busy}
+                          onClick={() => act({ action: "approve", allow: false, reason: "denied from board" })}
+                          className="rounded-md border border-line-strong bg-transparent px-3 py-2.5 font-mono text-[10px] font-medium uppercase tracking-[0.15em] text-ink-soft transition-colors hover:border-ink-faint hover:text-ink disabled:opacity-40 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-signal"
+                        >
+                          Deny
+                        </button>
+                      </div>
+                    ) : (
+                      <form
+                        className="mt-3 flex gap-2"
+                        onSubmit={(e) => {
+                          e.preventDefault();
+                          if (!answer.trim()) return;
+                          void act({ action: "answer", content: answer.trim() });
+                          setAnswer("");
+                        }}
+                      >
+                        <input
+                          value={answer}
+                          onChange={(e) => setAnswer(e.target.value)}
+                          placeholder="Your answer"
+                          className="min-w-0 flex-1 rounded-md border border-line-strong bg-deck px-2.5 py-2.5 text-xs text-ink outline-none placeholder:text-ink-faint focus:border-signal"
+                        />
+                        <button
+                          disabled={busy || !answer.trim()}
+                          className="rounded-md bg-signal px-3 py-2.5 font-mono text-[10px] font-medium uppercase tracking-[0.15em] text-deck transition-colors hover:brightness-110 disabled:opacity-40 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-signal"
+                        >
+                          Reply
+                        </button>
+                      </form>
+                    )}
+                  </div>
+                </section>
+              ))
             )}
 
             {task.column === "backlog" && (
               <button
                 disabled={busy}
                 onClick={() => act({ action: "dispatch" })}
-                className="mt-4 rounded-lg bg-sky-600 px-3 py-2 text-xs font-medium hover:bg-sky-500 disabled:opacity-40"
+                className="mt-5 rounded-md bg-signal px-3 py-2.5 font-mono text-[10px] font-medium uppercase tracking-[0.15em] text-deck transition-colors hover:brightness-110 disabled:opacity-40 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-signal"
               >
-                ▶ Dispatch now
+                Dispatch now
               </button>
             )}
 
             {(task.handoff || task.output) && task.column === "settled" && (
-              <div className="mt-4 rounded-lg border border-emerald-900 bg-emerald-950/20 p-3">
-                <p className="text-[10px] uppercase tracking-widest text-emerald-500">handoff to successors</p>
-                <p className="mt-1.5 whitespace-pre-wrap text-xs leading-relaxed text-emerald-200/90">
+              <div className="mt-5 rounded-md border border-line bg-deck/40 p-4">
+                <p className="font-mono text-[8px] font-medium uppercase tracking-[0.16em] text-ink-faint">
+                  Result
+                </p>
+                <p className="mt-1.5 whitespace-pre-wrap text-xs leading-relaxed text-ink-soft">
                   {task.handoff ?? task.output}
                 </p>
               </div>
             )}
 
-            <h4 className="mt-6 mb-2 text-[10px] uppercase tracking-widest text-neutral-500">
-              Event log
-            </h4>
-            <div className="space-y-1 pb-8">
-              {[...task.events].reverse().map((e) => (
-                <details key={e.id} className="group">
-                  <summary className="cursor-pointer list-none rounded px-2 py-1 font-mono text-[10px] text-neutral-500 transition hover:bg-neutral-900 hover:text-neutral-300">
-                    <span className="text-neutral-700">{new Date(e.createdAt).toLocaleTimeString()} </span>
-                    {eventIcon(e.type)} {e.type}
-                  </summary>
-                  <pre className="mx-2 mb-1 max-h-48 overflow-y-auto whitespace-pre-wrap break-all rounded bg-black/50 p-2 text-[10px] text-neutral-500">
-                    {prettyPayload(e.payload)}
-                  </pre>
-                </details>
-              ))}
-              {task.events.length === 0 && <p className="px-2 text-xs text-neutral-700">no events</p>}
+            {task.predecessors && task.predecessors.length > 0 && (
+              <section className="mt-6">
+                <h4 className="mb-1.5 font-mono text-[9px] font-semibold uppercase tracking-[0.22em] text-ink-faint">
+                  Predecessors
+                </h4>
+                <ul className="space-y-1">
+                  {task.predecessors.map((p) => (
+                    <li
+                      key={p.id}
+                      className="flex items-center gap-2.5 rounded-md border border-line bg-deck/40 px-3 py-2"
+                    >
+                      <span
+                        className={`shrink-0 font-mono text-[9px] font-semibold uppercase tracking-[0.14em] ${
+                          COLUMN_TEXT[p.column] ?? "text-ink-soft"
+                        }`}
+                      >
+                        {p.column}
+                      </span>
+                      <span className="truncate text-xs font-medium text-ink">{p.title}</span>
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            )}
+
+            <div className="mt-7 border-t border-line">
+              <button
+                onClick={() => setShowLog((v) => !v)}
+                aria-expanded={showLog}
+                className="flex w-full items-center gap-2 px-1 py-3 font-mono text-[8px] font-medium uppercase tracking-[0.2em] text-ink-faint transition-colors hover:text-ink focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-signal"
+              >
+                <span
+                  aria-hidden="true"
+                  className={`inline-block transition-transform duration-100 ${showLog ? "rotate-90" : ""}`}
+                >
+                  ›
+                </span>
+                Event log
+                <span className="ml-auto tabular-nums">{task.events.length}</span>
+              </button>
+              {showLog && (
+                <div className="pb-8">
+                  {[...task.events].reverse().map((e) => (
+                    <details key={e.id} className="group border-t border-line/60 first:border-t-0">
+                      <summary className="cursor-pointer list-none px-1 py-1.5 font-mono text-[10px] text-ink-soft transition-colors hover:bg-panel-hi hover:text-ink focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-signal">
+                        <span className="tabular-nums text-ink-faint">
+                          {new Date(e.createdAt).toLocaleTimeString()}{" "}
+                        </span>
+                        <span className="mr-1 text-[8px] uppercase tracking-[0.1em] text-ink-faint">{eventLabel(e.type)}</span>
+                        {e.type}
+                      </summary>
+                      <pre className="mx-1 mb-1.5 max-h-48 overflow-y-auto whitespace-pre-wrap break-all rounded-md border border-line bg-deck p-2.5 font-mono text-[10px] leading-relaxed text-ink-soft">
+                        {prettyPayload(e.payload)}
+                      </pre>
+                    </details>
+                  ))}
+                  {task.events.length === 0 && (
+                    <p className="px-1 py-2 font-mono text-[10px] text-ink-faint">No events yet</p>
+                  )}
+                </div>
+              )}
             </div>
           </>
         )}
@@ -332,6 +531,70 @@ function safeParseActions(raw: string | null | undefined): PendingAction[] {
   } catch {
     return [];
   }
+}
+
+function firstPendingTool(raw: string | null | undefined): string | null {
+  const actions = safeParseActions(raw);
+  for (const a of actions) for (const c of a.calls) if (c.name) return c.name;
+  return null;
+}
+
+function safeDependencyCount(raw: string): number {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.length : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function roleLabel(role: string): string {
+  if (role === "filer") return "Issue filer";
+  return role.replace(/[_-]+/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function relativeTime(value: string, now: number): string {
+  const elapsed = Math.max(0, now - new Date(value).getTime());
+  const minutes = Math.floor(elapsed / 60_000);
+  if (minutes < 1) return "Now";
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ago`;
+}
+
+function pausedStateHintFor(column: string): string | null {
+  if (column === "blocked") {
+    return "The agent needs an answer, a sign-in, or a retry before it can continue.";
+  }
+  if (column === "approval") {
+    return "The agent proposed an external or irreversible action. It will not run until you approve it.";
+  }
+  return null;
+}
+
+function groupTasksByDate(tasks: Task[], now: number): Array<{ label: string; tasks: Task[] }> {
+  const current = new Date(now);
+  const today = new Date(current.getFullYear(), current.getMonth(), current.getDate()).getTime();
+  const day = 24 * 60 * 60 * 1000;
+  const ranges = [
+    { label: "Today", start: today, end: Number.POSITIVE_INFINITY },
+    { label: "Yesterday", start: today - day, end: today },
+    { label: "Past week", start: today - 7 * day, end: today - day },
+    { label: "Past month", start: today - 30 * day, end: today - 7 * day },
+    { label: "Earlier", start: Number.NEGATIVE_INFINITY, end: today - 30 * day },
+  ];
+
+  return ranges.map((range) => ({
+    label: range.label,
+    tasks: tasks
+      .filter((task) => {
+        const updatedAt = new Date(task.updatedAt).getTime();
+        return Number.isFinite(updatedAt) && updatedAt >= range.start && updatedAt < range.end;
+      })
+      .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()),
+  }));
 }
 
 interface PendingAction {
@@ -357,11 +620,11 @@ function prettyPayload(payload: string): string {
   }
 }
 
-function eventIcon(type: string): string {
-  if (type.includes("approval") || type === "pause.pending") return "⚠";
-  if (type.startsWith("tool")) return "⚙";
-  if (type.startsWith("thread")) return "⑃";
-  if (type === "sandbox.created") return "▣";
-  if (type === "turn.done") return "✓";
-  return "·";
+function eventLabel(type: string): string {
+  if (type.includes("approval") || type === "pause.pending") return "Gate";
+  if (type.startsWith("tool")) return "Tool";
+  if (type.startsWith("thread")) return "Run";
+  if (type === "sandbox.created") return "Box";
+  if (type === "turn.done") return "Done";
+  return "Event";
 }

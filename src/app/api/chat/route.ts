@@ -1,14 +1,29 @@
-import { runOrchestratorTurn } from "@/lib/orchestrator";
+import { resumeOrchestratorTurn, runOrchestratorTurn } from "@/lib/orchestrator";
 
 export const runtime = "nodejs";
 export const maxDuration = 800;
 
+interface AnswerBody {
+  type: string;
+  threadId?: string | null;
+  toolCallId: string;
+  content: string;
+}
+
 export async function POST(req: Request) {
-  const body = (await req.json().catch(() => null)) as { message?: string } | null;
-  const message = body?.message?.trim();
-  if (!message) {
-    return Response.json({ error: "message required" }, { status: 400 });
+  const body = (await req.json().catch(() => null)) as {
+    message?: string;
+    conversationId?: string;
+    answers?: AnswerBody[];
+  } | null;
+
+  if (!body?.message?.trim() && !(body?.answers?.length && body.conversationId)) {
+    return Response.json({ error: "message or answers required" }, { status: 400 });
   }
+
+  const turn = body.answers?.length
+    ? resumeOrchestratorTurn(body.conversationId!, body.answers)
+    : runOrchestratorTurn(body!.message!.trim(), body?.conversationId);
 
   const encoder = new TextEncoder();
   const stream = new ReadableStream<Uint8Array>({
@@ -16,7 +31,7 @@ export async function POST(req: Request) {
       const send = (obj: unknown) =>
         controller.enqueue(encoder.encode(`data: ${JSON.stringify(obj)}\n\n`));
       try {
-        for await (const ev of runOrchestratorTurn(message)) {
+        for await (const ev of turn) {
           send(ev);
         }
       } catch (err) {
