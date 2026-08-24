@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ChatMarkdown } from "@/components/chat-markdown";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 
@@ -56,6 +56,12 @@ interface StoredConversation {
     status: string | null;
     pauseActions: string | null;
   }>;
+}
+
+interface MentionableDocument {
+  id: string;
+  title: string;
+  authorRole: string;
 }
 
 const EXAMPLE_REQUESTS = [
