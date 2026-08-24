@@ -113,9 +113,10 @@ export async function* runOrchestratorTurn(
   let pauseActions: PauseAction[] = [];
   const tools: string[] = [];
 
+  const documentContext = await attachedDocumentContext(documentIds);
   try {
     for await (const event of streamSessionTurn(conversation.sessionId, [
-      { type: "user.message", content: message },
+      { type: "user.message", content: `${message}${documentContext}` },
     ])) {
       if (event.kind === "delta") streamedText += event.text ?? "";
       if (event.kind === "tool" && event.name) tools.push(event.name);
