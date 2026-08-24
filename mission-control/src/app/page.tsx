@@ -447,11 +447,14 @@ function SideContent({
       <div className="flex h-16 shrink-0 items-center gap-1 border-b border-line px-3">
         <span className="px-2 font-mono text-[9px] font-semibold uppercase tracking-[0.14em] text-ink-faint">Conversations</span>
         <button
+          type="button"
           onClick={onNew}
           disabled={busy}
-          className="ml-auto rounded-md border border-line-strong bg-panel-hi px-2.5 py-1.5 text-[11px] font-semibold text-ink transition-colors hover:border-ink-faint disabled:opacity-40"
+          aria-label="Start a new chat"
+          className="ml-auto inline-flex h-8 items-center gap-2 rounded-md border border-line-strong bg-panel-hi px-3 font-mono text-[9px] font-semibold uppercase tracking-[0.1em] text-ink transition-colors hover:border-signal/60 hover:bg-signal/10 hover:text-ink disabled:opacity-40"
         >
-          Chat <span aria-hidden="true" className="ml-1 text-signal">+</span>
+          <svg viewBox="0 0 16 16" className="h-3.5 w-3.5 text-signal" aria-hidden="true"><path d="M8 3v10M3 8h10" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" /></svg>
+          <span>New chat</span>
         </button>
         {onClose && (
           <button
