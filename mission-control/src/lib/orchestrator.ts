@@ -90,7 +90,8 @@ interface StreamEvent {
 
 export async function* runOrchestratorTurn(
   message: string,
-  conversationId?: string
+  conversationId?: string,
+  documentIds: string[] = []
 ): AsyncGenerator<ChatEvent> {
   const conversation = await ensureConversation(conversationId, message);
   await db.$transaction([
