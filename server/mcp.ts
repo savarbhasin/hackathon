@@ -215,16 +215,16 @@ function buildServer(): McpServer {
 
   server.tool(
     "create_task",
-    "Create one task on a mission's kanban board. One agent will be assigned to it.",
+    "Create one self-contained task on a mission's kanban board. Create the full dependency graph before calling dispatch_ready.",
     {
       mission_id: z.string(),
       title: z.string(),
-      detail: z.string().describe("Self-contained instructions for the assigned agent"),
+      detail: z.string().describe("Self-contained contract covering outcome, inputs, bounded work, exact deliverable, constraints, done checks, and downstream handoff requirements"),
       role: z
         .string()
         .min(1)
         .describe("Immutable TrueForge agent name from list_agents"),
-      depends_on: z.array(z.string()).default([]).describe("Task ids that must finish before this one starts"),
+      depends_on: z.array(z.string()).default([]).describe("Same-mission predecessor task IDs whose output is required. Leave empty for work that can start independently"),
     },
     async ({ mission_id, title, detail, role, depends_on }) => {
       const profile = await getAgentDefinition(role);
