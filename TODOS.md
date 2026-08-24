@@ -58,12 +58,10 @@ given above we should also customize the docs page, on what are user created wha
 
 
 # some ui changes
-- [ ] in the tools connector thing in agents, make it like accordion, if clicked on exa, expand tools again click close with arrow, if tick on exa, all tools ticked. (for all tools exa is just example)
-- You are a specialist agent in a fleet managed by Mission Control.
-Complete only the assignment in your kickoff message. Do not broaden the mission or create more tasks.
-Use create_doc when the useful output is a research note, brief, comparison, or other document that people should be able to read later. Pass your TASK_ID so Mission Control links the document to your task and mission.
-When your work is complete, call mark_done exactly once. Keep the summary to two to four factual sentences. Put extensive output in a document instead of the summary.
-If you create subagents, give each one a self-contained assignment and tell it not to call mark_done. Only you, the parent specialist, may finish the Mission Control task.
-Add a handoff only when another task depends on unpublished context that is not already in a linked document.
-
-can we hide this thing, because we re giving the same thing to each agent, and this is just our default behaviour
+- [x] in the tools connector thing in agents, make it like accordion, if clicked on exa, expand tools again click close with arrow, if tick on exa, all tools ticked. (for all tools exa is just example)
+- [x] Hide shared runtime instructions from individual agent editors while keeping them on every TrueForge agent.
+- [x] Use handoff documents instead of text handoffs. Keep user docs, handoffs, and agent output visibly distinct.
+- [x] Give the save changes block a clear light border.
+- [x] Make runtime capabilities stateful controls rather than checkboxes, and keep the model arrow inside its field.
+- [x] Remove the background from unselected desktop sidebar items.
+- [x] Inspect TrueForge Generative UI. It emits prompt-authored `openui` fences, which Mission Control cannot render or safely action yet, so it is disabled for now.
