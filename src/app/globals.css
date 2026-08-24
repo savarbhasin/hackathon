@@ -202,9 +202,9 @@ select:not(:disabled) {
   --admonitionInfoBg: var(--color-panel-hi);
   --admonitionCautionBg: var(--color-panel-hi);
   --admonitionDangerBg: var(--color-panel-hi);
-  border: 1px solid var(--color-line);
-  border-radius: 0.5rem;
-  overflow: hidden;
+  min-height: 100%;
+  border: 0;
+  border-radius: 0;
 }
 
 .markdown-document-editor .mdxeditor-toolbar {
@@ -213,8 +213,8 @@ select:not(:disabled) {
 }
 
 .markdown-document-content {
-  min-height: 36rem;
-  padding: 1.5rem;
+  min-height: 100%;
+  padding: clamp(1.75rem, 4vw, 4rem);
   color: var(--color-ink);
   font-size: 0.95rem;
   line-height: 1.75;

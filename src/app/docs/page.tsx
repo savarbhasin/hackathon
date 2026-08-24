@@ -26,6 +26,8 @@ interface DocumentDraft {
   content: string;
 }
 
+type DocumentGroupId = "mine" | "agents" | "handoffs";
+
 export default function DocsPage() {
   const [documents, setDocuments] = useState<AgentDocument[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -35,6 +37,7 @@ export default function DocsPage() {
   const [error, setError] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<AgentDocument | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [activeGroup, setActiveGroup] = useState<DocumentGroupId>("mine");
 
   useEffect(() => {
     void fetch("/api/docs", { cache: "no-store" })
@@ -45,7 +48,9 @@ export default function DocsPage() {
       .then((items) => {
         setDocuments(items);
         const requestedId = new URLSearchParams(window.location.search).get("document");
-        setSelectedId(items.some((document) => document.id === requestedId) ? requestedId : items[0]?.id ?? null);
+        const initial = items.find((document) => document.id === requestedId) ?? items[0];
+        setSelectedId(initial?.id ?? null);
+        if (initial) setActiveGroup(documentGroupId(initial));
       })
       .catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)))
       .finally(() => setLoading(false));
@@ -61,24 +66,31 @@ export default function DocsPage() {
     () => [...documents].sort((a, b) => +new Date(b.updatedAt) - +new Date(a.updatedAt)),
     [documents]
   );
-  const documentGroups = useMemo(
-    () => [
-      {
-        label: "Yours",
-        items: sortedDocuments.filter(
-          (document) => document.kind !== "handoff" && (document.kind === "user" || document.authorRole === "user")
-        ),
-      },
-      { label: "Handoffs", items: sortedDocuments.filter((document) => document.kind === "handoff") },
-      {
-        label: "Agent output",
-        items: sortedDocuments.filter(
-          (document) => document.kind !== "handoff" && document.kind !== "user" && document.authorRole !== "user"
-        ),
-      },
-    ].filter((group) => group.items.length > 0),
-    [sortedDocuments]
-  );
+  const documentGroups = useMemo(() => [
+    {
+      id: "mine" as const,
+      label: "Created by me",
+      shortLabel: "My documents",
+      description: "Notes and drafts you started",
+      items: sortedDocuments.filter((document) => documentGroupId(document) === "mine"),
+    },
+    {
+      id: "agents" as const,
+      label: "Agents",
+      shortLabel: "Agents",
+      description: "Work agents saved for review",
+      items: sortedDocuments.filter((document) => documentGroupId(document) === "agents"),
+    },
+    {
+      id: "handoffs" as const,
+      label: "Handoffs",
+      shortLabel: "Handoffs",
+      description: "Context passed between tasks",
+      items: sortedDocuments.filter((document) => documentGroupId(document) === "handoffs"),
+    },
+  ], [sortedDocuments]);
+  const activeDocumentGroup = documentGroups.find((group) => group.id === activeGroup);
+  const activeDocuments = activeDocumentGroup?.items ?? [];
 
   function updateDraft(next: Partial<DocumentDraft>) {
     if (!selected || !draft) return;
@@ -87,10 +99,18 @@ export default function DocsPage() {
 
   function selectDocument(id: string | null) {
     setSelectedId(id);
+    const next = documents.find((document) => document.id === id);
+    if (next) setActiveGroup(documentGroupId(next));
     const url = new URL(window.location.href);
     if (id) url.searchParams.set("document", id);
     else url.searchParams.delete("document");
     window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
+  }
+
+  function selectGroup(id: DocumentGroupId) {
+    setActiveGroup(id);
+    const firstDocument = documentGroups.find((group) => group.id === id)?.items[0];
+    selectDocument(firstDocument?.id ?? null);
   }
 
   function updateDocumentContent(id: string, base: DocumentDraft, content: string) {
@@ -113,6 +133,7 @@ export default function DocsPage() {
     }
     const document = (await response.json()) as AgentDocument;
     setDocuments((current) => [document, ...current]);
+    setActiveGroup("mine");
     selectDocument(document.id);
   }
 
@@ -197,27 +218,50 @@ export default function DocsPage() {
           <p className="mt-4 text-sm leading-7 text-ink-soft">Research briefs, plans, and written deliverables appear here. You can edit their Markdown directly.</p>
         </div>
       ) : (
-        <div className="grid min-h-0 flex-1 grid-cols-1 md:grid-cols-[minmax(0,1fr)_270px]">
-          <aside className="scrollbar-none order-1 max-h-48 overflow-y-auto border-b border-line bg-panel/60 p-3 md:order-2 md:max-h-none md:border-b-0 md:border-l">
-            {documentGroups.map((group) => (
-              <section key={group.label} className="mb-4 last:mb-0">
-                <div className="flex items-center px-2 pb-2 font-mono text-[8px] uppercase tracking-[0.16em] text-ink-faint">
-                  <span>{group.label}</span>
-                  <span className="ml-auto tabular-nums">{group.items.length}</span>
-                </div>
-                {group.items.map((document) => (
-                  <button key={document.id} type="button" onClick={() => selectDocument(document.id)} className={`mb-1 block w-full rounded-md border px-3 py-3 text-left transition-colors ${document.id === selectedId ? "border-line-strong bg-panel-hi text-ink" : "border-transparent text-ink-soft hover:border-line hover:bg-panel-hi hover:text-ink"}`}>
-                    <span className="line-clamp-2 text-xs font-semibold leading-snug">{drafts[document.id]?.title || document.title}</span>
-                    <span className="mt-1.5 block font-mono text-[8px] uppercase tracking-[0.12em] text-ink-faint">{document.authorRole === "user" ? "Edited by you" : roleLabel(document.authorRole)} / {new Date(document.updatedAt).toLocaleDateString()}</span>
+        <div className="flex min-h-0 flex-1 flex-col">
+          <nav aria-label="Document type" className="scrollbar-none shrink-0 overflow-x-auto border-b border-line bg-panel/40 px-4 sm:px-6">
+            <div className="flex min-w-max gap-1">
+              {documentGroups.map((group) => {
+                const active = group.id === activeGroup;
+                return (
+                  <button
+                    key={group.id}
+                    type="button"
+                    onClick={() => selectGroup(group.id)}
+                    className={`relative flex items-center gap-2 px-3 py-3.5 text-left font-mono text-[9px] uppercase tracking-[0.13em] transition-colors ${active ? "text-ink" : "text-ink-faint hover:text-ink-soft"}`}
+                    aria-current={active ? "page" : undefined}
+                  >
+                    <span>{group.label}</span>
+                    <span className={`rounded-full px-1.5 py-0.5 text-[8px] tabular-nums ${active ? "bg-signal/15 text-signal" : "bg-panel-hi text-ink-faint"}`}>{group.items.length}</span>
+                    {active && <span className="absolute inset-x-3 bottom-0 h-px bg-signal" />}
                   </button>
-                ))}
-              </section>
-            ))}
-          </aside>
+                );
+              })}
+            </div>
+          </nav>
 
-          {selected && draft && (
-            <section className="console-grid order-2 flex min-h-0 flex-col bg-deck md:order-1">
-              <div className="flex shrink-0 items-center gap-3 border-b border-line px-4 py-3 sm:px-6">
+          <div className="grid min-h-0 flex-1 grid-cols-1 lg:grid-cols-[256px_minmax(0,1fr)]">
+            <aside className="scrollbar-none order-1 max-h-48 overflow-y-auto border-b border-line bg-panel/35 p-2 lg:order-none lg:max-h-none lg:border-b-0 lg:border-r lg:p-3">
+              <div className="flex items-start justify-between gap-3 px-2 pb-3 pt-1">
+                <div>
+                  <p className="font-mono text-[8px] uppercase tracking-[0.16em] text-ink-faint">{documentGroups.find((group) => group.id === activeGroup)?.shortLabel}</p>
+                  <p className="mt-1 text-[11px] leading-4 text-ink-soft">{documentGroups.find((group) => group.id === activeGroup)?.description}</p>
+                </div>
+                <span className="pt-0.5 font-mono text-[9px] tabular-nums text-ink-faint">{activeDocuments.length}</span>
+              </div>
+              {activeDocuments.length > 0 ? activeDocuments.map((document) => (
+                <button key={document.id} type="button" onClick={() => selectDocument(document.id)} className={`mb-1 block w-full rounded-md border px-3 py-3 text-left transition-colors ${document.id === selectedId ? "border-line-strong bg-panel-hi text-ink" : "border-transparent text-ink-soft hover:border-line hover:bg-panel-hi hover:text-ink"}`}>
+                  <span className="line-clamp-2 text-xs font-semibold leading-snug">{drafts[document.id]?.title || document.title}</span>
+                  <span className="mt-1.5 block font-mono text-[8px] uppercase tracking-[0.12em] text-ink-faint">{document.authorRole === "user" ? "Edited by you" : roleLabel(document.authorRole)} / {new Date(document.updatedAt).toLocaleDateString()}</span>
+                </button>
+              )) : (
+                <p className="px-2 py-5 text-xs leading-5 text-ink-faint">Nothing here yet.</p>
+              )}
+            </aside>
+
+            {selected && draft ? (
+              <section className="console-grid order-2 flex min-h-0 flex-col bg-deck lg:order-none">
+                <div className="flex shrink-0 items-center gap-3 border-b border-line bg-deck/95 px-4 py-3 sm:px-6">
                 <input value={draft.title} onChange={(event) => updateDraft({ title: event.target.value })} placeholder="Untitled document" className="min-w-0 flex-1 border-0 bg-transparent text-lg font-semibold tracking-[-0.025em] text-ink outline-none placeholder:text-ink-faint" />
                 <span className="shrink-0 font-mono text-[9px] uppercase tracking-[0.14em] text-ink-faint">
                   {saving ? "Saving..." : dirty ? "Unsaved" : "Saved"}
@@ -233,19 +277,28 @@ export default function DocsPage() {
                 </button>
               </div>
 
-              <div className="min-h-0 flex-1 overflow-y-auto px-5 py-7 sm:px-10 sm:py-10 lg:px-16">
-                <div className="w-full">
+                <div className="min-h-0 flex-1 overflow-y-auto">
                   <MarkdownDocumentEditor
                     key={selected.id}
                     value={draft.content}
                     onChange={(content) => updateDocumentContent(selected.id, pickDraft(selected), content)}
                   />
                 </div>
-              </div>
 
-              {error && <p className="shrink-0 border-t border-state-blocked/30 bg-state-blocked/[0.04] px-4 py-2 text-xs text-state-blocked">{error}</p>}
-            </section>
-          )}
+                {error && <p className="shrink-0 border-t border-state-blocked/30 bg-state-blocked/[0.04] px-4 py-2 text-xs text-state-blocked">{error}</p>}
+              </section>
+            ) : (
+              <section className="console-grid order-2 flex min-h-0 items-center bg-deck px-8 py-12 lg:order-none lg:px-16">
+                <div className="max-w-md border-l border-line-strong pl-5">
+                  <p className="font-mono text-[9px] uppercase tracking-[0.18em] text-ink-faint">{activeDocumentGroup?.shortLabel}</p>
+                  <h2 className="mt-3 text-2xl font-semibold tracking-[-0.03em] text-ink">Nothing saved here yet.</h2>
+                  <p className="mt-3 text-sm leading-6 text-ink-soft">
+                    {activeGroup === "mine" ? "Create a document to start writing." : activeDocumentGroup?.description}
+                  </p>
+                </div>
+              </section>
+            )}
+          </div>
         </div>
       )}
       <ConfirmDialog
@@ -268,4 +321,10 @@ function roleLabel(role: string): string {
   if (role === "squad-lead") return "Squad lead";
   if (role === "filer") return "Issue filer";
   return role.replace(/[_-]+/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function documentGroupId(document: AgentDocument): DocumentGroupId {
+  if (document.kind === "handoff") return "handoffs";
+  if (document.kind === "user" || document.authorRole === "user") return "mine";
+  return "agents";
 }
