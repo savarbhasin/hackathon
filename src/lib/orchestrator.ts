@@ -150,6 +150,20 @@ export async function* runOrchestratorTurn(
   });
 }
 
+async function attachedDocumentContext(documentIds: string[]): Promise<string> {
+  const ids = [...new Set(documentIds)].filter(Boolean).slice(0, 5);
+  if (ids.length === 0) return "";
+  const documents = await db.document.findMany({
+    where: { id: { in: ids } },
+    select: { title: true, content: true },
+  });
+  if (documents.length === 0) return "";
+  const context = documents.map((document) =>
+    `Document: ${document.title}\n${document.content.slice(0, 16000)}`
+  ).join("\n\n---\n\n");
+  return `\n\nThe user attached these saved documents as working context. Use them when relevant.\n\n${context}`;
+}
+
 export async function* resumeOrchestratorTurn(
   conversationId: string,
   answers: Array<{ type: string; threadId?: string | null; toolCallId: string; content: string }>
