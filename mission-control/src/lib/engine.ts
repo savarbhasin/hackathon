@@ -54,7 +54,15 @@ export function buildKickoff(input: {
   taskTitle: string;
   taskDetail?: string | null;
   taskId: string;
-  handoffDocuments: Array<{ id: string; title: string }>;
+  dependencies: Array<{
+    id: string;
+    title: string;
+    role: string;
+    column: string;
+    summary: string | null;
+    documents: Array<{ id: string; title: string }>;
+  }>;
+  successors: Array<{ id: string; title: string; role: string }>;
 }): string {
   const parts = [
     `MISSION: ${input.missionTitle}`,
