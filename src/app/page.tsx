@@ -225,7 +225,44 @@ export default function Home() {
     const text = input.trim();
     if (!text || busy || loadingConversation) return;
     setInput("");
-    await runTurn({ message: text, conversationId }, text);
+    setMentionOpen(false);
+    const attached = documents.filter((document) => attachedDocumentIds.includes(document.id));
+    setAttachedDocumentIds([]);
+    const display = attached.length > 0 ? `${text}\n\nAttached: ${attached.map((document) => `@${document.title}`).join(", ")}` : text;
+    await runTurn({ message: text, conversationId, documentIds: attached.map((document) => document.id) }, display);
+  }
+
+  const mentionQuery = useMemo(() => {
+    const position = inputRef.current?.selectionStart ?? input.length;
+    const match = input.slice(0, position).match(/(?:^|\s)@([^\s@]*)$/);
+    return match ? match[1].toLowerCase() : null;
+  }, [input]);
+  const matchingDocuments = mentionQuery === null ? [] : documents
+    .filter((document) => !attachedDocumentIds.includes(document.id))
+    .filter((document) => document.title.toLowerCase().includes(mentionQuery))
+    .slice(0, 5);
+
+  function updateInput(value: string) {
+    setInput(value);
+    const position = inputRef.current?.selectionStart ?? value.length;
+    setMentionOpen(/(?:^|\s)@([^\s@]*)$/.test(value.slice(0, position)));
+  }
+
+  function attachDocument(document: MentionableDocument) {
+    const element = inputRef.current;
+    const position = element?.selectionStart ?? input.length;
+    const before = input.slice(0, position);
+    const match = before.match(/(?:^|\s)@([^\s@]*)$/);
+    const start = match ? before.length - match[0].length + (match[0].startsWith(" ") ? 1 : 0) : position;
+    const next = `${input.slice(0, start)}@${document.title} ${input.slice(position)}`;
+    setInput(next);
+    setAttachedDocumentIds((current) => [...current, document.id]);
+    setMentionOpen(false);
+    requestAnimationFrame(() => {
+      const cursor = start + document.title.length + 2;
+      element?.focus();
+      element?.setSelectionRange(cursor, cursor);
+    });
   }
 
   async function answer(answers: AnswerPayload[]) {
