@@ -238,6 +238,34 @@ async function listAndSeedAgents(): Promise<TrueForgeApi.Agent[]> {
       for (const agent of agents) names.add(agent.name);
     }
   }
+
+  for (const agent of agents) {
+    const role = ROLES[agent.name];
+    if (!role && !managedSlugs.has(agent.name)) continue;
+
+    const editableInstructions = stripStoredRuntimeInstructions(
+      agent.manifest.instructions ?? "",
+      true
+    ).trim();
+    const instructions = withSpecialistRuntimeInstructions(
+      editableInstructions || role?.instructions || "Complete the assigned specialist task within its stated scope."
+    );
+    const model = role?.spec.model ?? agent.manifest.model;
+    if (
+      agent.manifest.model.name === model.name &&
+      agent.manifest.instructions === instructions
+    ) continue;
+
+    const { data: updated } = await tf().agents.update(agent.id, {
+      manifest: {
+        ...agent.manifest,
+        model,
+        instructions,
+      },
+    });
+    agents = agents.map((current) => current.id === updated.id ? updated : current);
+  }
+
   return agents;
 }
 
