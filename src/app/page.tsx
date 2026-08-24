@@ -498,9 +498,9 @@ function ConversationList({
   }
   const groups = groupConversations(conversations);
   return groups.map((group) => (
-    <details key={group.label} open className="group mb-3">
+    <details key={group.label} open className="group/day-group mb-3">
       <summary className="flex cursor-pointer list-none items-center gap-2 px-2 py-1.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-ink-faint [&::-webkit-details-marker]:hidden">
-        <svg viewBox="0 0 12 12" className="h-3 w-3 transition-transform group-open:rotate-90" aria-hidden="true"><path d="m4.5 2.5 3.5 3.5-3.5 3.5" fill="none" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round" /></svg>
+        <svg viewBox="0 0 12 12" className="h-3 w-3 transition-transform group-open/day-group:rotate-90" aria-hidden="true"><path d="m4.5 2.5 3.5 3.5-3.5 3.5" fill="none" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round" /></svg>
         {group.label}
         <span className="ml-auto tabular-nums">{group.items.length}</span>
       </summary>
@@ -508,7 +508,7 @@ function ConversationList({
         {group.items.map((conversation) => (
           <div
             key={conversation.id}
-            className={`group flex items-center gap-1 rounded-md transition-colors ${
+            className={`group/chat-row flex items-center gap-1 rounded-md transition-colors ${
               activeId === conversation.id ? "bg-panel-hi text-ink" : "text-ink-soft hover:bg-panel-hi hover:text-ink"
             }`}
           >
