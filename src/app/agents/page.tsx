@@ -332,15 +332,15 @@ export default function AgentsPage() {
               </EditorSection>
 
               {error && <p className="mt-5 rounded-md border border-state-blocked/30 bg-state-blocked/[0.04] px-3 py-2.5 text-xs text-state-blocked">{error}</p>}
-              <div className="sticky bottom-3 -mx-3 mt-6 flex items-center gap-3 rounded-lg border border-line-strong bg-deck/95 px-5 py-4 shadow-[0_8px_24px_rgba(0,0,0,0.16)] backdrop-blur-sm sm:-mx-5 sm:px-6">
-                <p className="text-[10px] leading-relaxed text-ink-faint">
-                  Changes apply to future turns, including resumed paused tasks.
-                </p>
-                <button type="button" onClick={() => void save()} disabled={!dirty || !valid || saving}
-                  className="ml-auto rounded-md bg-ink px-4 py-2.5 font-mono text-[9px] font-semibold uppercase tracking-[0.14em] text-deck transition-colors hover:bg-white disabled:opacity-30">
-                  {saving ? "Saving..." : draft.id ? "Save changes" : "Create agent"}
-                </button>
-              </div>
+              {dirty && <div className="sticky bottom-3 -mx-3 mt-6 flex items-center gap-3 rounded-lg border border-line-strong bg-deck/95 px-5 py-4 shadow-[0_8px_24px_rgba(0,0,0,0.16)] backdrop-blur-sm sm:-mx-5 sm:px-6">
+                  <p className="text-[10px] leading-relaxed text-ink-faint">
+                    Changes apply to future turns, including resumed paused tasks.
+                  </p>
+                  <button type="button" onClick={() => void save()} disabled={!valid || saving}
+                    className="ml-auto rounded-md bg-ink px-4 py-2.5 font-mono text-[9px] font-semibold uppercase tracking-[0.14em] text-deck transition-colors hover:bg-white disabled:opacity-30">
+                    {saving ? "Saving..." : draft.id ? "Save changes" : "Create agent"}
+                  </button>
+                </div>}
             </div>}
           </section>
         </div>
