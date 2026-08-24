@@ -65,3 +65,14 @@ given above we should also customize the docs page, on what are user created wha
 - [x] Make runtime capabilities stateful controls rather than checkboxes, and keep the model arrow inside its field.
 - [x] Remove the background from unselected desktop sidebar items.
 - [x] Inspect TrueForge Generative UI. It emits prompt-authored `openui` fences, which Mission Control cannot render or safely action yet, so it is disabled for now.
+
+
+## bruvs improvements
+- [ ] creating temporary agents that are deleted once the work is done? (later not now)
+- [x] improving the schedules page, showing next runs, proper cards
+- [x] having a calendar view on that page as well
+- [x] supporting @ing the documents in chat bar when talking to orchestrator (if possible)
+- [x] delete modal has yellow color??? why not uniform with whole web (blue)
+- [x] why display role id and name in the input box when those cant be edited in agents page?
+- [] delete option should only appear on chat ive hovered over not all chats of that day
+- []delete button has yellow color on hover??? why not uniform with whole web (blue)
