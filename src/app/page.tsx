@@ -523,7 +523,7 @@ function ConversationList({
               type="button"
               disabled={disabled}
               onClick={() => onDelete(conversation)}
-              className="mr-1 flex h-7 w-7 shrink-0 items-center justify-center rounded text-ink-faint opacity-0 transition-colors hover:bg-deck hover:text-state-blocked focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-line-strong disabled:opacity-40 group-hover:opacity-100 group-focus-within:opacity-100"
+              className="mr-1 flex h-7 w-7 shrink-0 items-center justify-center rounded text-ink-faint opacity-0 transition-colors hover:bg-signal/10 hover:text-signal focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-line-strong disabled:opacity-40 group-hover/chat-row:opacity-100 group-focus-within/chat-row:opacity-100"
               aria-label={`Delete ${conversation.title}`}
               title="Delete conversation"
             >
