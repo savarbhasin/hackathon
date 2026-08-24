@@ -96,6 +96,12 @@ export default function Home() {
   }, [refreshConversations]);
 
   useEffect(() => {
+    void fetch("/api/docs", { cache: "no-store" })
+      .then(async (response) => response.ok ? await response.json() as MentionableDocument[] : [])
+      .then(setDocuments);
+  }, []);
+
+  useEffect(() => {
     if (!historyOpen) return;
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape") setHistoryOpen(false);
