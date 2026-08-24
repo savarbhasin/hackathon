@@ -349,6 +349,44 @@ export default function AgentsPage() {
   );
 }
 
+function AgentLoading() {
+  return <div role="status" aria-label="Loading agents" aria-busy="true"
+    className="grid min-h-0 flex-1 animate-pulse grid-cols-1 md:grid-cols-[minmax(0,1fr)_290px]">
+    <aside className="order-1 max-h-52 overflow-hidden border-b border-line bg-panel/55 p-3 md:order-2 md:max-h-none md:border-b-0 md:border-l">
+      <div className="h-2 w-14 rounded bg-panel-hi" />
+      <div className="mt-3 space-y-1.5">
+        {Array.from({ length: 5 }, (_, index) => <div key={index} className="rounded-md border border-line/70 bg-panel/45 px-3 py-3">
+          <div className={`h-3 rounded bg-panel-hi ${index % 2 === 0 ? "w-24" : "w-32"}`} />
+          <div className="mt-2 h-2.5 w-4/5 rounded bg-panel-hi/80" />
+          <div className="mt-2 h-2 w-20 rounded bg-panel-hi/70" />
+        </div>)}
+      </div>
+    </aside>
+    <section className="console-grid order-2 min-h-0 overflow-hidden px-5 py-6 sm:px-8 md:order-1 lg:px-12">
+      <div className="mx-auto max-w-5xl">
+        <div className="mb-7 flex items-start justify-between gap-5">
+          <div>
+            <div className="h-2 w-24 rounded bg-panel-hi" />
+            <div className="mt-3 h-7 w-56 rounded bg-panel-hi" />
+          </div>
+          <div className="h-9 w-44 rounded-md border border-line bg-panel/70" />
+        </div>
+        <div className="mb-7 max-w-2xl">
+          <div className="h-2 w-20 rounded bg-panel-hi" />
+          <div className="mt-2 h-10 w-full rounded-md border border-line-strong bg-panel/70" />
+        </div>
+        <div className="space-y-5">
+          {["w-48", "w-64", "w-56"].map((width) => <div key={width} className="rounded-lg border border-line bg-deck/55 p-5">
+            <div className={`h-2.5 rounded bg-panel-hi ${width}`} />
+            <div className="mt-2 h-2 w-3/5 rounded bg-panel-hi/70" />
+            <div className="mt-5 h-20 rounded-md border border-line bg-panel/60" />
+          </div>)}
+        </div>
+      </div>
+    </section>
+  </div>;
+}
+
 function EditorSection({ eyebrow, title, description, children }: {
   eyebrow: string; title: string; description: string; children: React.ReactNode;
 }) {
