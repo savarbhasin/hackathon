@@ -186,10 +186,16 @@ select:not(:disabled) {
 
 .markdown-document-editor {
   --baseBase: var(--color-panel-hi);
+  --baseBgSubtle: var(--color-panel);
   --baseBg: var(--color-panel-hi);
+  --baseBgHover: #1a202a;
+  --baseBgActive: #252d38;
   --baseText: var(--color-ink);
   --baseTextContrast: var(--color-deck);
   --baseBorder: var(--color-line);
+  --baseBorderHover: var(--color-ink-soft);
+  --baseSolid: var(--color-ink-soft);
+  --baseSolidHover: var(--color-ink);
   --basePageBg: var(--color-deck);
   --baseLine: var(--color-line);
   --baseHover: var(--color-panel);
@@ -210,6 +216,11 @@ select:not(:disabled) {
 .markdown-document-editor .mdxeditor-toolbar {
   border-bottom: 1px solid var(--color-line);
   background: var(--color-panel);
+}
+
+.markdown-document-editor .mdxeditor-toolbar button[data-disabled] svg {
+  color: var(--color-ink-soft);
+  opacity: 0.7;
 }
 
 .markdown-document-content {
