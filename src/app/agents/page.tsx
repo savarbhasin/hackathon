@@ -360,42 +360,65 @@ function ConnectorEditor({ connector, server, selected, required, onToggle, onTo
   onToolToggle: (tool: string, checked: boolean) => void;
   onApprovalToggle: (tool: string, checked: boolean) => void;
 }) {
+  const [expanded, setExpanded] = useState(false);
   const enabledTools = server ? selectedToolNames(server, connector) : [];
   const approvals = server?.requireApprovalForTools ?? [];
+  const label = connectorLabel(connector.name);
+  const toolsId = `connector-tools-${connector.name.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
   return <div className={`overflow-hidden rounded-md border ${selected ? "border-line-strong bg-panel/75" : "border-line bg-deck/45"}`}>
-    <label className={`flex items-center gap-3 px-4 py-3.5 ${required ? "cursor-default" : "cursor-pointer"}`}>
-      <input type="checkbox" checked={selected} disabled={required} onChange={(event) => onToggle(event.target.checked)}
-        className="accent-[var(--color-signal)]" />
-      <span className="min-w-0"><span className="block truncate text-xs font-semibold text-ink">{connectorLabel(connector.name)}</span>
-        <span className="mt-0.5 block font-mono text-[8px] uppercase tracking-[0.1em] text-ink-faint">
-          {required ? "Required for every specialist" : `${connector.tools.length} ${connector.tools.length === 1 ? "tool" : "tools"}`}
-        </span></span>
-      {required && <span className="ml-auto rounded border border-line px-2 py-1 font-mono text-[8px] uppercase tracking-[0.12em] text-ink-faint">Core</span>}
-    </label>
-    {selected && connector.tools.length > 0 && <div className="border-t border-line">
-      <div className="grid grid-cols-[minmax(0,1fr)_70px] gap-3 border-b border-line/70 px-4 py-2 font-mono text-[8px] uppercase tracking-[0.12em] text-ink-faint">
-        <span>Enabled tools</span><span className="text-center">Approval</span>
-      </div>
-      {connector.tools.map((tool) => {
-        const core = isCoreTool(connector.name, tool.name);
-        const enabled = core || enabledTools.includes(tool.name);
-        return <div key={tool.name} className="grid grid-cols-[minmax(0,1fr)_70px] items-center gap-3 border-b border-line/50 px-4 py-3 last:border-b-0">
-          <label className={`flex items-start gap-3 ${core ? "cursor-default" : "cursor-pointer"}`}>
-            <input type="checkbox" checked={enabled} disabled={core} onChange={(event) => onToolToggle(tool.name, event.target.checked)}
-              className="mt-0.5 accent-[var(--color-signal)]" />
-            <span className="min-w-0"><span className="flex flex-wrap items-center gap-2">
-              <span className="font-mono text-[10px] font-medium text-ink">{tool.name}</span>
-              {core && <span className="font-mono text-[7px] uppercase tracking-[0.12em] text-state-settled">Required</span>}
-            </span>{tool.description && <span className="mt-1 block text-[10px] leading-relaxed text-ink-faint">{tool.description}</span>}</span>
-          </label>
-          <label className={`flex justify-center ${enabled && !core ? "cursor-pointer" : "cursor-not-allowed opacity-35"}`}
-            title={core ? "Mission Control core tools run without an approval gate" : "Pause before this tool runs"}>
-            <input type="checkbox" checked={approvals.includes(tool.name)} disabled={!enabled || core}
-              onChange={(event) => onApprovalToggle(tool.name, event.target.checked)}
-              aria-label={`Require approval for ${tool.name}`} className="accent-[var(--color-state-approval)]" />
-          </label>
-        </div>;
-      })}
+    <div className="flex min-h-14 items-stretch">
+      <label className={`flex shrink-0 items-center px-4 ${required ? "cursor-not-allowed" : "cursor-pointer"}`}>
+        <input type="checkbox" checked={selected} disabled={required} onChange={(event) => onToggle(event.target.checked)}
+          aria-label={required ? `${label} access is required` : `${selected ? "Remove" : "Give"} ${label} connector access`}
+          className="accent-[var(--color-signal)]" />
+      </label>
+      <button type="button" onClick={() => setExpanded((current) => !current)} aria-expanded={expanded}
+        aria-controls={toolsId}
+        className="flex min-w-0 flex-1 items-center gap-3 py-3.5 pr-4 text-left transition-colors hover:bg-panel-hi/60 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-signal">
+        <span className="min-w-0 flex-1">
+          <span className="block truncate text-xs font-semibold text-ink">{label}</span>
+          <span className="mt-0.5 block font-mono text-[8px] uppercase tracking-[0.1em] text-ink-faint">
+            {required ? "Required for every specialist" : `${connector.tools.length} ${connector.tools.length === 1 ? "tool" : "tools"}`}
+          </span>
+        </span>
+        {required && <span className="rounded border border-line px-2 py-1 font-mono text-[8px] uppercase tracking-[0.12em] text-ink-faint">Core</span>}
+        <svg viewBox="0 0 12 12" aria-hidden="true"
+          className={`h-3 w-3 shrink-0 text-ink-faint transition-transform ${expanded ? "rotate-90" : ""}`}>
+          <path d="m4.25 2.25 3.5 3.75-3.5 3.75" fill="none" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      </button>
+    </div>
+    {expanded && <div id={toolsId} className={`border-t border-line ${selected ? "" : "bg-deck/30"}`}>
+      {connector.tools.length > 0 ? <>
+        <div className="grid grid-cols-[minmax(0,1fr)_70px] gap-3 border-b border-line/70 px-4 py-2 font-mono text-[8px] uppercase tracking-[0.12em] text-ink-faint">
+          <span>{selected ? "Enabled tools" : "Select connector to enable tools"}</span><span className="text-center">Approval</span>
+        </div>
+        {connector.tools.map((tool) => {
+          const core = isCoreTool(connector.name, tool.name);
+          const enabled = selected && (core || enabledTools.includes(tool.name));
+          const toolLocked = !selected || core;
+          return <div key={tool.name} className={`grid grid-cols-[minmax(0,1fr)_70px] items-center gap-3 border-b border-line/50 px-4 py-3 last:border-b-0 ${selected ? "" : "opacity-50"}`}>
+            <label className={`flex items-start gap-3 ${toolLocked ? "cursor-not-allowed" : "cursor-pointer"}`}>
+              <input type="checkbox" checked={enabled} disabled={toolLocked}
+                onChange={(event) => onToolToggle(tool.name, event.target.checked)}
+                aria-label={`${enabled ? "Disable" : "Enable"} ${tool.name}`}
+                className="mt-0.5 accent-[var(--color-signal)]" />
+              <span className="min-w-0"><span className="flex flex-wrap items-center gap-2">
+                <span className="font-mono text-[10px] font-medium text-ink">{tool.name}</span>
+                {core && <span className="font-mono text-[7px] uppercase tracking-[0.12em] text-state-settled">Required</span>}
+              </span>{tool.description && <span className="mt-1 block text-[10px] leading-relaxed text-ink-faint">{tool.description}</span>}</span>
+            </label>
+            <label className={`flex justify-center ${enabled && !core ? "cursor-pointer" : "cursor-not-allowed opacity-35"}`}
+              title={core ? "Mission Control core tools run without an approval gate" : "Pause before this tool runs"}>
+              <input type="checkbox" checked={selected && approvals.includes(tool.name)} disabled={!enabled || core}
+                onChange={(event) => onApprovalToggle(tool.name, event.target.checked)}
+                aria-label={`Require approval for ${tool.name}`} className="accent-[var(--color-state-approval)]" />
+            </label>
+          </div>;
+        })}
+      </> : <p className="px-4 py-4 text-[10px] leading-relaxed text-ink-faint">
+        This connector did not report any tools.
+      </p>}
     </div>}
   </div>;
 }
