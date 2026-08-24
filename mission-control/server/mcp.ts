@@ -90,7 +90,7 @@ function buildServer(): McpServer {
       kind: z
         .enum(["artifact", "handoff"])
         .default("artifact")
-        .describe("Use handoff only when a successor task needs this document as input"),
+        .describe("Required decision: use handoff when any successor needs this document as input; use artifact only for durable material that no successor needs"),
     },
     async ({ task_id, title, content, kind }) => {
       const task = await db.task.findUnique({ where: { id: task_id } });
