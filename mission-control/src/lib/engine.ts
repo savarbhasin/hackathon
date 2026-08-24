@@ -73,18 +73,64 @@ export function buildKickoff(input: {
     "",
     `TASK_ID: ${input.taskId}`,
   ];
-  if (input.handoffDocuments.length > 0) {
-    parts.push("", "HANDOFF DOCUMENTS FROM COMPLETED PREDECESSORS:");
-    for (const document of input.handoffDocuments) {
-      parts.push(`- ${document.title} (DOC_ID: ${document.id})`);
+
+  if (input.dependencies.length === 0) {
+    parts.push("", "PREDECESSORS: None. You may begin without waiting for another task.");
+  } else {
+    parts.push("", "PREDECESSOR CONTEXT:");
+    for (const dependency of input.dependencies) {
+      parts.push(`- ${dependency.title} [${dependency.role}] (TASK_ID: ${dependency.id}, STATUS: ${dependency.column})`);
+      if (dependency.summary) parts.push(`  Completion summary: ${dependency.summary}`);
+      if (dependency.documents.length === 0) {
+        parts.push("  Handoff documents: none attached.");
+      } else {
+        parts.push("  Handoff documents:");
+        for (const document of dependency.documents) {
+          parts.push(`  - ${document.title} (DOC_ID: ${document.id})`);
+        }
+      }
     }
-    parts.push("Use get_doc with each DOC_ID before starting work. These documents contain the context passed to you.");
+    const documentCount = input.dependencies.reduce(
+      (count, dependency) => count + dependency.documents.length,
+      0
+    );
+    if (documentCount > 0) {
+      parts.push("Required startup step: call get_doc for every DOC_ID above before doing dependent work.");
+    } else {
+      parts.push("No handoff document was attached. Use the completion summaries only for limited context. If your assignment requires missing predecessor material, ask one precise question instead of inventing it.");
+    }
   }
-  parts.push("", "Begin work now. When finished, call mark_done.");
+
+  if (input.successors.length > 0) {
+    parts.push("", "DOWNSTREAM SUCCESSORS THAT DEPEND ON YOUR OUTPUT:");
+    for (const successor of input.successors) {
+      parts.push(`- ${successor.title} [${successor.role}] (TASK_ID: ${successor.id})`);
+    }
+    parts.push(
+      "Before mark_done, create a self-contained document with kind=\"handoff\" if these successors need substantial context, evidence, decisions, or finished material from you. Verify the create_doc response says kind=handoff and include its DOC_ID in your completion summary."
+    );
+  } else {
+    parts.push(
+      "",
+      "DOWNSTREAM SUCCESSORS: None are recorded at dispatch time. Follow any downstream handoff requirement in YOUR ASSIGNMENT. Otherwise use kind=\"artifact\" for durable human-readable work."
+    );
+  }
+
+  parts.push(
+    "",
+    "EXECUTION RULES:",
+    "- Treat the mission as context and YOUR ASSIGNMENT as the exact scope.",
+    "- Use supplied inputs and readable handoff documents before asking the user for information.",
+    "- Do not invent missing facts, IDs, document contents, tool results, or completed actions.",
+    "- If a required tool or input remains unavailable after safe checks, ask one precise question that explains the blocker.",
+    "- Call mark_done exactly once, only after the deliverable exists and required checks or approval-gated actions have reached a real outcome.",
+    "",
+    "Begin work now."
+  );
   return parts.join("\n");
 }
 
-async function predecessorHandoffDocuments(dependsOn: string[]) {
+async function predecessorContext(dependsOn: string[]) {
   if (dependsOn.length === 0) return [];
   const deps = await db.task.findMany({
     where: { id: { in: dependsOn } },
