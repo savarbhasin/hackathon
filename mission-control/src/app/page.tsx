@@ -652,27 +652,9 @@ function Message({ message, onAnswer }: { message: Msg; onAnswer?: (answers: Ans
 
 function ToolActivity({ tools, active }: { tools: string[]; active: boolean }) {
   const latest = tools[tools.length - 1];
-  const extra = tools.length > 1 ? ` + ${tools.length - 1}` : "";
-  return (
-    <details className="group mb-3 max-w-xl">
-      <summary className="flex list-none items-center gap-1.5 font-mono text-[10px] leading-relaxed text-ink-faint [&::-webkit-details-marker]:hidden">
-        <span className={`min-w-0 truncate ${active ? "tool-activity-live" : ""}`}>{toolActivityLabel(latest, active)}{extra}</span>
-        <svg viewBox="0 0 12 12" className="h-3 w-3 shrink-0 text-ink-faint transition-transform group-open:rotate-90" aria-hidden="true">
-          <path d="m4.5 2.5 3.5 3.5-3.5 3.5" fill="none" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round" />
-        </svg>
-      </summary>
-      <div className="mt-1.5 border-l border-line pl-3">
-        <ol className="space-y-1.5">
-          {tools.map((tool, index) => (
-            <li key={`${tool}-${index}`} className="flex items-start gap-2 font-mono text-[10px] leading-relaxed text-ink-soft">
-              <span className="w-4 shrink-0 text-right tabular-nums text-ink-faint">{index + 1}</span>
-              <code className="break-all">{tool}</code>
-            </li>
-          ))}
-        </ol>
-      </div>
-    </details>
-  );
+  return <div className="mb-3 max-w-xl font-mono text-[10px] leading-relaxed text-ink-faint">
+    <span className={`truncate ${active ? "tool-activity-live" : ""}`}>{toolActivityLabel(latest, active)}</span>
+  </div>;
 }
 
 const TOOL_ACTIVITY: Record<string, { active: string; done: string }> = {
