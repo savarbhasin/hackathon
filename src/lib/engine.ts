@@ -54,13 +54,7 @@ export function buildKickoff(input: {
   taskTitle: string;
   taskDetail?: string | null;
   taskId: string;
-  predecessors: Array<{
-    role: string;
-    title: string;
-    result: string | null;
-    handoff: string | null;
-    documents: Array<{ id: string; title: string }>;
-  }>;
+  handoffDocuments: Array<{ id: string; title: string }>;
 }): string {
   const parts = [
     `MISSION: ${input.missionTitle}`,
@@ -71,43 +65,32 @@ export function buildKickoff(input: {
     "",
     `TASK_ID: ${input.taskId}`,
   ];
-  if (input.predecessors.length > 0) {
-    parts.push("", "CONTEXT FROM COMPLETED PREDECESSORS:");
-    for (const p of input.predecessors) {
-      parts.push(`← [${p.role}] ${p.title}`);
-      if (p.result) parts.push(`  Result: ${p.result}`);
-      if (p.handoff) parts.push(`  Handoff: ${p.handoff}`);
+  if (input.handoffDocuments.length > 0) {
+    parts.push("", "HANDOFF DOCUMENTS FROM COMPLETED PREDECESSORS:");
+    for (const document of input.handoffDocuments) {
+      parts.push(`- ${document.title} (DOC_ID: ${document.id})`);
     }
-  }
-  const documents = input.predecessors.flatMap((predecessor) =>
-    predecessor.documents.map((document) => ({ ...document, predecessor: predecessor.title }))
-  );
-  if (documents.length > 0) {
-    parts.push("", "PRELOADED DOCUMENTS FROM PREDECESSORS:");
-    for (const document of documents) {
-      parts.push(`- ${document.title} (DOC_ID: ${document.id}, from: ${document.predecessor})`);
-    }
-    parts.push("Use get_doc with a DOC_ID when a document contains inputs you need for this assignment.");
+    parts.push("Use get_doc with each DOC_ID before starting work. These documents contain the context passed to you.");
   }
   parts.push("", "Begin work now. When finished, call mark_done.");
   return parts.join("\n");
 }
 
-async function predecessorContexts(dependsOn: string[]) {
+async function predecessorHandoffDocuments(dependsOn: string[]) {
   if (dependsOn.length === 0) return [];
   const deps = await db.task.findMany({
     where: { id: { in: dependsOn } },
-    include: { documents: { select: { id: true, title: true }, orderBy: { createdAt: "asc" } } },
+    include: {
+      documents: {
+        where: { kind: "handoff" },
+        select: { id: true, title: true },
+        orderBy: { createdAt: "asc" },
+      },
+    },
   });
   return deps
     .filter((d) => d.column === "settled")
-    .map((d) => ({
-      role: d.role,
-      title: d.title,
-      result: d.output,
-      handoff: d.handoff,
-      documents: d.documents,
-    }));
+    .flatMap((dependency) => dependency.documents);
 }
 
 export async function dispatchTask(taskId: string): Promise<{ ok: boolean; reason?: string }> {
@@ -131,7 +114,7 @@ export async function dispatchTask(taskId: string): Promise<{ ok: boolean; reaso
     taskTitle: task.title,
     taskDetail: task.detail,
     taskId: task.id,
-    predecessors: await predecessorContexts(dependsOn),
+    handoffDocuments: await predecessorHandoffDocuments(dependsOn),
   });
 
   await db.task.update({ where: { id: taskId }, data: { sessionId: session.id } });

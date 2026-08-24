@@ -25,47 +25,26 @@ function buildServer(): McpServer {
     "Signal that your assigned task is complete. Call this exactly once when work is finished.",
     {
       task_id: z.string().describe("The TASK_ID given in your assignment"),
-      summary: z.string().describe("What you accomplished, concise and factual"),
-      handoff: z
+      summary: z
         .string()
-        .optional()
-        .describe("Key findings/decisions/artifacts downstream tasks need to continue without repeating your work"),
+        .describe("A concise completion report in 2 to 4 factual sentences stating what you did and the outcome"),
     },
-    async ({ task_id, summary, handoff }) => {
+    async ({ task_id, summary }) => {
       const existing = await db.task.findUnique({ where: { id: task_id } });
       if (!existing) return text(`Unknown task_id ${task_id}`);
-      const possibleSuccessors = handoff
-        ? await db.task.findMany({
-            where: { missionId: existing.missionId },
-            select: { dependsOn: true },
-          })
-        : [];
-      const hasSuccessor = possibleSuccessors.some((candidate) => {
-        try {
-          const dependencies = JSON.parse(candidate.dependsOn) as unknown;
-          return Array.isArray(dependencies) && dependencies.includes(task_id);
-        } catch {
-          return false;
-        }
-      });
-      const storedHandoff = hasSuccessor ? handoff?.trim() || null : null;
       const task = await db.task.update({
         where: { id: task_id },
-        data: { handoff: storedHandoff, output: summary.trim() },
+        data: { output: summary.trim() },
       });
       await db.taskEvent.create({
         data: {
           taskId: task_id,
           seq: 900000,
           type: "specialist.mark_done",
-          payload: JSON.stringify({ summary, handoff: storedHandoff }),
+          payload: JSON.stringify({ summary: summary.trim() }),
         },
       });
-      return text(
-        `Recorded. Task ${task.title} will settle when your turn ends.${
-          handoff && !hasSuccessor ? " No handoff was stored because no task depends on this one." : ""
-        }`
-      );
+      return text(`Recorded. Task ${task.title} will settle when your turn ends.`);
     }
   );
 
@@ -108,14 +87,19 @@ function buildServer(): McpServer {
       task_id: z.string().describe("The TASK_ID given in your assignment"),
       title: z.string().min(1).max(160),
       content: z.string().min(1).describe("The complete document in Markdown"),
+      kind: z
+        .enum(["artifact", "handoff"])
+        .default("artifact")
+        .describe("Use handoff only when a successor task needs this document as input"),
     },
-    async ({ task_id, title, content }) => {
+    async ({ task_id, title, content, kind }) => {
       const task = await db.task.findUnique({ where: { id: task_id } });
       if (!task) return text(`Unknown task_id ${task_id}`);
       const doc = await db.document.create({
         data: {
           title,
           content,
+          kind,
           authorRole: task.role,
           missionId: task.missionId,
           taskId: task.id,
@@ -126,10 +110,14 @@ function buildServer(): McpServer {
           taskId: task.id,
           seq: task.lastSeq + 1,
           type: "activity.document_created",
-          payload: JSON.stringify({ title: `Created document: ${doc.title}`, documentId: doc.id }),
+          payload: JSON.stringify({
+            title: `Created document: ${doc.title}`,
+            documentId: doc.id,
+            kind: doc.kind,
+          }),
         },
       });
-      return text(`Document created. id=${doc.id} title="${doc.title}"`);
+      return text(`Document created. id=${doc.id} title="${doc.title}" kind=${doc.kind}`);
     }
   );
 
@@ -156,7 +144,11 @@ function buildServer(): McpServer {
           taskId: task_id,
           seq: (task?.lastSeq ?? 0) + 1,
           type: "activity.document_updated",
-          payload: JSON.stringify({ title: `Updated document: ${doc.title}`, documentId: doc.id }),
+          payload: JSON.stringify({
+            title: `Updated document: ${doc.title}`,
+            documentId: doc.id,
+            kind: doc.kind,
+          }),
         },
       });
       return text(`Document updated. id=${doc.id} title="${doc.title}"`);
