@@ -145,6 +145,7 @@ export default function Home() {
     setConversationId(null);
     setMessages([]);
     setInput("");
+    setAttachedDocumentIds([]);
     setHistoryOpen(false);
   }
 
