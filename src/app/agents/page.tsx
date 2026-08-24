@@ -242,25 +242,37 @@ export default function AgentsPage() {
                 </label>
               </div>
 
-              <EditorSection eyebrow="Identity" title="How the Squad Lead sees this agent"
-                description="Names and role IDs stay fixed after creation so existing task references remain valid.">
-                <div className="grid gap-5 sm:grid-cols-2">
-                  <FieldLabel label="Name">
-                    <input value={draft.name} onChange={(event) => updateName(event.target.value)} readOnly={Boolean(draft.id)}
-                      maxLength={64} placeholder="Release manager" className={inputClass(Boolean(draft.id))} />
+              {draft.id ? (
+                <div className="mb-7 max-w-2xl">
+                  <FieldLabel label="Description">
+                    <input value={draft.description} onChange={(event) => updateDraft({ description: event.target.value })}
+                      maxLength={240} placeholder="One sentence the Squad Lead can use when choosing an agent."
+                      className={inputClass(false)} />
                   </FieldLabel>
-                  <FieldLabel label="Role id">
-                    <input value={draft.slug} onChange={(event) => updateDraft({ slug: slugPreview(event.target.value) })}
-                      readOnly={Boolean(draft.id)} maxLength={48} placeholder="release-manager"
-                      className={`${inputClass(Boolean(draft.id))} font-mono text-xs`} />
-                  </FieldLabel>
+                  <p className="mt-2 text-[10px] leading-relaxed text-ink-faint">
+                    Used by the Squad Lead when choosing a specialist.
+                  </p>
                 </div>
-                <FieldLabel label="What this agent is for" className="mt-5">
-                  <input value={draft.description} onChange={(event) => updateDraft({ description: event.target.value })}
-                    maxLength={240} placeholder="One sentence the Squad Lead can use when choosing an agent."
-                    className={inputClass(false)} />
-                </FieldLabel>
-              </EditorSection>
+              ) : (
+                <EditorSection eyebrow="Identity" title="Set up this agent"
+                  description="Choose the name and role ID the Squad Lead will use for this new specialist.">
+                  <div className="grid gap-5 sm:grid-cols-2">
+                    <FieldLabel label="Name">
+                      <input value={draft.name} onChange={(event) => updateName(event.target.value)}
+                        maxLength={64} placeholder="Release manager" className={inputClass(false)} />
+                    </FieldLabel>
+                    <FieldLabel label="Role id">
+                      <input value={draft.slug} onChange={(event) => updateDraft({ slug: slugPreview(event.target.value) })}
+                        maxLength={48} placeholder="release-manager" className={`${inputClass(false)} font-mono text-xs`} />
+                    </FieldLabel>
+                  </div>
+                  <FieldLabel label="Description" className="mt-5">
+                    <input value={draft.description} onChange={(event) => updateDraft({ description: event.target.value })}
+                      maxLength={240} placeholder="One sentence the Squad Lead can use when choosing an agent."
+                      className={inputClass(false)} />
+                  </FieldLabel>
+                </EditorSection>
+              )}
 
               <EditorSection eyebrow="Runtime" title="Model and agent capabilities"
                 description="Use the lightest model that can do the work. Enable sandbox and subagents only when the assignment needs them.">
