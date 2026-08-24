@@ -75,6 +75,10 @@ export default function Home() {
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [input, setInput] = useState("");
+  const [documents, setDocuments] = useState<MentionableDocument[]>([]);
+  const [attachedDocumentIds, setAttachedDocumentIds] = useState<string[]>([]);
+  const [mentionOpen, setMentionOpen] = useState(false);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
   const [busy, setBusy] = useState(false);
   const [loadingConversation, setLoadingConversation] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
