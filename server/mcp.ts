@@ -82,7 +82,7 @@ function buildServer(): McpServer {
 
   server.tool(
     "create_doc",
-    "Create a Markdown document linked to your assigned task and its mission.",
+    "Create a Markdown document linked to your assigned task and mission. Use kind=handoff for substantial output needed by any downstream successor; use artifact only when no successor needs the document.",
     {
       task_id: z.string().describe("The TASK_ID given in your assignment"),
       title: z.string().min(1).max(160),
