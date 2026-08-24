@@ -1,0 +1,69 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Mission {
+  id        String   @id @default(cuid())
+  title     String
+  goal      String
+  status    String   @default("planning")
+  createdAt DateTime @default(now())
+  tasks     Task[]
+}
+
+model Task {
+  id        String    @id @default(cuid())
+  missionId String
+  mission   Mission   @relation(fields: [missionId], references: [id], onDelete: Cascade)
+  title     String
+  detail    String?
+  role      String
+  column    String    @default("backlog")
+  sessionId String?
+  turnId    String?
+  lastSeq   Int       @default(0)
+  dependsOn String    @default("[]")
+  handoff   String?
+  output    String?
+  error     String?
+  pendingActions String?
+  position  Int       @default(0)
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  events TaskEvent[]
+
+  @@index([missionId])
+}
+
+model TaskEvent {
+  id        String   @id @default(cuid())
+  taskId    String
+  task      Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  seq       Int
+  type      String
+  payload   String
+  createdAt DateTime @default(now())
+
+  @@index([taskId, seq])
+}
+
+model Schedule {
+  id        String    @id @default(cuid())
+  name      String
+  cronExpr  String
+  prompt    String
+  enabled   Boolean   @default(true)
+  lastRunAt DateTime?
+  createdAt DateTime  @default(now())
+}
+
+model Setting {
+  key   String @id
+  value String
+}
