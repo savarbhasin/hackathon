@@ -214,6 +214,9 @@ export function registryError(error: unknown): { status: number; message: string
 
 async function listAndSeedAgents(): Promise<TrueForgeApi.Agent[]> {
   let { data: agents } = await tf().agents.list();
+  const managedSlugs = new Set(
+    (await db.agentProfile.findMany({ select: { slug: true } })).map((profile) => profile.slug)
+  );
   const names = new Set(agents.map((agent) => agent.name));
   const missing = Object.values(ROLES).filter((role) => !names.has(role.id));
 
