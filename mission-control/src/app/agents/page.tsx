@@ -410,11 +410,11 @@ function CapabilityToggle({ label, description, checked, disabled = false, onCha
   label: string; description: string; checked: boolean; disabled?: boolean; onChange: (checked: boolean) => void;
 }) {
   return <button type="button" aria-pressed={checked} disabled={disabled} onClick={() => onChange(!checked)}
-    className={`group flex min-h-24 w-full items-start justify-between gap-4 rounded-md border p-3 text-left transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-signal ${disabled
+    className={`group flex min-h-0 w-full items-start justify-between gap-3 rounded-md border p-3 text-left transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-signal ${disabled
       ? "cursor-not-allowed border-line bg-deck opacity-55"
       : checked ? "border-signal/70 bg-signal/[0.07]" : "border-line bg-transparent hover:border-line-strong hover:bg-panel/45"}`}>
-    <span><span className="block text-xs font-semibold text-ink">{label}</span>
-      <span className="mt-1 block text-[10px] leading-relaxed text-ink-faint">{description}</span></span>
+      <span className="min-w-0"><span className="block text-xs font-semibold text-ink">{label}</span>
+      <span className="mt-1 block text-[10px] leading-5 text-ink-faint">{description}</span></span>
     <span className={`mt-0.5 shrink-0 rounded border px-1.5 py-1 font-mono text-[8px] uppercase tracking-[0.1em] ${checked
       ? "border-signal/60 bg-signal text-deck" : "border-line text-ink-faint group-hover:text-ink-soft"}`}>
       {checked ? "On" : "Off"}
