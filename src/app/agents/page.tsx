@@ -258,10 +258,16 @@ export default function AgentsPage() {
                 description="Use the lightest model that can do the work. Enable sandbox and subagents only when the assignment needs them.">
                 <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(280px,0.8fr)]">
                   <FieldLabel label="Model">
-                    <select value={draft.model} onChange={(event) => updateDraft({ model: event.target.value })} className={inputClass(false)}>
-                      {catalog.models.length === 0 && <option value={draft.model}>{draft.model || "No models configured"}</option>}
-                      {catalog.models.map((model) => <option key={model.name} value={model.name}>{model.name}</option>)}
-                    </select>
+                    <div className="relative">
+                      <select value={draft.model} onChange={(event) => updateDraft({ model: event.target.value })}
+                        className={`${inputClass(false)} appearance-none pr-10`}>
+                        {catalog.models.length === 0 && <option value={draft.model}>{draft.model || "No models configured"}</option>}
+                        {catalog.models.map((model) => <option key={model.name} value={model.name}>{model.name}</option>)}
+                      </select>
+                      <svg viewBox="0 0 12 12" aria-hidden="true" className="pointer-events-none absolute right-3 top-1/2 h-3 w-3 -translate-y-1/2 text-ink-faint">
+                        <path d="m2.5 4.25 3.5 3.5 3.5-3.5" fill="none" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round" />
+                      </svg>
+                    </div>
                   </FieldLabel>
                   <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-1 xl:grid-cols-2">
                     <CapabilityToggle label="Sandbox"
@@ -303,7 +309,7 @@ export default function AgentsPage() {
               </EditorSection>
 
               {error && <p className="mt-5 rounded-md border border-state-blocked/30 bg-state-blocked/[0.04] px-3 py-2.5 text-xs text-state-blocked">{error}</p>}
-              <div className="sticky bottom-0 mt-6 flex items-center gap-3 border-t border-line bg-deck/95 py-5 backdrop-blur-sm">
+              <div className="sticky bottom-3 mt-6 flex items-center gap-3 rounded-lg border border-line-strong bg-deck/95 px-4 py-4 shadow-[0_8px_24px_rgba(0,0,0,0.16)] backdrop-blur-sm">
                 <p className="text-[10px] leading-relaxed text-ink-faint">
                   Changes apply to future turns, including resumed paused tasks.
                 </p>
@@ -342,13 +348,17 @@ function FieldLabel({ label, className = "", children }: { label: string; classN
 function CapabilityToggle({ label, description, checked, disabled = false, onChange }: {
   label: string; description: string; checked: boolean; disabled?: boolean; onChange: (checked: boolean) => void;
 }) {
-  return <label className={`flex items-start gap-3 rounded-md border p-3 ${disabled
-    ? "cursor-not-allowed border-line bg-deck opacity-55" : "cursor-pointer border-line-strong bg-panel"}`}>
-    <input type="checkbox" checked={checked} disabled={disabled} onChange={(event) => onChange(event.target.checked)}
-      className="mt-0.5 accent-[var(--color-signal)]" />
+  return <button type="button" aria-pressed={checked} disabled={disabled} onClick={() => onChange(!checked)}
+    className={`group flex min-h-24 w-full items-start justify-between gap-4 rounded-md border p-3 text-left transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-signal ${disabled
+      ? "cursor-not-allowed border-line bg-deck opacity-55"
+      : checked ? "border-signal/70 bg-signal/[0.07]" : "border-line bg-transparent hover:border-line-strong hover:bg-panel/45"}`}>
     <span><span className="block text-xs font-semibold text-ink">{label}</span>
       <span className="mt-1 block text-[10px] leading-relaxed text-ink-faint">{description}</span></span>
-  </label>;
+    <span className={`mt-0.5 shrink-0 rounded border px-1.5 py-1 font-mono text-[8px] uppercase tracking-[0.1em] ${checked
+      ? "border-signal/60 bg-signal text-deck" : "border-line text-ink-faint group-hover:text-ink-soft"}`}>
+      {checked ? "On" : "Off"}
+    </span>
+  </button>;
 }
 
 function ConnectorEditor({ connector, server, selected, required, onToggle, onToolToggle, onApprovalToggle }: {
