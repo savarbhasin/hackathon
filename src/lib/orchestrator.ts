@@ -28,6 +28,9 @@ async function ensureConversation(conversationId: string | undefined, message: s
   } else {
     try {
       await tf().sessions.get(conversation.sessionId);
+      await tf().sessions.update(conversation.sessionId, {
+        agent: { spec: ORCHESTRATOR_SPEC as never },
+      });
     } catch {
       const sessionId = await createOrchestratorSession();
       conversation = await db.conversation.update({
