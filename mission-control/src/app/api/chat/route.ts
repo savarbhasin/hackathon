@@ -14,6 +14,7 @@ export async function POST(req: Request) {
   const body = (await req.json().catch(() => null)) as {
     message?: string;
     conversationId?: string;
+    documentIds?: string[];
     answers?: AnswerBody[];
   } | null;
 
@@ -23,7 +24,11 @@ export async function POST(req: Request) {
 
   const turn = body.answers?.length
     ? resumeOrchestratorTurn(body.conversationId!, body.answers)
-    : runOrchestratorTurn(body!.message!.trim(), body?.conversationId);
+    : runOrchestratorTurn(
+      body!.message!.trim(),
+      body?.conversationId,
+      Array.isArray(body?.documentIds) ? body.documentIds.filter((id): id is string => typeof id === "string") : []
+    );
 
   const encoder = new TextEncoder();
   const stream = new ReadableStream<Uint8Array>({
