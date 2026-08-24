@@ -194,13 +194,18 @@ export async function dispatchTask(taskId: string): Promise<{ ok: boolean; reaso
   const { data: session } = await tf().sessions.create({ agent: { name: task.role } });
 
   const dependsOn = JSON.parse(task.dependsOn || "[]") as string[];
+  const [dependencies, successors] = await Promise.all([
+    predecessorContext(dependsOn),
+    successorContext(task.id, task.missionId),
+  ]);
   const kickoff = buildKickoff({
     missionTitle: task.mission.title,
     missionGoal: task.mission.goal,
     taskTitle: task.title,
     taskDetail: task.detail,
     taskId: task.id,
-    handoffDocuments: await predecessorHandoffDocuments(dependsOn),
+    dependencies,
+    successors,
   });
 
   await db.task.update({ where: { id: taskId }, data: { sessionId: session.id } });
