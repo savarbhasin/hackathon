@@ -359,6 +359,7 @@ export default function Home() {
               rows={2}
               className="scrollbar-none min-h-[58px] w-full resize-none border-0 bg-transparent text-sm leading-6 text-ink outline-none placeholder:text-ink-faint disabled:opacity-50"
             />
+            {mentionOpen && matchingDocuments.length > 0 && <div className="mb-2 overflow-hidden rounded-md border border-line-strong bg-deck shadow-xl"><p className="border-b border-line px-3 py-2 font-mono text-[8px] uppercase tracking-[0.13em] text-ink-faint">Attach a document</p>{matchingDocuments.map((document) => <button key={document.id} type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => attachDocument(document)} className="flex w-full items-center gap-3 px-3 py-2.5 text-left transition-colors hover:bg-panel-hi"><span className="text-signal">@</span><span className="min-w-0"><span className="block truncate text-xs font-medium text-ink">{document.title}</span><span className="mt-0.5 block text-[9px] text-ink-faint">{document.authorRole === "user" ? "Your document" : "Agent document"}</span></span></button>)}</div>}
             <div className="flex items-center gap-3">
               <span className="text-[10px] text-ink-faint">Enter to send</span>
               <span className="text-[10px] text-ink-faint">Shift + Enter for a new line</span>
