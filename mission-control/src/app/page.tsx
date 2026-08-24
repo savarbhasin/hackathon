@@ -341,10 +341,13 @@ export default function Home() {
             className="signal-glow mx-auto flex max-w-3xl flex-col rounded-2xl border border-line-strong bg-panel-hi px-4 pb-3 pt-3 focus-within:border-signal/60"
           >
             <label htmlFor="mission-input" className="sr-only">Assign work</label>
+            {attachedDocumentIds.length > 0 && <div className="mb-2 flex flex-wrap gap-1.5">{documents.filter((document) => attachedDocumentIds.includes(document.id)).map((document) => <span key={document.id} className="inline-flex items-center gap-1 rounded border border-signal/35 bg-signal/[0.08] px-2 py-1 text-[10px] text-signal"><span className="max-w-48 truncate">@{document.title}</span><button type="button" onClick={() => setAttachedDocumentIds((current) => current.filter((id) => id !== document.id))} className="ml-0.5 text-signal/75 hover:text-ink" aria-label={`Remove ${document.title}`}>×</button></span>)}</div>}
             <textarea
               id="mission-input"
+              ref={inputRef}
               value={input}
-              onChange={(event) => setInput(event.target.value)}
+              onChange={(event) => updateInput(event.target.value)}
+              onClick={() => setMentionOpen(mentionQuery !== null)}
               onKeyDown={(event) => {
                 if (event.key === "Enter" && !event.shiftKey) {
                   event.preventDefault();
