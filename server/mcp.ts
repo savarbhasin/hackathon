@@ -7,7 +7,7 @@ import { Cron } from "croner";
 import { db } from "../src/lib/db";
 import { getAgentDefinition, listAgentDefinitions } from "../src/lib/agents";
 import { dispatchTask, getBoard, sweep } from "../src/lib/engine";
-import { orchestratorSay } from "../src/lib/orchestrator";
+import { runScheduleNow } from "../src/lib/schedule-runner";
 
 const PORT = Number(process.env.MCP_PORT ?? 3100);
 
@@ -271,7 +271,7 @@ function buildServer(): McpServer {
     { name: z.string(), cron_expr: z.string().describe("Standard cron, e.g. '0 7 * * *' = daily 07:00"), prompt: z.string() },
     async ({ name, cron_expr, prompt }) => {
       const schedule = await db.schedule.create({ data: { name, cronExpr: cron_expr, prompt } });
-      registerJob(schedule.id, cron_expr, prompt);
+      registerJob(schedule.id, cron_expr);
       return text(`Scheduled "${name}" (${cron_expr}). id=${schedule.id}`);
     }
   );
@@ -295,29 +295,24 @@ function buildServer(): McpServer {
   return server;
 }
 
-function registerJob(id: string, cronExpr: string, prompt: string) {
+function registerJob(id: string, cronExpr: string) {
   jobs.get(id)?.stop();
   const job = new Cron(cronExpr).schedule(() => {
-    void db.schedule
-      .findUnique({ where: { id } })
-      .then((schedule) => {
-        if (!schedule?.enabled) {
-          jobs.get(id)?.stop();
-          jobs.delete(id);
-          return null;
-        }
-        return db.schedule
-          .update({ where: { id }, data: { lastRunAt: new Date() } })
-          .then(() => orchestratorSay(prompt));
-      })
-      .catch((e) => console.error("[schedule]", id, e));
+    void runScheduleNow(id).catch((error) => {
+      if (error instanceof Error && error.name === "ScheduleDisabledError") {
+        jobs.get(id)?.stop();
+        jobs.delete(id);
+        return;
+      }
+      console.error("[schedule]", id, error);
+    });
   });
   jobs.set(id, job);
 }
 
 async function bootJobs() {
   const schedules = await db.schedule.findMany({ where: { enabled: true } });
-  for (const s of schedules) registerJob(s.id, s.cronExpr, s.prompt);
+  for (const s of schedules) registerJob(s.id, s.cronExpr);
   console.log(`[mcp] ${schedules.length} schedule(s) active`);
 }
 
