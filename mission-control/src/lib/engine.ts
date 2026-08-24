@@ -142,9 +142,41 @@ async function predecessorContext(dependsOn: string[]) {
       },
     },
   });
-  return deps
-    .filter((d) => d.column === "settled")
-    .flatMap((dependency) => dependency.documents);
+  const byId = new Map(deps.map((dependency) => [dependency.id, dependency]));
+  return dependsOn.flatMap((id) => {
+    const dependency = byId.get(id);
+    if (!dependency) return [];
+    return [{
+      id: dependency.id,
+      title: dependency.title,
+      role: dependency.role,
+      column: dependency.column,
+      summary: dependency.output ? truncate(dependency.output, 1200) : null,
+      documents: dependency.column === "settled" ? dependency.documents : [],
+    }];
+  });
+}
+
+async function successorContext(taskId: string, missionId: string) {
+  const candidates = await db.task.findMany({
+    where: { missionId, id: { not: taskId } },
+    select: { id: true, title: true, role: true, dependsOn: true },
+    orderBy: { position: "asc" },
+  });
+  return candidates
+    .filter((candidate) => dependencyIds(candidate.dependsOn).includes(taskId))
+    .map(({ id, title, role }) => ({ id, title, role }));
+}
+
+function dependencyIds(value: string): string[] {
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return Array.isArray(parsed)
+      ? parsed.filter((id): id is string => typeof id === "string" && id.length > 0)
+      : [];
+  } catch {
+    return [];
+  }
 }
 
 export async function dispatchTask(taskId: string): Promise<{ ok: boolean; reason?: string }> {
