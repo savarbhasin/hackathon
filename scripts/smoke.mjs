@@ -8,7 +8,7 @@ const client = new TrueForge({
 const { data: session } = await client.sessions.create({
   agent: {
     spec: {
-      model: { name: "openai/gpt-5-4-mini" },
+      model: { name: "openai/gpt-5-6-luna" },
       instructions: "You are a concise assistant. Answer in at most two sentences.",
     },
   },
