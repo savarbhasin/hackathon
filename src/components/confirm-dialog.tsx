@@ -47,14 +47,14 @@ export function ConfirmDialog({
         aria-describedby="confirm-dialog-description"
         className="w-full max-w-sm rounded-xl border border-line-strong bg-panel p-5 shadow-2xl"
       >
-        <p className="font-mono text-[9px] font-semibold uppercase tracking-[0.16em] text-state-blocked">Confirm deletion</p>
+        <p className="font-mono text-[9px] font-semibold uppercase tracking-[0.16em] text-signal">Confirm deletion</p>
         <h2 id="confirm-dialog-title" className="mt-2 text-lg font-semibold tracking-[-0.025em] text-ink">{title}</h2>
         <p id="confirm-dialog-description" className="mt-2 text-sm leading-6 text-ink-soft">{description}</p>
         <div className="mt-6 flex justify-end gap-2">
           <button type="button" onClick={onCancel} disabled={busy} className="rounded-md border border-line-strong px-3 py-2 text-xs font-semibold text-ink-soft transition-colors hover:border-ink-faint hover:text-ink disabled:opacity-40">
             Cancel
           </button>
-          <button type="button" onClick={onConfirm} disabled={busy} className="rounded-md bg-state-blocked px-3 py-2 text-xs font-semibold text-deck transition-colors hover:brightness-110 disabled:opacity-40">
+          <button type="button" onClick={onConfirm} disabled={busy} className="rounded-md bg-signal px-3 py-2 text-xs font-semibold text-deck transition-colors hover:brightness-110 disabled:opacity-40">
             {busy ? "Deleting..." : confirmLabel}
           </button>
         </div>
