@@ -74,10 +74,10 @@ export function ConsoleShell({ children }: { children: ReactNode }) {
 
   return (
     <div className="relative flex h-dvh overflow-hidden bg-deck">
-      <aside className={`${sidebarHidden ? "hidden" : "hidden md:flex"} w-[236px] shrink-0 flex-col border-r border-line bg-panel`}>
-        <Link href="/" className="flex h-[72px] items-center gap-2.5 px-4 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-signal">
-          <span className="text-signal"><Mark /></span>
-          <span className="font-display text-[17px] font-extrabold tracking-[-0.03em] text-ink">The Squad</span>
+      <aside aria-hidden={sidebarHidden} inert={sidebarHidden}
+        className={`hidden shrink-0 flex-col overflow-hidden border-r border-line bg-panel transition-[width,opacity] duration-300 ease-out md:flex ${sidebarHidden ? "w-0 opacity-0" : "w-[236px] opacity-100"}`}>
+        <Link href="/" className="flex h-[72px] min-w-[236px] items-center px-4 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-signal">
+          <span className="squad-wordmark text-[22px] text-ink">the squad</span>
         </Link>
         <NavLinks />
       </aside>
