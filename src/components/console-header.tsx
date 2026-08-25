@@ -5,16 +5,6 @@ import { usePathname } from "next/navigation";
 import type { ReactNode } from "react";
 import { useState } from "react";
 
-function Mark() {
-  return (
-    <svg viewBox="0 0 28 28" className="h-5 w-5" aria-hidden="true">
-      <path d="M5 20.5V7.5L14 3l9 4.5v13L14 25z" fill="none" stroke="currentColor" strokeWidth="1.3" />
-      <path d="M9 17V10.5l5-2.5 5 2.5V17l-5 2.5z" fill="none" stroke="currentColor" strokeWidth="1.3" />
-      <circle cx="14" cy="14" r="2" fill="currentColor" />
-    </svg>
-  );
-}
-
 function NavIcon({ name }: { name: "command" | "fleet" | "agents" | "schedules" | "docs" }) {
   if (name === "command") {
     return <svg viewBox="0 0 20 20" className="h-[18px] w-[18px]" aria-hidden="true"><path d="M4 4.5h12v8.5H9l-3.5 2.5V13H4z" fill="none" stroke="currentColor" strokeWidth="1.35" strokeLinejoin="round" /><path d="M7 7.5h6M7 10h4" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" /></svg>;
