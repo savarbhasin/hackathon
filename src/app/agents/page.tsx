@@ -317,7 +317,7 @@ export default function AgentsPage() {
                   <input value={connectorSearch} onChange={(event) => setConnectorSearch(event.target.value)} placeholder="Search connectors"
                     className="w-full rounded-md border border-line bg-deck px-3 py-2 text-xs text-ink outline-none placeholder:text-ink-faint focus:border-signal" />
                 </label>
-                <div className="h-96 overflow-y-auto overscroll-contain pr-1">
+                <div className="h-[26rem] overflow-y-auto overscroll-contain pr-1">
                   <div className="space-y-3">
                     {visibleConnectors.map((connector) => {
                       const server = draft.mcpServers.find((item) => item.name === connector.name);
