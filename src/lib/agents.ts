@@ -52,6 +52,101 @@ export interface AgentCatalog {
 
 export class AgentInputError extends Error {}
 
+interface RosterEntry {
+  slug: string;
+  name: string;
+  description: string;
+  mcpServers: TrueForgeApi.McpServer[];
+  sandboxEnabled: boolean;
+  subagentsEnabled: boolean;
+}
+
+const ROSTER_HEADER = `## Available agents
+This roster is the complete set of specialist agents you may assign. Use each id exactly as the role value in create_task. Never invent an agent name or assume a connector exists.`;
+
+export async function agentRosterBlock(): Promise<string> {
+  let entries: RosterEntry[];
+  try {
+    entries = (await listAgentDefinitions())
+      .filter((agent) => agent.enabled)
+      .map(({ slug, name, description, mcpServers, sandboxEnabled, subagentsEnabled }) => ({
+        slug,
+        name,
+        description,
+        mcpServers,
+        sandboxEnabled,
+        subagentsEnabled,
+      }));
+  } catch (err) {
+    console.error("Live agent catalog unavailable; falling back to preset roles", err);
+    entries = await presetRosterEntries();
+  }
+
+  const header = entries.length > 0
+    ? ROSTER_HEADER
+    : `${ROSTER_HEADER}\nNo agents are currently enabled. Do not call create_task or dispatch_ready; report to the user that no specialist agents are available.`;
+
+  if (entries.length === 0) return header;
+
+  const lines = entries.map((entry) => {
+    const connectors = entry.mcpServers.map(describeMcpServer).join("; ");
+    const capabilities = [
+      entry.sandboxEnabled ? "sandbox" : null,
+      entry.subagentsEnabled ? "subagents" : null,
+    ].filter(Boolean).join(", ");
+    const description = rosterText(entry.description).replace(/\.+$/, "");
+    let line = `- ${rosterText(entry.slug, 64)} (${rosterText(entry.name, 120)}): ${description}. Connectors: ${connectors || "mission-control completion tools only"}`;
+    if (capabilities) line += `. Capabilities: ${capabilities}`;
+    return line;
+  });
+  return `${header}\n${lines.join("\n")}`;
+}
+
+async function presetRosterEntries(): Promise<RosterEntry[]> {
+  let disabledSlugs = new Set<string>();
+  try {
+    const profiles = await db.agentProfile.findMany({ where: { enabled: false } });
+    disabledSlugs = new Set(profiles.map((profile) => profile.slug));
+  } catch {
+    // Local metadata unavailable too; advertise nothing rather than guessing.
+    return [];
+  }
+  return Object.values(ROLES)
+    .filter((role) => !disabledSlugs.has(role.id))
+    .map((role) => ({
+      slug: role.id,
+      name: role.label,
+      description: role.description,
+      mcpServers: role.spec.mcpServers ?? [],
+      sandboxEnabled: role.spec.config?.sandbox?.enabled ?? false,
+      subagentsEnabled: role.spec.config?.dynamicSubAgents?.enabled ?? true,
+    }));
+}
+
+// Agent metadata is mutable user input; flatten it so a crafted description
+// cannot forge roster lines or inject directives into the instructions.
+function rosterText(value: string, max = 240): string {
+  return value.replace(/\s+/g, " ").trim().slice(0, max);
+}
+
+function describeMcpServer(server: TrueForgeApi.McpServer): string {
+  const enabled = server.enableTools ?? [];
+  const disabled = server.disableTools ?? [];
+  const approval = server.requireApprovalForTools ?? [];
+  let summary = enabled.includes("@all") || enabled.length === 0
+    ? "all tools"
+    : rosterText(enabled.join(", "), 400);
+  if (disabled.includes("@all")) {
+    summary = "no tools";
+  } else if (disabled.length > 0) {
+    summary = `${summary} (excluding ${rosterText(disabled.join(", "), 200)})`;
+  }
+  const name = rosterText(server.name, 64);
+  return approval.length > 0
+    ? `${name}: ${summary} (approval required: ${rosterText(approval.join(", "), 200)})`
+    : `${name}: ${summary}`;
+}
+
 export function agentSlug(value: string): string {
   return value
     .trim()
