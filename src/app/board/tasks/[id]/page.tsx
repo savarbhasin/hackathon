@@ -400,13 +400,18 @@ function ActionPanel({
 
   if (questions.length > 0) {
     return (
-      <section className="relative mt-6 overflow-hidden rounded-lg border border-state-blocked/50 bg-state-blocked/[0.07] p-5 sm:p-6">
-        <span className="absolute inset-y-0 left-0 w-1 bg-state-blocked" />
-        <p className="font-mono text-[9px] font-semibold uppercase tracking-[0.18em] text-state-blocked">Agent needs an answer</p>
-        <h2 className="mt-2 text-xl font-semibold tracking-[-0.025em] text-ink">Help the agent continue</h2>
-        <PendingCalls actions={questions} />
+      <section className="question-attention relative mt-6 overflow-hidden rounded-lg p-5 sm:p-6">
+        <div className="flex items-start gap-3 border-b border-line pb-4">
+          <span className="mt-1.5 h-2 w-2 shrink-0 rounded-full bg-state-blocked" />
+          <div>
+            <p className="font-mono text-[9px] font-semibold uppercase tracking-[0.18em] text-state-blocked">Agent needs your input</p>
+            <h2 className="mt-1.5 text-lg font-semibold tracking-[-0.025em] text-ink">Answer to resume the task</h2>
+            <p className="mt-1.5 text-xs leading-5 text-ink-faint">The agent will continue as soon as you send a response.</p>
+          </div>
+        </div>
+        <PendingCalls actions={questions} tone="question" />
         <form
-          className="mt-5"
+          className="mt-5 border-t border-line pt-5"
           onSubmit={(event) => {
             event.preventDefault();
             const content = answer.trim();
