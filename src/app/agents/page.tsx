@@ -201,7 +201,7 @@ export default function AgentsPage() {
 
       {loading ? <AgentLoading /> : (
         <div className="grid min-h-0 flex-1 grid-cols-1 md:grid-cols-[minmax(0,1fr)_290px]">
-          <aside className="scrollbar-none order-1 max-h-52 overflow-y-auto border-b border-line bg-panel/55 p-3 md:order-2 md:max-h-none md:border-b-0 md:border-l">
+          <aside className="order-1 min-h-0 max-h-52 overflow-y-auto border-b border-line bg-panel/55 p-3 md:order-2 md:h-full md:max-h-none md:border-b-0 md:border-l">
             <p className="px-2 pb-2 font-mono text-[8px] uppercase tracking-[0.16em] text-ink-faint">
               {agents.filter((agent) => agent.enabled).length} active
             </p>
