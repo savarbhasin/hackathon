@@ -52,15 +52,21 @@ async function ensureConversation(conversationId: string | undefined, message: s
   } else {
     try {
       await tf().sessions.get(conversation.sessionId);
-      await tf().sessions.update(conversation.sessionId, {
-        agent: { spec: await orchestratorSpec() as never },
-      });
-    } catch {
+    } catch (err) {
+      console.error("Orchestrator session missing; recreating", err);
       const sessionId = await createOrchestratorSession();
       conversation = await db.conversation.update({
         where: { id: conversation.id },
         data: { sessionId },
       });
+    }
+
+    try {
+      await tf().sessions.update(conversation.sessionId, {
+        agent: { spec: await orchestratorSpec() as never },
+      });
+    } catch (err) {
+      console.error("Orchestrator spec refresh failed; continuing with current spec", err);
     }
   }
 
