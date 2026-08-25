@@ -480,30 +480,32 @@ function ConnectorEditor({ connector, server, required, onToolToggle, onAllTools
         <div className="grid grid-cols-[minmax(0,1fr)_70px] gap-3 border-b border-line/70 px-4 py-2 font-mono text-[8px] uppercase tracking-[0.12em] text-ink-faint">
           <span>Enabled tools</span><span className="text-center">Approval</span>
         </div>
-        {visibleTools.map((tool) => {
-          const core = isCoreTool(connector.name, tool.name);
-          const enabled = core || enabledTools.includes(tool.name);
-          const toolLocked = core;
-          return <div key={tool.name} className="grid grid-cols-[minmax(0,1fr)_70px] items-center gap-3 border-b border-line/50 px-4 py-3 last:border-b-0">
-            <label className={`flex items-start gap-3 ${toolLocked ? "cursor-not-allowed" : "cursor-pointer"}`}>
-              <input type="checkbox" checked={enabled} disabled={toolLocked}
-                onChange={(event) => onToolToggle(tool.name, event.target.checked)}
-                aria-label={`${enabled ? "Disable" : "Enable"} ${tool.name}`}
-                className="mt-0.5 accent-[var(--color-signal)]" />
-              <span className="min-w-0"><span className="flex flex-wrap items-center gap-2">
-                <span className="font-mono text-[10px] font-medium text-ink">{tool.name}</span>
-                {core && <span className="font-mono text-[7px] uppercase tracking-[0.12em] text-state-settled">Required</span>}
-              </span>{tool.description && <span className="mt-1 block text-[10px] leading-relaxed text-ink-faint">{tool.description}</span>}</span>
-            </label>
-            <label className={`flex justify-center ${enabled && !core ? "cursor-pointer" : "cursor-not-allowed opacity-35"}`}
-              title={core ? "Mission Control core tools run without an approval gate" : "Pause before this tool runs"}>
-              <input type="checkbox" checked={approvals.includes(tool.name)} disabled={!enabled || core}
-                onChange={(event) => onApprovalToggle(tool.name, event.target.checked)}
-                aria-label={`Require approval for ${tool.name}`} className="accent-[var(--color-state-approval)]" />
-            </label>
-          </div>;
-        })}
-        {visibleTools.length === 0 && <p className="px-4 py-5 text-xs text-ink-faint">No tools match {search}.</p>}
+        <div className="h-72 overflow-y-auto overscroll-contain">
+          {visibleTools.map((tool) => {
+            const core = isCoreTool(connector.name, tool.name);
+            const enabled = core || enabledTools.includes(tool.name);
+            const toolLocked = core;
+            return <div key={tool.name} className="grid grid-cols-[minmax(0,1fr)_70px] items-center gap-3 border-b border-line/50 px-4 py-3 last:border-b-0">
+              <label className={`flex items-start gap-3 ${toolLocked ? "cursor-not-allowed" : "cursor-pointer"}`}>
+                <input type="checkbox" checked={enabled} disabled={toolLocked}
+                  onChange={(event) => onToolToggle(tool.name, event.target.checked)}
+                  aria-label={`${enabled ? "Disable" : "Enable"} ${tool.name}`}
+                  className="mt-0.5 accent-[var(--color-signal)]" />
+                <span className="min-w-0"><span className="flex flex-wrap items-center gap-2">
+                  <span className="font-mono text-[10px] font-medium text-ink">{tool.name}</span>
+                  {core && <span className="font-mono text-[7px] uppercase tracking-[0.12em] text-state-settled">Required</span>}
+                </span>{tool.description && <span className="mt-1 block text-[10px] leading-relaxed text-ink-faint">{tool.description}</span>}</span>
+              </label>
+              <label className={`flex justify-center ${enabled && !core ? "cursor-pointer" : "cursor-not-allowed opacity-35"}`}
+                title={core ? "Mission Control core tools run without an approval gate" : "Pause before this tool runs"}>
+                <input type="checkbox" checked={approvals.includes(tool.name)} disabled={!enabled || core}
+                  onChange={(event) => onApprovalToggle(tool.name, event.target.checked)}
+                  aria-label={`Require approval for ${tool.name}`} className="accent-[var(--color-state-approval)]" />
+              </label>
+            </div>;
+          })}
+          {visibleTools.length === 0 && <p className="px-4 py-5 text-xs text-ink-faint">No tools match {search}.</p>}
+        </div>
       </> : <p className="px-4 py-4 text-[10px] leading-relaxed text-ink-faint">
         This connector did not report any tools.
       </p>}
