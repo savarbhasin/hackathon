@@ -1,6 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 interface ToolOption { name: string; description?: string }
 interface ConnectorOption { name: string; url?: string; tools: ToolOption[] }
@@ -47,6 +49,7 @@ export default function AgentsPage() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [connectorSearch, setConnectorSearch] = useState("");
 
   const loadAgents = useCallback(async (preferredId?: string) => {
     const response = await fetch("/api/agents", { cache: "no-store" });
@@ -182,6 +185,10 @@ export default function AgentsPage() {
 
   const agents = catalog.agents;
   const connectors = connectorCatalog(catalog.connectors);
+  const connectorTerm = connectorSearch.trim().toLowerCase();
+  const visibleConnectors = connectorTerm
+    ? connectors.filter((connector) => connectorLabel(connector.name).toLowerCase().includes(connectorTerm))
+    : connectors;
 
   return (
     <main className="flex h-full min-w-0 flex-col bg-deck">
@@ -201,7 +208,7 @@ export default function AgentsPage() {
 
       {loading ? <AgentLoading /> : (
         <div className="grid min-h-0 flex-1 grid-cols-1 md:grid-cols-[minmax(0,1fr)_290px]">
-          <aside className="scrollbar-none order-1 max-h-52 overflow-y-auto border-b border-line bg-panel/55 p-3 md:order-2 md:max-h-none md:border-b-0 md:border-l">
+          <aside className="order-1 min-h-0 max-h-52 overflow-y-auto border-b border-line bg-panel/55 p-3 md:order-2 md:h-full md:max-h-none md:border-b-0 md:border-l">
             <p className="px-2 pb-2 font-mono text-[8px] uppercase tracking-[0.16em] text-ink-faint">
               {agents.filter((agent) => agent.enabled).length} active
             </p>
@@ -305,19 +312,29 @@ export default function AgentsPage() {
 
               <EditorSection eyebrow="Tools" title="Connectors and approval gates"
                 description="Select only the connectors this role needs. Approval gates pause the task before the chosen tool runs.">
-                <div className="space-y-3">
-                  {connectors.map((connector) => {
-                    const server = draft.mcpServers.find((item) => item.name === connector.name);
-                    const required = connector.name === CORE_CONNECTOR;
-                    return <ConnectorEditor key={connector.name} connector={connector} server={server}
-                      required={required}
-                      onToolToggle={(tool, checked) => setToolEnabled(connector, tool, checked)}
-                      onAllToolsToggle={(checked) => setAllTools(connector, checked)}
-                      onApprovalToggle={(tool, checked) => setToolApproval(connector, tool, checked)} />;
-                  })}
-                  {connectors.length === 1 && <p className="rounded-md border border-dashed border-line px-4 py-5 text-xs leading-relaxed text-ink-faint">
-                    No external connectors are configured. Add one in TrueForge to make it available here.
-                  </p>}
+                <label className="relative mb-3 block">
+                  <span className="sr-only">Search connectors</span>
+                  <input value={connectorSearch} onChange={(event) => setConnectorSearch(event.target.value)} placeholder="Search connectors"
+                    className="w-full rounded-md border border-line bg-deck px-3 py-2 text-xs text-ink outline-none placeholder:text-ink-faint focus:border-signal" />
+                </label>
+                <div className="h-[26rem] overflow-y-auto overscroll-contain pr-1">
+                  <div className="space-y-3">
+                    {visibleConnectors.map((connector) => {
+                      const server = draft.mcpServers.find((item) => item.name === connector.name);
+                      const required = connector.name === CORE_CONNECTOR;
+                      return <ConnectorEditor key={connector.name} connector={connector} server={server}
+                        required={required}
+                        onToolToggle={(tool, checked) => setToolEnabled(connector, tool, checked)}
+                        onAllToolsToggle={(checked) => setAllTools(connector, checked)}
+                        onApprovalToggle={(tool, checked) => setToolApproval(connector, tool, checked)} />;
+                    })}
+                    {visibleConnectors.length === 0 && <p className="rounded-md border border-line px-4 py-5 text-xs leading-relaxed text-ink-faint">
+                      No connectors match {connectorSearch}.
+                    </p>}
+                    {connectors.length === 1 && visibleConnectors.length > 0 && <p className="rounded-md border border-dashed border-line px-4 py-5 text-xs leading-relaxed text-ink-faint">
+                      No external connectors are configured. Add one in TrueForge to make it available here.
+                    </p>}
+                  </div>
                 </div>
               </EditorSection>
 
@@ -477,33 +494,42 @@ function ConnectorEditor({ connector, server, required, onToolToggle, onAllTools
               className="rounded border border-line px-2.5 py-2 font-mono text-[8px] uppercase tracking-[0.1em] text-ink-soft transition-colors hover:border-line-strong hover:text-ink disabled:cursor-not-allowed disabled:opacity-40">Deselect all</button>
           </div>}
         </div>
-        <div className="grid grid-cols-[minmax(0,1fr)_70px] gap-3 border-b border-line/70 px-4 py-2 font-mono text-[8px] uppercase tracking-[0.12em] text-ink-faint">
-          <span>Enabled tools</span><span className="text-center">Approval</span>
+        <div className="h-72 overflow-y-auto overscroll-contain">
+          <div className="sticky top-0 z-10 grid grid-cols-[minmax(0,1fr)_70px] gap-3 border-b border-line/70 bg-panel px-4 py-2 font-mono text-[8px] uppercase tracking-[0.12em] text-ink-faint">
+            <span>Enabled tools</span><span className="text-center">Approval</span>
+          </div>
+          {visibleTools.map((tool) => {
+            const core = isCoreTool(connector.name, tool.name);
+            const enabled = core || enabledTools.includes(tool.name);
+            const toolLocked = core;
+            return <div key={tool.name} className="grid grid-cols-[minmax(0,1fr)_70px] items-center gap-3 border-b border-line/50 px-4 py-3 last:border-b-0">
+              <div className="flex items-start gap-3">
+                <label className={`mt-0.5 ${toolLocked ? "cursor-not-allowed" : "cursor-pointer"}`}>
+                  <input type="checkbox" checked={enabled} disabled={toolLocked}
+                    onChange={(event) => onToolToggle(tool.name, event.target.checked)}
+                    aria-label={`${enabled ? "Disable" : "Enable"} ${tool.name}`}
+                    className="accent-[var(--color-signal)]" />
+                </label>
+                <div className="min-w-0">
+                  <span className="flex flex-wrap items-center gap-2">
+                    <span className="font-mono text-[10px] font-medium text-ink">{tool.name}</span>
+                    {core && <span className="font-mono text-[7px] uppercase tracking-[0.12em] text-state-settled">Required</span>}
+                  </span>
+                  {tool.description && <div className="tool-description-markdown mt-1">
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{tool.description}</ReactMarkdown>
+                  </div>}
+                </div>
+              </div>
+              <label className={`flex justify-center ${enabled && !core ? "cursor-pointer" : "cursor-not-allowed opacity-35"}`}
+                title={core ? "Mission Control core tools run without an approval gate" : "Pause before this tool runs"}>
+                <input type="checkbox" checked={approvals.includes(tool.name)} disabled={!enabled || core}
+                  onChange={(event) => onApprovalToggle(tool.name, event.target.checked)}
+                  aria-label={`Require approval for ${tool.name}`} className="accent-[var(--color-state-approval)]" />
+              </label>
+            </div>;
+          })}
+          {visibleTools.length === 0 && <p className="px-4 py-5 text-xs text-ink-faint">No tools match {search}.</p>}
         </div>
-        {visibleTools.map((tool) => {
-          const core = isCoreTool(connector.name, tool.name);
-          const enabled = core || enabledTools.includes(tool.name);
-          const toolLocked = core;
-          return <div key={tool.name} className="grid grid-cols-[minmax(0,1fr)_70px] items-center gap-3 border-b border-line/50 px-4 py-3 last:border-b-0">
-            <label className={`flex items-start gap-3 ${toolLocked ? "cursor-not-allowed" : "cursor-pointer"}`}>
-              <input type="checkbox" checked={enabled} disabled={toolLocked}
-                onChange={(event) => onToolToggle(tool.name, event.target.checked)}
-                aria-label={`${enabled ? "Disable" : "Enable"} ${tool.name}`}
-                className="mt-0.5 accent-[var(--color-signal)]" />
-              <span className="min-w-0"><span className="flex flex-wrap items-center gap-2">
-                <span className="font-mono text-[10px] font-medium text-ink">{tool.name}</span>
-                {core && <span className="font-mono text-[7px] uppercase tracking-[0.12em] text-state-settled">Required</span>}
-              </span>{tool.description && <span className="mt-1 block text-[10px] leading-relaxed text-ink-faint">{tool.description}</span>}</span>
-            </label>
-            <label className={`flex justify-center ${enabled && !core ? "cursor-pointer" : "cursor-not-allowed opacity-35"}`}
-              title={core ? "Mission Control core tools run without an approval gate" : "Pause before this tool runs"}>
-              <input type="checkbox" checked={approvals.includes(tool.name)} disabled={!enabled || core}
-                onChange={(event) => onApprovalToggle(tool.name, event.target.checked)}
-                aria-label={`Require approval for ${tool.name}`} className="accent-[var(--color-state-approval)]" />
-            </label>
-          </div>;
-        })}
-        {visibleTools.length === 0 && <p className="px-4 py-5 text-xs text-ink-faint">No tools match {search}.</p>}
       </> : <p className="px-4 py-4 text-[10px] leading-relaxed text-ink-faint">
         This connector did not report any tools.
       </p>}
