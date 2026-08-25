@@ -49,6 +49,7 @@ export default function AgentsPage() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [connectorSearch, setConnectorSearch] = useState("");
 
   const loadAgents = useCallback(async (preferredId?: string) => {
     const response = await fetch("/api/agents", { cache: "no-store" });
@@ -184,6 +185,10 @@ export default function AgentsPage() {
 
   const agents = catalog.agents;
   const connectors = connectorCatalog(catalog.connectors);
+  const connectorTerm = connectorSearch.trim().toLowerCase();
+  const visibleConnectors = connectorTerm
+    ? connectors.filter((connector) => connectorLabel(connector.name).toLowerCase().includes(connectorTerm))
+    : connectors;
 
   return (
     <main className="flex h-full min-w-0 flex-col bg-deck">
@@ -307,9 +312,14 @@ export default function AgentsPage() {
 
               <EditorSection eyebrow="Tools" title="Connectors and approval gates"
                 description="Select only the connectors this role needs. Approval gates pause the task before the chosen tool runs.">
-                <div className="h-80 overflow-y-auto overscroll-contain pr-1">
+                <label className="relative mb-3 block">
+                  <span className="sr-only">Search connectors</span>
+                  <input value={connectorSearch} onChange={(event) => setConnectorSearch(event.target.value)} placeholder="Search connectors"
+                    className="w-full rounded-md border border-line bg-deck px-3 py-2 text-xs text-ink outline-none placeholder:text-ink-faint focus:border-signal" />
+                </label>
+                <div className="h-[22rem] overflow-y-auto overscroll-contain pr-1">
                   <div className="space-y-3">
-                    {connectors.map((connector) => {
+                    {visibleConnectors.map((connector) => {
                       const server = draft.mcpServers.find((item) => item.name === connector.name);
                       const required = connector.name === CORE_CONNECTOR;
                       return <ConnectorEditor key={connector.name} connector={connector} server={server}
@@ -318,7 +328,10 @@ export default function AgentsPage() {
                         onAllToolsToggle={(checked) => setAllTools(connector, checked)}
                         onApprovalToggle={(tool, checked) => setToolApproval(connector, tool, checked)} />;
                     })}
-                    {connectors.length === 1 && <p className="rounded-md border border-dashed border-line px-4 py-5 text-xs leading-relaxed text-ink-faint">
+                    {visibleConnectors.length === 0 && <p className="rounded-md border border-line px-4 py-5 text-xs leading-relaxed text-ink-faint">
+                      No connectors match {connectorSearch}.
+                    </p>}
+                    {connectors.length === 1 && visibleConnectors.length > 0 && <p className="rounded-md border border-dashed border-line px-4 py-5 text-xs leading-relaxed text-ink-faint">
                       No external connectors are configured. Add one in TrueForge to make it available here.
                     </p>}
                   </div>
