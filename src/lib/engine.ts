@@ -74,7 +74,7 @@ export function buildKickoff(input: {
   } else {
     parts.push("", "PREDECESSOR CONTEXT:");
     for (const dependency of input.dependencies) {
-      parts.push(`- ${dependency.title} [${dependency.role}] (TASK_ID: ${dependency.id}, STATUS: ${dependency.column})`);
+      parts.push(`- ${dependency.title} [${dependency.role}] (RELATED_ID: ${dependency.id}, STATUS: ${dependency.column})`);
       if (dependency.summary) parts.push(`  Completion summary: ${dependency.summary}`);
       if (dependency.documents.length === 0) {
         parts.push("  Handoff documents: none attached.");
@@ -99,7 +99,7 @@ export function buildKickoff(input: {
   if (input.successors.length > 0) {
     parts.push("", "DOWNSTREAM SUCCESSORS THAT DEPEND ON YOUR OUTPUT:");
     for (const successor of input.successors) {
-      parts.push(`- ${successor.title} [${successor.role}] (TASK_ID: ${successor.id})`);
+      parts.push(`- ${successor.title} [${successor.role}] (RELATED_ID: ${successor.id})`);
     }
     parts.push(
       "Before mark_done, create a self-contained document with kind=\"handoff\" if these successors need substantial context, evidence, decisions, or finished material from you. Verify the create_doc response says kind=handoff and include its DOC_ID in your completion summary."
@@ -245,6 +245,7 @@ export async function retryTask(taskId: string): Promise<{ ok: boolean; reason?:
   const task = await db.task.findUnique({ where: { id: taskId } });
   if (!task) return { ok: false, reason: "not_found" };
   if (task.column !== "blocked") return { ok: false, reason: `column=${task.column}` };
+  const previousSessionId = task.sessionId;
 
   const pendingActions = task.pendingActions ? JSON.parse(task.pendingActions) as Array<{ type?: string }> : [];
   if (pendingActions.some((action) => action.type === "tool.response_required")) {
@@ -266,6 +267,7 @@ export async function retryTask(taskId: string): Promise<{ ok: boolean; reason?:
   });
   if (reset.count === 0) return { ok: false, reason: "lost_race" };
 
+  if (previousSessionId) await deleteRemoteSession(previousSessionId);
   return dispatchTask(taskId);
 }
 
