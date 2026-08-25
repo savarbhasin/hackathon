@@ -567,26 +567,28 @@ function ActivitySection({ items }: { items: ActivityItem[] }) {
   return (
     <section>
       <SectionHeading eyebrow={`${items.length} meaningful events`} title="Activity" />
-      <div className="mt-4 rounded-lg border border-line bg-panel/40 px-4 sm:px-5">
-        {items.length > 0 ? (
-          <ol>
-            {items.map((item, index) => (
-              <li key={item.id} className="relative grid grid-cols-[14px_minmax(0,1fr)] gap-3 border-b border-line/70 py-4 last:border-b-0">
-                {index < items.length - 1 && <span className="absolute left-[6px] top-6 h-[calc(100%-12px)] w-px bg-line-strong" />}
-                <span className={`relative z-10 mt-1 h-3 w-3 rounded-full border-2 border-panel ${activityDot(item.tone)}`} />
-                <div className="min-w-0">
-                  <div className="flex flex-wrap items-baseline justify-between gap-2">
-                    <p className="text-sm font-semibold text-ink">{item.title}</p>
-                    <time className="font-mono text-[8px] uppercase tracking-[0.1em] text-ink-faint">{formatEventTime(item.at)}</time>
+      <div className="mt-4 rounded-lg border border-line bg-panel/40">
+        <div className="h-80 overflow-y-auto overscroll-contain px-4 sm:px-5">
+          {items.length > 0 ? (
+            <ol>
+              {items.map((item, index) => (
+                <li key={item.id} className="relative grid grid-cols-[14px_minmax(0,1fr)] gap-3 border-b border-line/70 py-4 last:border-b-0">
+                  {index < items.length - 1 && <span className="absolute left-[6px] top-6 h-[calc(100%-12px)] w-px bg-line-strong" />}
+                  <span className={`relative z-10 mt-1 h-3 w-3 rounded-full border-2 border-panel ${activityDot(item.tone)}`} />
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-baseline justify-between gap-2">
+                      <p className="text-sm font-semibold text-ink">{item.title}</p>
+                      <time className="font-mono text-[8px] uppercase tracking-[0.1em] text-ink-faint">{formatEventTime(item.at)}</time>
+                    </div>
+                    {item.detail && <p className="mt-1 whitespace-pre-wrap text-xs leading-6 text-ink-soft">{item.detail}</p>}
                   </div>
-                  {item.detail && <p className="mt-1 whitespace-pre-wrap text-xs leading-6 text-ink-soft">{item.detail}</p>}
-                </div>
-              </li>
-            ))}
-          </ol>
-        ) : (
-          <p className="py-5 text-sm text-ink-faint">No human-readable activity has been recorded yet.</p>
-        )}
+                </li>
+              ))}
+            </ol>
+          ) : (
+            <p className="py-5 text-sm text-ink-faint">No human-readable activity has been recorded yet.</p>
+          )}
+        </div>
       </div>
     </section>
   );
