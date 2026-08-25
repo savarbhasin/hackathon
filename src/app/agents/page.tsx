@@ -477,10 +477,10 @@ function ConnectorEditor({ connector, server, required, onToolToggle, onAllTools
               className="rounded border border-line px-2.5 py-2 font-mono text-[8px] uppercase tracking-[0.1em] text-ink-soft transition-colors hover:border-line-strong hover:text-ink disabled:cursor-not-allowed disabled:opacity-40">Deselect all</button>
           </div>}
         </div>
-        <div className="grid grid-cols-[minmax(0,1fr)_70px] gap-3 border-b border-line/70 px-4 py-2 font-mono text-[8px] uppercase tracking-[0.12em] text-ink-faint">
-          <span>Enabled tools</span><span className="text-center">Approval</span>
-        </div>
         <div className="h-72 overflow-y-auto overscroll-contain">
+          <div className="sticky top-0 z-10 grid grid-cols-[minmax(0,1fr)_70px] gap-3 border-b border-line/70 bg-panel px-4 py-2 font-mono text-[8px] uppercase tracking-[0.12em] text-ink-faint">
+            <span>Enabled tools</span><span className="text-center">Approval</span>
+          </div>
           {visibleTools.map((tool) => {
             const core = isCoreTool(connector.name, tool.name);
             const enabled = core || enabledTools.includes(tool.name);
