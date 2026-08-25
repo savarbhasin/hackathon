@@ -292,11 +292,11 @@ select:not(:disabled) {
 .tool-activity-live {
   background-image: linear-gradient(
     105deg,
-    transparent 28%,
-    rgba(126, 159, 255, 0.08) 43%,
-    rgba(126, 159, 255, 0.18) 50%,
-    rgba(126, 159, 255, 0.08) 57%,
-    transparent 72%
+    var(--color-ink-soft) 0%,
+    var(--color-ink-soft) 36%,
+    var(--color-ink) 50%,
+    var(--color-ink-soft) 64%,
+    var(--color-ink-soft) 100%
   );
   background-position: 160% 0;
   background-size: 220% 100%;
