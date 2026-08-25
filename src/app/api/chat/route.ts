@@ -1,50 +1,73 @@
 import { resumeOrchestratorTurn, runOrchestratorTurn } from "@/lib/orchestrator";
+import { parseResumeSelections, ResumeStateError, type ResumeSelection } from "@/lib/orchestrator-pause";
 
 export const runtime = "nodejs";
 export const maxDuration = 800;
 
-interface AnswerBody {
-  type: string;
-  threadId?: string | null;
-  toolCallId: string;
-  content: string;
+interface ChatBody {
+  message?: string;
+  conversationId?: string;
+  documentIds?: unknown;
+  answers?: unknown;
 }
 
 export async function POST(req: Request) {
-  const body = (await req.json().catch(() => null)) as {
-    message?: string;
-    conversationId?: string;
-    documentIds?: string[];
-    answers?: AnswerBody[];
-  } | null;
+  const body = (await req.json().catch(() => null)) as ChatBody | null;
+  const isResume = body?.answers !== undefined;
+  let selections: ResumeSelection[] | undefined;
 
-  if (!body?.message?.trim() && !(body?.answers?.length && body.conversationId)) {
-    return Response.json({ error: "message or answers required" }, { status: 400 });
+  if (isResume) {
+    if (!body?.conversationId || typeof body.conversationId !== "string") {
+      return Response.json({ error: "conversation_id_required", message: "A conversation is required to resume a paused action." }, { status: 400 });
+    }
+    try {
+      selections = parseResumeSelections(body.answers);
+    } catch (error) {
+      return Response.json(resumeErrorBody(error), { status: 400 });
+    }
+  } else if (!body?.message?.trim()) {
+    return Response.json({ error: "message_required", message: "Enter a message before sending." }, { status: 400 });
   }
 
-  const turn = body.answers?.length
-    ? resumeOrchestratorTurn(body.conversationId!, body.answers)
+  const abortController = new AbortController();
+  const abort = () => abortController.abort(req.signal.reason);
+  if (req.signal.aborted) abort();
+  else req.signal.addEventListener("abort", abort, { once: true });
+
+  const turn = selections
+    ? resumeOrchestratorTurn(body!.conversationId!, selections, abortController.signal)
     : runOrchestratorTurn(
       body!.message!.trim(),
       body?.conversationId,
-      Array.isArray(body?.documentIds) ? body.documentIds.filter((id): id is string => typeof id === "string") : []
+      Array.isArray(body?.documentIds) ? body.documentIds.filter((id): id is string => typeof id === "string") : [],
+      abortController.signal
     );
 
   const encoder = new TextEncoder();
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
-      const send = (obj: unknown) =>
-        controller.enqueue(encoder.encode(`data: ${JSON.stringify(obj)}\n\n`));
-      try {
-        for await (const ev of turn) {
-          send(ev);
+      const send = (obj: unknown) => {
+        if (!abortController.signal.aborted) {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(obj)}\n\n`));
         }
-      } catch (err) {
-        send({ kind: "done", text: `Error: ${String(err).slice(0, 300)}`, name: "error" });
+      };
+      try {
+        for await (const event of turn) send(event);
+      } catch (error) {
+        if (!abortController.signal.aborted) {
+          send({ kind: "error", ...resumeErrorBody(error) });
+          send({ kind: "done", text: errorMessage(error), name: "error" });
+        }
       } finally {
-        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
-        controller.close();
+        req.signal.removeEventListener("abort", abort);
+        if (!abortController.signal.aborted) {
+          controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+          controller.close();
+        }
       }
+    },
+    cancel() {
+      abortController.abort("client_disconnected");
     },
   });
 
@@ -55,4 +78,13 @@ export async function POST(req: Request) {
       Connection: "keep-alive",
     },
   });
+}
+
+function resumeErrorBody(error: unknown): { code: string; text: string } {
+  if (error instanceof ResumeStateError) return { code: error.code, text: error.message };
+  return { code: "turn_failed", text: "The turn could not be completed. Try again." };
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof ResumeStateError ? error.message : "The turn could not be completed. Try again.";
 }

@@ -1,5 +1,4 @@
 import express from "express";
-import { randomUUID } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
@@ -8,13 +7,71 @@ import { db } from "../src/lib/db";
 import { getAgentDefinition, listAgentDefinitions } from "../src/lib/agents";
 import { dispatchTask, getBoard, sweep } from "../src/lib/engine";
 import { runScheduleNow } from "../src/lib/schedule-runner";
+import { appendTaskEvent } from "../src/lib/task-events";
+import { dependencyIds, findDependencyCycle } from "../src/lib/task-graph";
 
 const PORT = Number(process.env.MCP_PORT ?? 3100);
+const HOST = process.env.MCP_HOST?.trim() || "127.0.0.1";
+const NEW_TASK_NODE = "__new_task__";
 
 const jobs = new Map<string, Cron>();
 
 function text(t: unknown) {
   return { content: [{ type: "text" as const, text: typeof t === "string" ? t : JSON.stringify(t) }] };
+}
+
+async function validateTaskDependencies(missionId: string, dependsOn: string[]): Promise<string | null> {
+  if (new Set(dependsOn).size !== dependsOn.length) {
+    return "depends_on must not contain duplicate task IDs.";
+  }
+
+  const mission = await db.mission.findUnique({ where: { id: missionId }, select: { id: true } });
+  if (!mission) return `Unknown mission_id ${missionId}`;
+
+  if (dependsOn.length > 0) {
+    const referenced = await db.task.findMany({
+      where: { id: { in: dependsOn } },
+      select: { id: true, missionId: true },
+    });
+    const byId = new Map(referenced.map((task) => [task.id, task]));
+    const missing = dependsOn.filter((id) => !byId.has(id));
+    if (missing.length > 0) return `Unknown depends_on task ID(s): ${missing.join(", ")}`;
+
+    const wrongMission = dependsOn.filter((id) => byId.get(id)?.missionId !== missionId);
+    if (wrongMission.length > 0) {
+      return `depends_on task ID(s) belong to another mission: ${wrongMission.join(", ")}`;
+    }
+  }
+
+  const existing = await db.task.findMany({
+    where: { missionId },
+    select: { id: true, dependsOn: true },
+  });
+  const cycle = findDependencyCycle([
+    ...existing.map((task) => ({ id: task.id, dependsOn: dependencyIds(task.dependsOn) })),
+    { id: NEW_TASK_NODE, dependsOn },
+  ]);
+  if (cycle) {
+    const readableCycle = cycle.map((id) => (id === NEW_TASK_NODE ? "new task" : id));
+    return `Dependency graph would be cyclic: ${readableCycle.join(" -> ")}`;
+  }
+
+  return null;
+}
+
+function cronValidationError(cronExpr: string): string | null {
+  const expression = cronExpr.trim();
+  const partCount = expression.match(/\S+/g)?.length ?? 0;
+  if (!expression.startsWith("@") && (partCount < 5 || partCount > 7)) {
+    return "cron expression must contain five, six, or seven fields";
+  }
+
+  try {
+    new Cron(expression).stop();
+    return null;
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
 }
 
 function buildServer(): McpServer {
@@ -36,14 +93,7 @@ function buildServer(): McpServer {
         where: { id: task_id },
         data: { output: summary.trim() },
       });
-      await db.taskEvent.create({
-        data: {
-          taskId: task_id,
-          seq: 900000,
-          type: "specialist.mark_done",
-          payload: JSON.stringify({ summary: summary.trim() }),
-        },
-      });
+      await appendTaskEvent(task_id, "specialist.mark_done", { summary: summary.trim() });
       return text(`Recorded. Task ${task.title} will settle when your turn ends.`);
     }
   );
@@ -105,17 +155,10 @@ function buildServer(): McpServer {
           taskId: task.id,
         },
       });
-      await db.taskEvent.create({
-        data: {
-          taskId: task.id,
-          seq: task.lastSeq + 1,
-          type: "activity.document_created",
-          payload: JSON.stringify({
-            title: `Created document: ${doc.title}`,
-            documentId: doc.id,
-            kind: doc.kind,
-          }),
-        },
+      await appendTaskEvent(task.id, "activity.document_created", {
+        title: `Created document: ${doc.title}`,
+        documentId: doc.id,
+        kind: doc.kind,
       });
       return text(`Document created. id=${doc.id} title="${doc.title}" kind=${doc.kind}`);
     }
@@ -138,18 +181,10 @@ function buildServer(): McpServer {
         where: { id: doc_id },
         data: { title, content },
       });
-      const task = await db.task.findUnique({ where: { id: task_id }, select: { lastSeq: true } });
-      await db.taskEvent.create({
-        data: {
-          taskId: task_id,
-          seq: (task?.lastSeq ?? 0) + 1,
-          type: "activity.document_updated",
-          payload: JSON.stringify({
-            title: `Updated document: ${doc.title}`,
-            documentId: doc.id,
-            kind: doc.kind,
-          }),
-        },
+      await appendTaskEvent(task_id, "activity.document_updated", {
+        title: `Updated document: ${doc.title}`,
+        documentId: doc.id,
+        kind: doc.kind,
       });
       return text(`Document updated. id=${doc.id} title="${doc.title}"`);
     }
@@ -231,6 +266,9 @@ function buildServer(): McpServer {
       if (!profile?.enabled) {
         return text(`Unknown or disabled agent "${role}". Use list_agents.`);
       }
+      const dependencyError = await validateTaskDependencies(mission_id, depends_on);
+      if (dependencyError) return text(dependencyError);
+
       const count = await db.task.count({ where: { missionId: mission_id } });
       const task = await db.task.create({
         data: {
@@ -243,7 +281,6 @@ function buildServer(): McpServer {
           position: count,
         },
       });
-      void sweep();
       return text(`Task created. id=${task.id} column=backlog`);
     }
   );
@@ -270,9 +307,13 @@ function buildServer(): McpServer {
     "Schedule a recurring instruction for the orchestrator (cron syntax).",
     { name: z.string(), cron_expr: z.string().describe("Standard cron, e.g. '0 7 * * *' = daily 07:00"), prompt: z.string() },
     async ({ name, cron_expr, prompt }) => {
-      const schedule = await db.schedule.create({ data: { name, cronExpr: cron_expr, prompt } });
-      registerJob(schedule.id, cron_expr);
-      return text(`Scheduled "${name}" (${cron_expr}). id=${schedule.id}`);
+      const cronExpr = cron_expr.trim();
+      const validationError = cronValidationError(cronExpr);
+      if (validationError) return text(`Invalid cron expression: ${validationError}`);
+
+      const schedule = await db.schedule.create({ data: { name, cronExpr, prompt } });
+      registerJob(schedule.id, cronExpr);
+      return text(`Scheduled "${name}" (${cronExpr}). id=${schedule.id}`);
     }
   );
 
@@ -296,7 +337,9 @@ function buildServer(): McpServer {
 }
 
 function registerJob(id: string, cronExpr: string) {
-  jobs.get(id)?.stop();
+  const validationError = cronValidationError(cronExpr);
+  if (validationError) throw new Error(`Invalid cron expression: ${validationError}`);
+
   const job = new Cron(cronExpr).schedule(() => {
     void runScheduleNow(id).catch((error) => {
       if (error instanceof Error && error.name === "ScheduleDisabledError") {
@@ -307,13 +350,22 @@ function registerJob(id: string, cronExpr: string) {
       console.error("[schedule]", id, error);
     });
   });
+  jobs.get(id)?.stop();
   jobs.set(id, job);
 }
 
 async function bootJobs() {
   const schedules = await db.schedule.findMany({ where: { enabled: true } });
-  for (const s of schedules) registerJob(s.id, s.cronExpr);
-  console.log(`[mcp] ${schedules.length} schedule(s) active`);
+  let active = 0;
+  for (const schedule of schedules) {
+    try {
+      registerJob(schedule.id, schedule.cronExpr);
+      active += 1;
+    } catch (error) {
+      console.error(`[schedule] failed to register ${schedule.id}`, error);
+    }
+  }
+  console.log(`[mcp] ${active}/${schedules.length} schedule(s) active`);
 }
 
 const app = express();
@@ -337,10 +389,7 @@ app.delete("/mcp", (_req, res) => res.status(405).json({ error: "stateless serve
 
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
-app.listen(PORT, async () => {
-  console.log(`[mcp] mission-control MCP listening on http://localhost:${PORT}/mcp`);
+app.listen(PORT, HOST, async () => {
+  console.log(`[mcp] mission-control MCP listening on http://${HOST}:${PORT}/mcp`);
   await bootJobs().catch(console.error);
 });
-
-// keep randomUUID import used for potential future stateful mode
-void randomUUID;

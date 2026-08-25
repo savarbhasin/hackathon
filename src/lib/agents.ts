@@ -243,25 +243,11 @@ async function listAndSeedAgents(): Promise<TrueForgeApi.Agent[]> {
     const role = ROLES[agent.name];
     if (!role && !managedSlugs.has(agent.name)) continue;
 
-    const editableInstructions = stripStoredRuntimeInstructions(
-      agent.manifest.instructions ?? "",
-      true
-    ).trim();
-    const instructions = withSpecialistRuntimeInstructions(
-      editableInstructions || role?.instructions || "Complete the assigned specialist task within its stated scope."
-    );
-    const model = role?.spec.model ?? agent.manifest.model;
-    if (
-      agent.manifest.model.name === model.name &&
-      agent.manifest.instructions === instructions
-    ) continue;
+    const manifest = reconcileManagedManifest(agent.manifest, role);
+    if (manifestsEqual(agent.manifest, manifest)) continue;
 
     const { data: updated } = await tf().agents.update(agent.id, {
-      manifest: {
-        ...agent.manifest,
-        model,
-        instructions,
-      },
+      manifest,
     });
     agents = agents.map((current) => current.id === updated.id ? updated : current);
   }
@@ -274,6 +260,153 @@ function presetManifest(role: (typeof ROLES)[string]): TrueForgeApi.AgentSpec {
     ...role.spec,
     mcpServers: withRequiredMissionControlTools(role.spec.mcpServers ?? []),
   };
+}
+
+export function reconcileManagedManifest(
+  current: TrueForgeApi.AgentSpec,
+  role?: (typeof ROLES)[string]
+): TrueForgeApi.AgentSpec {
+  const editableInstructions = stripStoredRuntimeInstructions(
+    current.instructions ?? "",
+    true
+  ).trim();
+  const instructions = withSpecialistRuntimeInstructions(
+    editableInstructions || role?.instructions || "Complete the assigned specialist task within its stated scope."
+  );
+
+  if (!role) {
+    return {
+      ...current,
+      instructions,
+    };
+  }
+
+  return {
+    ...current,
+    model: { ...current.model, ...role.spec.model },
+    instructions,
+    config: mergeRoleConfig(current.config, role.spec.config),
+    mcpServers: mergeRoleMcpServers(current.mcpServers ?? [], withRequiredMissionControlTools(role.spec.mcpServers ?? [])),
+  };
+}
+
+function mergeRoleConfig(
+  current: TrueForgeApi.AgentSpec["config"],
+  required: TrueForgeApi.AgentSpec["config"]
+): TrueForgeApi.AgentSpec["config"] {
+  if (!required) return current;
+
+  const merged = { ...(current ?? {}) } as Record<string, unknown>;
+  for (const [key, value] of Object.entries(required)) {
+    if (value === undefined) continue;
+    const existing = merged[key];
+    merged[key] = isRecord(existing) && isRecord(value)
+      ? { ...existing, ...value }
+      : value;
+  }
+  return merged as TrueForgeApi.AgentSpec["config"];
+}
+
+function mergeRoleMcpServers(
+  current: TrueForgeApi.McpServer[],
+  required: TrueForgeApi.McpServer[]
+): TrueForgeApi.McpServer[] {
+  const requiredByName = new Map(required.map((server) => [server.name, server]));
+  const currentNames = new Set(current.map((server) => server.name));
+  const merged = current.map((server) => {
+    const requiredServer = requiredByName.get(server.name);
+    return requiredServer ? mergeRoleMcpServer(server, requiredServer) : server;
+  });
+
+  for (const server of required) {
+    if (!currentNames.has(server.name)) merged.push(server);
+  }
+  return merged;
+}
+
+function mergeRoleMcpServer(
+  current: TrueForgeApi.McpServer,
+  required: TrueForgeApi.McpServer
+): TrueForgeApi.McpServer {
+  const merged: TrueForgeApi.McpServer = { ...current };
+  const requiredEnabled = required.enableTools ?? [];
+
+  if (required.enableTools) {
+    merged.enableTools = mergeSelectors(current.enableTools, required.enableTools);
+  }
+  if (required.disableTools) {
+    merged.disableTools = mergeSelectors(current.disableTools, required.disableTools);
+  }
+  if (required.preloadTools) {
+    merged.preloadTools = mergeSelectors(current.preloadTools, required.preloadTools);
+  }
+  if (required.requireApprovalForTools) {
+    merged.requireApprovalForTools = mergeSelectors(
+      current.requireApprovalForTools,
+      required.requireApprovalForTools
+    );
+  }
+  if (required.preload !== undefined) merged.preload = required.preload;
+
+  if (requiredEnabled.length > 0 && merged.disableTools) {
+    merged.disableTools = merged.disableTools.filter(
+      (selector) => !conflictsWithRequiredTool(selector, requiredEnabled)
+    );
+  }
+  return merged;
+}
+
+function mergeSelectors(
+  current: TrueForgeApi.McpServer["enableTools"],
+  required: NonNullable<TrueForgeApi.McpServer["enableTools"]>
+): NonNullable<TrueForgeApi.McpServer["enableTools"]> {
+  return [...new Set([...(current ?? []), ...required])];
+}
+
+function conflictsWithRequiredTool(selector: string, required: string[]): boolean {
+  if (selector === "@all" || selector === "@read-only") return true;
+  return required.includes(selector) || required.includes("@all");
+}
+
+function manifestsEqual(
+  left: TrueForgeApi.AgentSpec,
+  right: TrueForgeApi.AgentSpec
+): boolean {
+  return JSON.stringify(normalizeManifest(left)) === JSON.stringify(normalizeManifest(right));
+}
+
+function normalizeManifest(manifest: TrueForgeApi.AgentSpec): unknown {
+  const normalized = { ...manifest } as Record<string, unknown>;
+  if (manifest.mcpServers) {
+    normalized.mcpServers = [...manifest.mcpServers]
+      .map((server) => normalizeMcpServer(server))
+      .sort((left, right) => String(left.name).localeCompare(String(right.name)));
+  }
+  return normalizeValue(normalized);
+}
+
+function normalizeMcpServer(server: TrueForgeApi.McpServer): Record<string, unknown> {
+  const normalized = { ...server } as Record<string, unknown>;
+  for (const key of ["enableTools", "disableTools", "preloadTools", "requireApprovalForTools"] as const) {
+    const values = server[key];
+    if (values) normalized[key] = [...new Set(values)].sort();
+  }
+  return normalized;
+}
+
+function normalizeValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map((item) => normalizeValue(item));
+  if (!isRecord(value)) return value;
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([, item]) => item !== undefined)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, item]) => [key, normalizeValue(item)])
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function buildManifest(
