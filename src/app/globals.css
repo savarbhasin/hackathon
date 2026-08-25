@@ -168,6 +168,83 @@ select:not(:disabled) {
   font-weight: 700;
 }
 
+.tool-description-markdown {
+  color: var(--color-ink-faint);
+  font-size: 10px;
+  line-height: 1.55;
+}
+
+.tool-description-markdown > :first-child { margin-top: 0; }
+.tool-description-markdown > :last-child { margin-bottom: 0; }
+
+.tool-description-markdown p,
+.tool-description-markdown ul,
+.tool-description-markdown ol,
+.tool-description-markdown blockquote,
+.tool-description-markdown pre,
+.tool-description-markdown table {
+  margin: 0.25rem 0;
+}
+
+.tool-description-markdown ul,
+.tool-description-markdown ol {
+  padding-left: 1rem;
+}
+
+.tool-description-markdown ul { list-style: disc; }
+.tool-description-markdown ol { list-style: decimal; }
+
+.tool-description-markdown a {
+  color: var(--color-signal);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.tool-description-markdown code {
+  border: 1px solid var(--color-line);
+  border-radius: 2px;
+  background: var(--color-deck);
+  padding: 0.05rem 0.2rem;
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+}
+
+.tool-description-markdown pre {
+  overflow-x: auto;
+  border: 1px solid var(--color-line);
+  border-radius: 3px;
+  background: var(--color-deck);
+  padding: 0.5rem;
+}
+
+.tool-description-markdown pre code {
+  border: 0;
+  background: transparent;
+  padding: 0;
+}
+
+.tool-description-markdown blockquote {
+  border-left: 2px solid var(--color-line-strong);
+  padding-left: 0.5rem;
+}
+
+.tool-description-markdown table {
+  border-collapse: collapse;
+  font-size: 0.92em;
+}
+
+.tool-description-markdown th,
+.tool-description-markdown td {
+  border: 1px solid var(--color-line);
+  padding: 0.2rem 0.35rem;
+  text-align: left;
+}
+
+.tool-description-markdown th {
+  background: var(--color-deck);
+  font-weight: 700;
+}
+
 ::selection {
   background: var(--color-signal);
   color: var(--color-deck);
