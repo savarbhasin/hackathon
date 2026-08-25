@@ -53,7 +53,7 @@ model TaskEvent {
   payload   String
   createdAt DateTime @default(now())
 
-  @@index([taskId, seq])
+  @@unique([taskId, seq])
 }
 
 model Schedule {

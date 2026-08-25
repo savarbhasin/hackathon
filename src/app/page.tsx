@@ -5,9 +5,8 @@ import { ChatMarkdown } from "@/components/chat-markdown";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 
 interface PauseAction {
+  selector: string;
   type: string;
-  threadId?: string | null;
-  toolCallId: string;
   name?: string;
   question?: string;
   options?: string[];
@@ -15,16 +14,16 @@ interface PauseAction {
 }
 
 interface AnswerPayload {
-  type: string;
-  threadId?: string | null;
-  toolCallId: string;
-  content: string;
+  selector: string;
+  decision?: "allow" | "deny";
+  content?: string;
 }
 
 interface ChatEvent {
-  kind: "conversation" | "delta" | "tool" | "status" | "pause" | "done";
+  kind: "conversation" | "delta" | "tool" | "status" | "pause" | "error" | "done";
   text?: string;
   name?: string;
+  code?: string;
   conversationId?: string;
   actions?: PauseAction[];
 }
@@ -130,7 +129,7 @@ export default function Home() {
             content: message.content,
             tools: parseTools(message.tools),
             status: message.status ?? undefined,
-            pause: parsePauseActions(message.pauseActions),
+            pause: parsePauseActions(message.pauseActions, message.id),
           }))
       );
       setHistoryOpen(false);
@@ -167,8 +166,9 @@ export default function Home() {
     setDeleting(false);
   }
 
-  async function runTurn(body: Record<string, unknown>, userBubble?: string) {
-    if (busy || loadingConversation) return;
+  async function runTurn(body: Record<string, unknown>, userBubble?: string): Promise<boolean> {
+    if (busy || loadingConversation) return false;
+    let completed = false;
     setBusy(true);
     setMessages((current) => [
       ...current,
@@ -201,10 +201,14 @@ export default function Home() {
           if (!line.startsWith("data: ")) continue;
           const payload = line.slice(6).trim();
           if (payload === "[DONE]") continue;
-          handleEvent(JSON.parse(payload) as ChatEvent);
+          const event = JSON.parse(payload) as ChatEvent;
+          if (event.kind === "done" && event.name !== "error") completed = true;
+          if (event.kind === "error") completed = false;
+          handleEvent(event);
         }
       }
     } catch (error) {
+      completed = false;
       setMessages((current) => {
         const copy = [...current];
         copy[copy.length - 1] = {
@@ -219,6 +223,7 @@ export default function Home() {
       await refreshConversations();
       scrollDown();
     }
+    return completed;
   }
 
   async function send() {
@@ -267,8 +272,17 @@ export default function Home() {
 
   async function answer(answers: AnswerPayload[]) {
     if (!conversationId || busy) return;
-    setMessages((current) => current.map((message) => ({ ...message, pause: undefined })));
-    await runTurn({ answers, conversationId }, answers.map((a) => a.content).join(" · "));
+    const summary = answers.map((answer) =>
+      answer.decision === "allow" ? "Approved" : answer.decision === "deny" ? "Denied" : answer.content?.trim() ?? ""
+    ).filter(Boolean).join(" · ");
+    const completed = await runTurn({ answers, conversationId }, summary);
+    if (completed) {
+      const selectors = new Set(answers.map((answer) => answer.selector));
+      setMessages((current) => current.map((message) => {
+        const pause = message.pause?.filter((action) => !selectors.has(action.selector));
+        return message.pause ? { ...message, pause: pause?.length ? pause : undefined } : message;
+      }));
+    }
   }
 
   function handleEvent(event: ChatEvent) {
@@ -292,6 +306,11 @@ export default function Home() {
           break;
         case "pause":
           last.pause = event.actions ?? [];
+          last.pending = false;
+          break;
+        case "error":
+          last.content = event.text ?? "The turn could not be completed.";
+          last.status = event.code ?? "error";
           last.pending = false;
           break;
         case "done":
@@ -326,7 +345,7 @@ export default function Home() {
 
           <div className="mx-auto max-w-3xl space-y-7">
             {messages.map((message, index) => (
-              <Message key={message.id ?? index} message={message} onAnswer={(a) => void answer(a)} />
+              <Message key={message.id ?? index} message={message} busy={busy} onAnswer={(a) => void answer(a)} />
             ))}
             <div ref={bottomRef} />
           </div>
@@ -616,7 +635,7 @@ function EmptyState({ onPick }: { onPick: (value: string) => void }) {
   );
 }
 
-function Message({ message, onAnswer }: { message: Msg; onAnswer?: (answers: AnswerPayload[]) => void }) {
+function Message({ message, busy, onAnswer }: { message: Msg; busy: boolean; onAnswer?: (answers: AnswerPayload[]) => void }) {
   if (message.role === "user") {
     return (
       <div className="flex justify-end">
@@ -641,7 +660,7 @@ function Message({ message, onAnswer }: { message: Msg; onAnswer?: (answers: Ans
       )}
       {message.content ? <ChatMarkdown>{message.content}</ChatMarkdown> : !message.pause?.length && <span className={`inline-block ${message.pending ? "h-4 w-28 animate-pulse rounded bg-panel-hi" : ""}`} />}
       {!message.pending && (message.pause?.length ?? 0) > 0 && onAnswer && (
-        <PauseBlock actions={message.pause!} busy={false} onAnswer={onAnswer} />
+        <PauseBlock actions={message.pause!} busy={busy} onAnswer={onAnswer} />
       )}
       {message.status && !message.pending && (
         <div className="mt-2 font-mono text-[9px] uppercase tracking-[0.16em] text-ink-faint">{message.status}</div>
@@ -696,7 +715,7 @@ function PauseBlock({
   return (
     <div className="mt-3 max-w-xl space-y-3">
       {actions.map((action) => (
-        <PauseActionCard key={action.toolCallId} action={action} busy={busy} onAnswer={onAnswer} />
+        <PauseActionCard key={action.selector} action={action} busy={busy} onAnswer={onAnswer} />
       ))}
     </div>
   );
@@ -713,17 +732,19 @@ function PauseActionCard({
 }) {
   const [custom, setCustom] = useState("");
 
-  const submit = (content: string) => {
+  const submitResponse = (content: string) => {
     if (!content.trim() || busy) return;
-    onAnswer([{ type: action.type, threadId: action.threadId, toolCallId: action.toolCallId, content: content.trim() }]);
+    onAnswer([{ selector: action.selector, content: content.trim() }]);
   };
 
-  const isQuestion = Boolean(action.question);
+  const isApproval = action.type === "tool.approval_required";
+  const isQuestion = action.type === "tool.response_required";
   return (
     <div className={`rounded-lg border p-4 ${isQuestion ? "border-line-strong bg-panel-hi" : "border-signal/50 bg-signal/5"}`}>
       <p className={`mb-1 font-mono text-[8px] uppercase tracking-[0.2em] ${isQuestion ? "text-state-blocked" : "text-signal"}`}>
-        {isQuestion ? "Orchestrator asks" : `Paused · ${action.type}`}
+        {isQuestion ? "Orchestrator asks" : isApproval ? "Approval required" : `Paused · ${action.type}`}
       </p>
+      {isApproval && action.name && <p className="mb-2 text-xs text-ink">{action.name}</p>}
       {action.question && (
         <p className="mb-3 text-sm leading-relaxed text-ink">{action.question}</p>
       )}
@@ -732,12 +753,32 @@ function PauseActionCard({
           {action.argsPreview}
         </pre>
       )}
-      {(action.options?.length ?? 0) > 0 && (
+      {isApproval && (
+        <div className="flex gap-2">
+          <button
+            type="button"
+            onClick={() => onAnswer([{ selector: action.selector, decision: "allow" }])}
+            disabled={busy}
+            className="rounded-md bg-signal px-3 py-1.5 text-[11px] font-semibold text-deck transition-transform hover:scale-[1.02] disabled:opacity-25"
+          >
+            Approve
+          </button>
+          <button
+            type="button"
+            onClick={() => onAnswer([{ selector: action.selector, decision: "deny" }])}
+            disabled={busy}
+            className="rounded-md border border-line-strong bg-panel px-3 py-1.5 text-[11px] font-semibold text-ink-soft transition-colors hover:border-state-blocked hover:text-ink disabled:opacity-40"
+          >
+            Deny
+          </button>
+        </div>
+      )}
+      {isQuestion && (action.options?.length ?? 0) > 0 && (
         <div className="mb-2 space-y-1.5">
           {action.options?.map((option) => (
             <button
               key={option}
-              onClick={() => submit(option)}
+              onClick={() => submitResponse(option)}
               disabled={busy}
               className="block w-full rounded-md border border-line-strong bg-panel px-3 py-2 text-left text-xs leading-snug text-ink transition-colors hover:border-signal hover:bg-signal/10 disabled:opacity-40"
             >
@@ -746,10 +787,10 @@ function PauseActionCard({
           ))}
         </div>
       )}
-      <form
+      {isQuestion && <form
         onSubmit={(event) => {
           event.preventDefault();
-          submit(custom);
+          submitResponse(custom);
           setCustom("");
         }}
         className="flex gap-2"
@@ -768,7 +809,10 @@ function PauseActionCard({
         >
           Reply
         </button>
-      </form>
+      </form>}
+      {!isQuestion && !isApproval && (
+        <p className="text-xs text-ink-soft">This pause needs a supported response outside chat.</p>
+      )}
     </div>
   );
 }
@@ -782,11 +826,28 @@ function parseTools(raw: string): string[] {
   }
 }
 
-function parsePauseActions(raw: string | null): PauseAction[] | undefined {
+function parsePauseActions(raw: string | null, messageId: string): PauseAction[] | undefined {
   if (!raw) return undefined;
   try {
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? (parsed as PauseAction[]) : undefined;
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return undefined;
+    return parsed.flatMap((item, index) => {
+      if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+      const action = item as Record<string, unknown>;
+      if (typeof action.type !== "string") return [];
+      return [{
+        selector: typeof action.selector === "string" && action.selector.trim()
+          ? action.selector
+          : `legacy_${messageId}_${index}`,
+        type: action.type,
+        name: typeof action.name === "string" ? action.name : undefined,
+        question: typeof action.question === "string" ? action.question : undefined,
+        options: Array.isArray(action.options) && action.options.every((option) => typeof option === "string")
+          ? action.options
+          : undefined,
+        argsPreview: typeof action.argsPreview === "string" ? action.argsPreview : undefined,
+      }];
+    });
   } catch {
     return undefined;
   }

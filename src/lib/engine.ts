@@ -1,6 +1,8 @@
 import { db } from "./db";
 import { tf } from "./tf";
 import { isEventDelta, mergeEventDelta } from "@truefoundry/trueforge-sdk";
+import { appendTaskEvent } from "./task-events";
+import { dependencyIds } from "./task-graph";
 
 export type Column = "backlog" | "working" | "blocked" | "approval" | "settled";
 
@@ -8,13 +10,6 @@ const PAYLOAD_CAP = 4000;
 
 function truncate(s: string, cap = PAYLOAD_CAP): string {
   return s.length <= cap ? s : s.slice(0, cap) + "…[truncated]";
-}
-
-async function logEvent(taskId: string, seq: number, type: string, payload: unknown) {
-  const json = typeof payload === "string" ? payload : JSON.stringify(payload ?? {});
-  await db.taskEvent.create({
-    data: { taskId, seq, type, payload: truncate(json) },
-  });
 }
 
 interface PendingAction {
@@ -130,10 +125,10 @@ export function buildKickoff(input: {
   return parts.join("\n");
 }
 
-async function predecessorContext(dependsOn: string[]) {
+async function predecessorContext(missionId: string, dependsOn: string[]) {
   if (dependsOn.length === 0) return [];
   const deps = await db.task.findMany({
-    where: { id: { in: dependsOn } },
+    where: { missionId, id: { in: dependsOn } },
     include: {
       documents: {
         where: { kind: "handoff" },
@@ -168,17 +163,6 @@ async function successorContext(taskId: string, missionId: string) {
     .map(({ id, title, role }) => ({ id, title, role }));
 }
 
-function dependencyIds(value: string): string[] {
-  try {
-    const parsed = JSON.parse(value) as unknown;
-    return Array.isArray(parsed)
-      ? parsed.filter((id): id is string => typeof id === "string" && id.length > 0)
-      : [];
-  } catch {
-    return [];
-  }
-}
-
 export async function dispatchTask(taskId: string): Promise<{ ok: boolean; reason?: string }> {
   const task = await db.task.findUnique({ where: { id: taskId }, include: { mission: true } });
   if (!task) return { ok: false, reason: "not_found" };
@@ -186,45 +170,93 @@ export async function dispatchTask(taskId: string): Promise<{ ok: boolean; reaso
   if (task.column !== "backlog") return { ok: false, reason: `column=${task.column}` };
 
   const claim = await db.task.updateMany({
-    where: { id: taskId, sessionId: null },
-    data: { column: "working", pendingActions: null },
+    where: { id: taskId, column: "backlog", sessionId: null },
+    data: {
+      column: "working",
+      turnId: null,
+      pendingActions: null,
+      handoff: null,
+      output: null,
+      error: null,
+    },
   });
   if (claim.count === 0) return { ok: false, reason: "lost_race" };
 
-  const { data: session } = await tf().sessions.create({ agent: { name: task.role } });
+  let remoteSessionId: string | null = null;
+  try {
+    const { data: session } = await tf().sessions.create({ agent: { name: task.role } });
+    remoteSessionId = session.id;
 
-  const dependsOn = JSON.parse(task.dependsOn || "[]") as string[];
-  const [dependencies, successors] = await Promise.all([
-    predecessorContext(dependsOn),
-    successorContext(task.id, task.missionId),
-  ]);
-  const kickoff = buildKickoff({
-    missionTitle: task.mission.title,
-    missionGoal: task.mission.goal,
-    taskTitle: task.title,
-    taskDetail: task.detail,
-    taskId: task.id,
-    dependencies,
-    successors,
-  });
+    const dependsOn = dependencyIds(task.dependsOn);
+    const [dependencies, successors] = await Promise.all([
+      predecessorContext(task.missionId, dependsOn),
+      successorContext(task.id, task.missionId),
+    ]);
+    const kickoff = buildKickoff({
+      missionTitle: task.mission.title,
+      missionGoal: task.mission.goal,
+      taskTitle: task.title,
+      taskDetail: task.detail,
+      taskId: task.id,
+      dependencies,
+      successors,
+    });
 
-  await db.task.update({ where: { id: taskId }, data: { sessionId: session.id } });
-  await logEvent(taskId, 0, "activity.started", {
-    title: "Agent started work",
-    role: task.role,
-  });
-  void runPump(taskId, session.id, [{ type: "user.message", content: kickoff }]);
-  return { ok: true };
+    await db.task.update({ where: { id: taskId }, data: { sessionId: session.id } });
+    await appendTaskEvent(taskId, "activity.started", {
+      title: "Agent started work",
+      role: task.role,
+    });
+    void runPump(taskId, session.id, [{ type: "user.message", content: kickoff }]);
+    return { ok: true };
+  } catch (error) {
+    const message = truncate(String(error), 500);
+    const recovered = await db.task.updateMany({
+      where: {
+        id: taskId,
+        column: "working",
+        OR: [{ sessionId: null }, ...(remoteSessionId ? [{ sessionId: remoteSessionId }] : [])],
+      },
+      data: {
+        column: "backlog",
+        sessionId: null,
+        turnId: null,
+        pendingActions: null,
+        error: `dispatch failed: ${message}`,
+      },
+    });
+
+    if (remoteSessionId) await deleteRemoteSession(remoteSessionId);
+    if (recovered.count > 0) {
+      try {
+        await appendTaskEvent(taskId, "activity.dispatch_failed", {
+          title: "Agent dispatch failed",
+          message,
+        });
+      } catch (eventError) {
+        console.error("[dispatch] failed to record recovery event", taskId, eventError);
+      }
+    }
+    return { ok: false, reason: "dispatch_failed" };
+  }
+}
+
+async function deleteRemoteSession(sessionId: string) {
+  try {
+    await tf().sessions.delete(sessionId);
+  } catch (error) {
+    console.error("[dispatch] failed to delete remote session", sessionId, error);
+  }
 }
 
 async function runPump(taskId: string, sessionId: string, input: Array<Record<string, unknown>>) {
-  let lastSeq = 0;
+  let providerStreamId: string | null = null;
   try {
     const stream = await tf().sessions.createTurnStream(sessionId, { input: input as never });
     const events = new Map<string, PumpEvent>();
 
     for await (const { data: event, id } of stream.withMetadata()) {
-      if (id != null) lastSeq = Number(id);
+      if (id != null) providerStreamId = String(id);
       const ev = event as unknown as PumpEvent;
       const type = ev.type;
 
@@ -235,7 +267,10 @@ async function runPump(taskId: string, sessionId: string, input: Array<Record<st
       }
 
       if (!events.has(ev.id)) {
-        await logEvent(taskId, lastSeq, type, ev);
+        await appendTaskEvent(taskId, type, {
+          ...ev,
+          providerStreamId,
+        });
       }
       events.set(ev.id, ev);
 
@@ -251,15 +286,15 @@ async function runPump(taskId: string, sessionId: string, input: Array<Record<st
           await setColumn(taskId, "blocked");
           break;
         case "turn.done":
-          await handleDone(taskId, sessionId, ev, events, lastSeq);
+          await handleDone(taskId, sessionId, ev, events);
           break;
       }
     }
   } catch (err) {
     const message = String(err).slice(0, 500);
     await setColumn(taskId, "blocked", { error: message });
-    await logEvent(taskId, lastSeq + 1, "pump.error", { message });
-    await logEvent(taskId, lastSeq + 2, "activity.failed", {
+    await appendTaskEvent(taskId, "pump.error", { message, providerStreamId });
+    await appendTaskEvent(taskId, "activity.failed", {
       title: "Agent run failed",
       message,
     });
@@ -270,8 +305,7 @@ async function handleDone(
   taskId: string,
   sessionId: string,
   done: PumpEvent,
-  events: Map<string, PumpEvent>,
-  lastSeq: number
+  events: Map<string, PumpEvent>
 ) {
   const status = done.state?.status;
   const requiredActions: PendingAction[] =
@@ -290,9 +324,9 @@ async function handleDone(
     const output = recordedSummary ?? (fallbackOutput ? truncate(String(fallbackOutput), 8000) : null);
     await db.task.update({
       where: { id: taskId },
-      data: { column: "settled", output, error: null, lastSeq },
+      data: { column: "settled", output, error: null },
     });
-    await logEvent(taskId, lastSeq + 1, "activity.completed", {
+    await appendTaskEvent(taskId, "activity.completed", {
       title: "Task completed",
       summary: output,
     });
@@ -301,8 +335,19 @@ async function handleDone(
   }
 
   if (status === "cancelled") {
-    await setColumn(taskId, "backlog", { error: `cancelled: ${done.state?.reason ?? ""}` });
-    await logEvent(taskId, lastSeq + 1, "activity.cancelled", {
+    await db.task.update({
+      where: { id: taskId },
+      data: {
+        column: "backlog",
+        sessionId: null,
+        turnId: null,
+        pendingActions: null,
+        handoff: null,
+        output: null,
+        error: `cancelled: ${done.state?.reason ?? ""}`,
+      },
+    });
+    await appendTaskEvent(taskId, "activity.cancelled", {
       title: "Agent run cancelled",
       reason: done.state?.reason ?? null,
     });
@@ -312,7 +357,7 @@ async function handleDone(
   if (status === "error") {
     const message = truncate(String(done.state?.message ?? "unknown"));
     await setColumn(taskId, "blocked", { error: message });
-    await logEvent(taskId, lastSeq + 1, "activity.failed", {
+    await appendTaskEvent(taskId, "activity.failed", {
       title: "Agent run failed",
       message,
     });
@@ -346,11 +391,10 @@ async function handleDone(
       };
     }),
   }));
-  await logEvent(taskId, lastSeq + 1, "pause.pending", enriched);
+  await appendTaskEvent(taskId, "pause.pending", enriched);
   const waitingForApproval = enriched.some((action) => action.type === "tool.approval_required");
-  await logEvent(
+  await appendTaskEvent(
     taskId,
-    lastSeq + 2,
     waitingForApproval ? "activity.waiting_approval" : "activity.waiting_response",
     {
       title: waitingForApproval ? "Waiting for approval" : "Waiting for a response",
@@ -359,7 +403,7 @@ async function handleDone(
   );
   await db.task.update({
     where: { id: taskId },
-    data: { pendingActions: JSON.stringify(enriched), lastSeq },
+    data: { pendingActions: JSON.stringify(enriched) },
   });
   await setColumn(taskId, waitingForApproval ? "approval" : "blocked");
   void sessionId;
@@ -369,13 +413,15 @@ export async function sweep(): Promise<void> {
   const candidates = await db.task.findMany({ where: { column: "backlog" } });
   const ready: string[] = [];
   for (const t of candidates) {
-    const deps = JSON.parse(t.dependsOn || "[]") as string[];
+    const deps = dependencyIds(t.dependsOn);
     if (deps.length === 0) {
       // auto-dispatch only tasks that were created as part of an active mission flow
       ready.push(t.id);
       continue;
     }
-    const preds = await db.task.findMany({ where: { id: { in: deps } } });
+    const preds = await db.task.findMany({
+      where: { missionId: t.missionId, id: { in: deps } },
+    });
     if (preds.length === deps.length && preds.every((p) => p.column === "settled")) ready.push(t.id);
   }
   for (const id of ready) await dispatchTask(id);
@@ -412,14 +458,14 @@ export async function resolvePause(
 
   const tools = activityToolNames(pending);
   if (decision.kind === "approve") {
-    await logEvent(taskId, task.lastSeq + 1, "activity.approval_resolved", {
+    await appendTaskEvent(taskId, "activity.approval_resolved", {
       title: decision.allow ? "Approval granted" : "Approval denied",
       allowed: decision.allow,
       reason: decision.reason ?? null,
       tools,
     });
   } else {
-    await logEvent(taskId, task.lastSeq + 1, "activity.response_sent", {
+    await appendTaskEvent(taskId, "activity.response_sent", {
       title: "Response sent to agent",
       tools,
     });

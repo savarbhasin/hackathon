@@ -88,12 +88,6 @@ mission-control/
 11. Dispatch guard: only backlog tasks with `sessionId == null`; claim via `updateMany` race check. Cancelled turns return cards to backlog (redispatch-safe).
 12. Secrets live ONLY in `mission-control/.env.local` (gitignored): `DATABASE_URL`, `TRUEFORGE_BASE_URL=http://localhost:8790`, `OPENROUTER_API_KEY`. Never commit keys; never paste real keys into repo files.
 
-## Strategy notes
-
-- Tracks: Best Use of TrueForge (DGX Spark), Code Quality w/ Qodo (install Qodo day one, work through PRs — judges read the trail), Best UI (kanban + approval-on-card is the demo moment).
-- Judging penalizes "platform with half-finished features" → demo ONE flagship flow (research → Linear issue with approval gate), show generality briefly.
-- Demo script: type mission in chat → researcher runs exa → handoff injects into filer → filer asks team question (Blocked) → answer → save_issue gate (⚠) → approve from card drawer → issue HAC-x appears in Linear.
-
 ## Verified end-to-end (Aug 22)
 
 Mission → orchestrator MCP tool calls → researcher (exa) settles with handoff → auto-chain dispatches filer → ask_user_question answered via board → save_issue approval gate → approved → Linear issue created (HAC-5) → settled.

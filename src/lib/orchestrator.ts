@@ -1,7 +1,20 @@
 import { db } from "./db";
 import { tf } from "./tf";
 import { ORCHESTRATOR_SPEC, TITLE_MODEL } from "./fleet";
+import { createConversationTurnLock, ConversationTurnAbortedError } from "./conversation-turn-lock";
+import {
+  buildProviderResumeInput,
+  createPauseSelector,
+  parsePersistedPauseActions,
+  toClientPauseAction,
+  type PauseAction,
+  type PersistedPauseAction,
+  type ResumeSelection,
+  ResumeStateError,
+} from "./orchestrator-pause";
 import { isEventDelta, mergeEventDelta } from "@truefoundry/trueforge-sdk";
+
+const conversationTurnLock = createConversationTurnLock();
 
 async function createOrchestratorSession(): Promise<string> {
   const { data: session } = await tf().sessions.create({
@@ -53,23 +66,16 @@ export interface ChatEventMetrics {
   totalReasoningTokens?: number;
 }
 
-export interface PauseAction {
-  type: string;
-  threadId?: string | null;
-  toolCallId: string;
-  name?: string;
-  question?: string;
-  options?: string[];
-  argsPreview?: string;
-}
-
 export interface ChatEvent {
-  kind: "conversation" | "delta" | "tool" | "status" | "pause" | "done";
+  kind: "conversation" | "delta" | "tool" | "status" | "pause" | "error" | "done";
   text?: string;
   name?: string;
+  code?: string;
   conversationId?: string;
   metrics?: ChatEventMetrics;
   actions?: PauseAction[];
+  completed?: boolean;
+  _persistedActions?: PersistedPauseAction[];
 }
 
 interface StreamEvent {
@@ -91,9 +97,17 @@ interface StreamEvent {
 export async function* runOrchestratorTurn(
   message: string,
   conversationId?: string,
-  documentIds: string[] = []
+  documentIds: string[] = [],
+  abortSignal?: AbortSignal
 ): AsyncGenerator<ChatEvent> {
-  const conversation = await ensureConversation(conversationId, message);
+  let release = conversationId
+    ? await conversationTurnLock.acquire(conversationId, abortSignal)
+    : undefined;
+  try {
+    throwIfAborted(abortSignal);
+    const conversation = await ensureConversation(conversationId, message);
+    release ??= await conversationTurnLock.acquire(conversation.id, abortSignal);
+    throwIfAborted(abortSignal);
   await db.$transaction([
     db.chatMessage.create({
       data: { conversationId: conversation.id, role: "user", content: message },
@@ -110,18 +124,20 @@ export async function* runOrchestratorTurn(
   let streamedText = "";
   let status = "unknown";
   let statusText: string | undefined;
-  let pauseActions: PauseAction[] = [];
+  let pauseActions: PersistedPauseAction[] = [];
   const tools: string[] = [];
 
   const documentContext = await attachedDocumentContext(documentIds);
   try {
-    for await (const event of streamSessionTurn(conversation.sessionId, [
-      { type: "user.message", content: `${message}${documentContext}` },
-    ])) {
+    for await (const event of streamSessionTurn(
+      conversation.sessionId,
+      [{ type: "user.message", content: `${message}${documentContext}` }],
+      abortSignal
+    )) {
       if (event.kind === "delta") streamedText += event.text ?? "";
       if (event.kind === "tool" && event.name) tools.push(event.name);
       if (event.kind === "status") statusText = event.text;
-      if (event.kind === "pause") pauseActions = event.actions ?? [];
+      if (event.kind === "pause") pauseActions = event._persistedActions ?? [];
       if (event.kind === "done") {
         finalText = event.text ?? "";
         status = event.name ?? "unknown";
@@ -131,6 +147,7 @@ export async function* runOrchestratorTurn(
   } catch (error) {
     finalText = `Error: ${String(error).slice(0, 300)}`;
     status = "error";
+    yield { kind: "error", code: "turn_stream_failed", text: finalText };
     yield { kind: "done", text: finalText, name: status };
   }
 
@@ -148,6 +165,9 @@ export async function* runOrchestratorTurn(
     where: { id: conversation.id },
     data: { updatedAt: new Date() },
   });
+  } finally {
+    release?.();
+  }
 }
 
 async function attachedDocumentContext(documentIds: string[]): Promise<string> {
@@ -164,93 +184,116 @@ async function attachedDocumentContext(documentIds: string[]): Promise<string> {
   return `\n\nThe user attached these saved documents as working context. Use them when relevant.\n\n${context}`;
 }
 
+function throwIfAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw new ConversationTurnAbortedError();
+}
+
 export async function* resumeOrchestratorTurn(
   conversationId: string,
-  answers: Array<{ type: string; threadId?: string | null; toolCallId: string; content: string }>
+  selections: ResumeSelection[],
+  abortSignal?: AbortSignal
 ): AsyncGenerator<ChatEvent> {
+  const release = await conversationTurnLock.acquire(conversationId, abortSignal);
+  try {
+  throwIfAborted(abortSignal);
   const conversation = await db.conversation.findUnique({ where: { id: conversationId } });
   if (!conversation) throw new Error("Conversation not found");
 
-  const answerSummary = answers.map((a) => a.content).join(" | ");
+  const pausedMessage = await db.chatMessage.findFirst({
+    where: { conversationId: conversation.id, pauseActions: { not: null } },
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    select: { id: true, pauseActions: true },
+  });
+  if (!pausedMessage?.pauseActions) {
+    throw new ResumeStateError("no_pending_pause", "There is no current paused action for this conversation.");
+  }
+
+  const persistedActions = parsePersistedPauseActions(pausedMessage.pauseActions, pausedMessage.id);
+  const input = buildProviderResumeInput(persistedActions, selections);
+  const answerSummary = selections.map((selection) =>
+    selection.decision === "allow" ? "Approved" : selection.decision === "deny" ? "Denied" : selection.content?.trim() ?? ""
+  ).filter(Boolean).join(" | ");
+
+  yield { kind: "conversation", conversationId: conversation.id };
+
+  let finalText = "";
+  let streamedText = "";
+  let status = "unknown";
+  let statusText: string | undefined;
+  let pauseActions: PersistedPauseAction[] = [];
+  let providerCompleted = false;
+  const tools: string[] = [];
+
+  try {
+    for await (const event of streamSessionTurn(conversation.sessionId, input, abortSignal)) {
+      if (event.kind === "delta") streamedText += event.text ?? "";
+      if (event.kind === "tool" && event.name) tools.push(event.name);
+      if (event.kind === "status") statusText = event.text;
+      if (event.kind === "pause") pauseActions = event._persistedActions ?? [];
+      if (event.kind === "done") {
+        finalText = event.text ?? "";
+        status = event.name ?? "unknown";
+        providerCompleted = event.completed === true;
+      }
+      yield event;
+    }
+  } catch (error) {
+    const code = error instanceof ConversationTurnAbortedError ? "turn_cancelled" : "resume_stream_failed";
+    const text = code === "turn_cancelled"
+      ? "The resume stream was cancelled. The paused action is still available."
+      : "The resume did not complete. The paused action is still available.";
+    yield { kind: "error", code, text };
+    yield { kind: "done", text, name: "error" };
+    return;
+  }
+
+  if (!providerCompleted) {
+    const text = "The provider ended before confirming this resume. The paused action is still available.";
+    yield { kind: "error", code: "resume_incomplete", text };
+    yield { kind: "done", text, name: "error" };
+    return;
+  }
+
   await db.$transaction([
-    db.chatMessage.updateMany({
-      where: { conversationId: conversation.id, pauseActions: { not: null } },
-      data: { pauseActions: null },
+    db.chatMessage.create({
+      data: { conversationId: conversation.id, role: "user", content: answerSummary || "Responded to paused action" },
     }),
     db.chatMessage.create({
-      data: { conversationId: conversation.id, role: "user", content: answerSummary },
+      data: {
+        conversationId: conversation.id,
+        role: "assistant",
+        content: finalText || streamedText,
+        tools: JSON.stringify(tools),
+        status: statusText ?? status,
+        pauseActions: pauseActions.length > 0 ? JSON.stringify(pauseActions) : null,
+      },
+    }),
+    db.chatMessage.update({
+      where: { id: pausedMessage.id },
+      data: { pauseActions: null },
     }),
     db.conversation.update({
       where: { id: conversation.id },
       data: { updatedAt: new Date() },
     }),
   ]);
-
-  yield { kind: "conversation", conversationId: conversation.id };
-
-  const input = answers.map((a) =>
-    a.type === "tool.approval_required"
-      ? {
-          type: "user.tool_approval",
-          threadId: a.threadId,
-          toolCallId: a.toolCallId,
-          approval: { status: "allow" },
-        }
-      : {
-          type: "user.tool_response",
-          threadId: a.threadId,
-          toolCallId: a.toolCallId,
-          content: a.content,
-        }
-  );
-
-  let finalText = "";
-  let streamedText = "";
-  let status = "unknown";
-  let statusText: string | undefined;
-  let pauseActions: PauseAction[] = [];
-  const tools: string[] = [];
-
-  try {
-    for await (const event of streamSessionTurn(conversation.sessionId, input)) {
-      if (event.kind === "delta") streamedText += event.text ?? "";
-      if (event.kind === "tool" && event.name) tools.push(event.name);
-      if (event.kind === "status") statusText = event.text;
-      if (event.kind === "pause") pauseActions = event.actions ?? [];
-      if (event.kind === "done") {
-        finalText = event.text ?? "";
-        status = event.name ?? "unknown";
-      }
-      yield event;
-    }
-  } catch (error) {
-    finalText = `Error: ${String(error).slice(0, 300)}`;
-    status = "error";
-    yield { kind: "done", text: finalText, name: status };
+  } finally {
+    release();
   }
-
-  await db.chatMessage.create({
-    data: {
-      conversationId: conversation.id,
-      role: "assistant",
-      content: finalText || streamedText,
-      tools: JSON.stringify(tools),
-      status: statusText ?? status,
-      pauseActions: pauseActions.length > 0 ? JSON.stringify(pauseActions) : null,
-    },
-  });
 }
 
 async function* streamSessionTurn(
   sessionId: string,
-  input: Array<Record<string, unknown>>
+  input: Array<object>,
+  abortSignal?: AbortSignal
 ): AsyncGenerator<ChatEvent> {
   const stream = await tf().sessions.createTurnStream(sessionId, {
     input: input as never,
-  });
+  }, { abortSignal });
 
   let finalText = "";
   let status = "unknown";
+  let completed = false;
   const events = new Map<string, StreamEvent>();
   const seenTools = new Set<string>();
 
@@ -291,12 +334,22 @@ async function* streamSessionTurn(
       case "turn.done":
         status = ev.state?.status ?? "unknown";
         finalText = ev.state?.output?.content ?? "";
+        completed = true;
         {
           const ras = (ev.state as { requiredActions?: unknown[]; required_actions?: unknown[] })
             ?.requiredActions ??
             (ev.state as { required_actions?: unknown[] })?.required_actions ?? [];
           if (ras.length > 0) {
-            yield { kind: "pause", actions: extractPauseActions(ras, events) };
+            const persistedActions = extractPauseActions(ras, events);
+            const pauseEvent: ChatEvent = {
+              kind: "pause",
+              actions: persistedActions.map(toClientPauseAction),
+            };
+            Object.defineProperty(pauseEvent, "_persistedActions", {
+              value: persistedActions,
+              enumerable: false,
+            });
+            yield pauseEvent;
           }
         }
         {
@@ -309,7 +362,7 @@ async function* streamSessionTurn(
     }
   }
 
-  yield { kind: "done", text: finalText, name: status };
+  yield { kind: "done", text: finalText, name: status, completed };
 }
 
 function titleFromMessage(message: string): string {
@@ -372,8 +425,8 @@ function resolvedToolName(call: NonNullable<StreamEvent["toolCalls"]>[number]): 
 function extractPauseActions(
   requiredActions: unknown[],
   events: Map<string, StreamEvent>
-): PauseAction[] {
-  const out: PauseAction[] = [];
+): PersistedPauseAction[] {
+  const out: PersistedPauseAction[] = [];
   const actions = requiredActions as Array<{
     type?: string;
     threadId?: string | null;
@@ -398,6 +451,7 @@ function extractPauseActions(
         }
       }
       out.push({
+        selector: createPauseSelector(),
         type: String(ra.type ?? ""),
         threadId: (ra.threadId as string | null) ?? undefined,
         toolCallId: ref.id,

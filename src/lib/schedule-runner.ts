@@ -1,5 +1,8 @@
 import { db } from "./db";
 import { orchestratorSay } from "./orchestrator";
+import { SerialTaskQueue } from "./serial-task-queue";
+
+const scheduleRunQueue = new SerialTaskQueue();
 
 export class ScheduleNotFoundError extends Error {
   constructor() {
@@ -23,25 +26,29 @@ export class ScheduleRunnerUnavailableError extends Error {
 }
 
 export async function runScheduleNow(id: string) {
-  const schedule = await db.schedule.findUnique({ where: { id } });
-  if (!schedule) throw new ScheduleNotFoundError();
-  if (!schedule.enabled) throw new ScheduleDisabledError();
+  const requestedSchedule = await db.schedule.findUnique({ where: { id } });
+  if (!requestedSchedule) throw new ScheduleNotFoundError();
+  if (!requestedSchedule.enabled) throw new ScheduleDisabledError();
 
-  try {
-    const response = await fetch(`http://127.0.0.1:${process.env.MCP_PORT ?? "3100"}/health`, {
-      signal: AbortSignal.timeout(1_500),
+  return scheduleRunQueue.run(async () => {
+    const schedule = await db.schedule.findUnique({ where: { id } });
+    if (!schedule) throw new ScheduleNotFoundError();
+    if (!schedule.enabled) throw new ScheduleDisabledError();
+
+    try {
+      const response = await fetch(`http://127.0.0.1:${process.env.MCP_PORT ?? "3100"}/health`, {
+        signal: AbortSignal.timeout(1_500),
+      });
+      if (!response.ok) throw new Error("MCP health check failed");
+    } catch {
+      throw new ScheduleRunnerUnavailableError();
+    }
+
+    await orchestratorSay(schedule.prompt);
+
+    return db.schedule.update({
+      where: { id },
+      data: { lastRunAt: new Date() },
     });
-    if (!response.ok) throw new Error("MCP health check failed");
-  } catch {
-    throw new ScheduleRunnerUnavailableError();
-  }
-
-  await orchestratorSay(schedule.prompt);
-
-  const updated = await db.schedule.update({
-    where: { id },
-    data: { lastRunAt: new Date() },
   });
-
-  return updated;
 }

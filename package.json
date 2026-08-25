@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "dev:mcp": "tsx watch server/mcp.ts",
+    "dev:mcp": "tsx watch --env-file=.env.local server/mcp.ts",
     "build": "next build",
     "start": "next start",
     "lint": "eslint"
