@@ -4,7 +4,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { z } from "zod";
 import { Cron } from "croner";
 import { db } from "../src/lib/db";
-import { getAgentDefinition, listAgentDefinitions } from "../src/lib/agents";
+import { getAgentDefinition } from "../src/lib/agents";
 import { dispatchTask, getBoard, sweep } from "../src/lib/engine";
 import { runScheduleNow } from "../src/lib/schedule-runner";
 import { appendTaskEvent } from "../src/lib/task-events";
@@ -103,18 +103,6 @@ function buildServer(): McpServer {
     "Current state of all missions and tasks on the kanban board.",
     {},
     async () => text(await getBoard())
-  );
-
-  server.tool(
-    "list_agents",
-    "List the reusable specialist agents available for tasks, including user-created agents.",
-    {},
-    async () =>
-      text(
-        (await listAgentDefinitions())
-          .filter((agent) => agent.enabled)
-          .map(({ slug, name, description, isDefault }) => ({ slug, name, description, isDefault }))
-      )
   );
 
   server.tool(
@@ -258,13 +246,13 @@ function buildServer(): McpServer {
       role: z
         .string()
         .min(1)
-        .describe("Immutable TrueForge agent name from list_agents"),
+        .describe("Agent id from the Available agents roster in your context"),
       depends_on: z.array(z.string()).default([]).describe("Same-mission predecessor task IDs whose output is required. Leave empty for work that can start independently"),
     },
     async ({ mission_id, title, detail, role, depends_on }) => {
       const profile = await getAgentDefinition(role);
       if (!profile?.enabled) {
-        return text(`Unknown or disabled agent "${role}". Use list_agents.`);
+        return text(`Unknown or disabled agent "${role}". Use an agent id exactly as listed in the Available agents roster.`);
       }
       const dependencyError = await validateTaskDependencies(mission_id, depends_on);
       if (dependencyError) return text(dependencyError);
