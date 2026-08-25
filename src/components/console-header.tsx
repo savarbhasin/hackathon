@@ -26,7 +26,7 @@ const NAV = [
   { href: "/board", label: "Fleet", description: "Track every agent task", icon: "fleet" },
   { href: "/agents", label: "Agents", description: "Edit specialist prompts", icon: "agents" },
   { href: "/schedules", label: "Schedules", description: "Run recurring work", icon: "schedules" },
-  { href: "/docs", label: "Docs", description: "Read saved agent output", icon: "docs" },
+  { href: "/docs", label: "Docs", description: "Browse saved documents", icon: "docs" },
 ] as const;
 
 function NavLinks({ mobile = false }: { mobile?: boolean }) {
