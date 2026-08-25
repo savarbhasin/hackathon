@@ -419,18 +419,18 @@ function ActionPanel({
             void onAct({ action: "answer", content }).then(() => onAnswerChange(""));
           }}
         >
-          <label htmlFor="task-answer" className="font-mono text-[9px] font-semibold uppercase tracking-[0.14em] text-ink-faint">Your answer</label>
+          <label htmlFor="task-answer" className="font-mono text-[9px] font-semibold uppercase tracking-[0.14em] text-ink-soft">Your answer</label>
           <textarea
             id="task-answer"
             value={answer}
             onChange={(event) => onAnswerChange(event.target.value)}
             rows={3}
             placeholder="Give the missing detail plainly."
-            className="mt-2 w-full resize-y rounded-md border border-line-strong bg-deck px-3 py-3 text-sm leading-6 text-ink outline-none placeholder:text-ink-faint focus:border-state-blocked"
+            className="mt-2 w-full resize-y rounded-md border border-line-strong bg-deck/70 px-3 py-3 text-sm leading-6 text-ink outline-none placeholder:text-ink-faint focus:border-signal focus:ring-1 focus:ring-signal/30"
           />
           <button
             disabled={busy || !answer.trim()}
-            className="mt-3 rounded-md bg-state-blocked px-5 py-3 text-xs font-semibold text-deck transition-colors hover:brightness-110 disabled:opacity-40"
+            className="mt-3 rounded-md bg-signal px-5 py-3 text-xs font-semibold text-deck transition-colors hover:brightness-110 disabled:opacity-40"
           >
             {busy ? "Sending..." : "Send answer"}
           </button>
