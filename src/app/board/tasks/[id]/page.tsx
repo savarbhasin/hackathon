@@ -481,14 +481,14 @@ function ActionPanel({
   return null;
 }
 
-function PendingCalls({ actions }: { actions: PendingAction[] }) {
+function PendingCalls({ actions, tone = "default" }: { actions: PendingAction[]; tone?: "default" | "question" }) {
   return (
     <div className="mt-4 space-y-2">
       {actions.flatMap((action) => action.calls).map((call) => {
         const question = questionFromArgs(call.args);
         return (
-          <div key={call.id} className="rounded-md border border-line-strong bg-deck/80 p-3.5">
-            <p className="font-mono text-[9px] font-semibold uppercase tracking-[0.12em] text-ink-soft">{call.name ? toolLabel(call.name) : "Agent request"}</p>
+          <div key={call.id} className={`rounded-md border p-3.5 ${tone === "question" ? "border-line bg-deck/55" : "border-line-strong bg-deck/80"}`}>
+            <p className={`font-mono text-[9px] font-semibold uppercase tracking-[0.12em] ${tone === "question" ? "text-ink-faint" : "text-ink-soft"}`}>{call.name ? toolLabel(call.name) : "Agent request"}</p>
             {question && <p className="mt-2 text-sm leading-6 text-ink">{question}</p>}
             {call.args && !question && (
               <pre className="mt-2 max-h-52 overflow-y-auto whitespace-pre-wrap break-words font-mono text-[10px] leading-5 text-ink-soft">{prettyJson(call.args)}</pre>
