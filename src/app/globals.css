@@ -261,6 +261,11 @@ select:not(:disabled) {
   padding: 0.1rem 0.25rem;
 }
 
+.question-attention {
+  border: 1px solid var(--color-ink-soft);
+  background: rgba(13, 16, 21, 0.94);
+}
+
 /* console heartbeat LED */
 @keyframes led-breathe {
   0%,
