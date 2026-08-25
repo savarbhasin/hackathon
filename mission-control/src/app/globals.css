@@ -234,14 +234,24 @@ select:not(:disabled) {
 .markdown-document-content h1,
 .markdown-document-content h2,
 .markdown-document-content h3 {
+  margin-top: 1.8rem;
+  margin-bottom: 0.75rem;
   color: var(--color-ink);
   font-weight: 800;
   line-height: 1.2;
 }
 
-.markdown-document-content h1 { font-size: 1.7rem; }
+.markdown-document-content h1 { margin-top: 0; font-size: 1.7rem; }
 .markdown-document-content h2 { font-size: 1.35rem; }
 .markdown-document-content h3 { font-size: 1.1rem; }
+
+.markdown-document-content p {
+  margin: 0.75rem 0;
+}
+
+.markdown-document-content :where(h1, h2, h3) + p {
+  margin-top: 0.9rem;
+}
 
 .markdown-document-content a { color: var(--color-signal); }
 
