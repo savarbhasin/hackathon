@@ -1,6 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 interface ToolOption { name: string; description?: string }
 interface ConnectorOption { name: string; url?: string; tools: ToolOption[] }
@@ -488,16 +490,23 @@ function ConnectorEditor({ connector, server, required, onToolToggle, onAllTools
             const enabled = core || enabledTools.includes(tool.name);
             const toolLocked = core;
             return <div key={tool.name} className="grid grid-cols-[minmax(0,1fr)_70px] items-center gap-3 border-b border-line/50 px-4 py-3 last:border-b-0">
-              <label className={`flex items-start gap-3 ${toolLocked ? "cursor-not-allowed" : "cursor-pointer"}`}>
-                <input type="checkbox" checked={enabled} disabled={toolLocked}
-                  onChange={(event) => onToolToggle(tool.name, event.target.checked)}
-                  aria-label={`${enabled ? "Disable" : "Enable"} ${tool.name}`}
-                  className="mt-0.5 accent-[var(--color-signal)]" />
-                <span className="min-w-0"><span className="flex flex-wrap items-center gap-2">
-                  <span className="font-mono text-[10px] font-medium text-ink">{tool.name}</span>
-                  {core && <span className="font-mono text-[7px] uppercase tracking-[0.12em] text-state-settled">Required</span>}
-                </span>{tool.description && <span className="mt-1 block text-[10px] leading-relaxed text-ink-faint">{tool.description}</span>}</span>
-              </label>
+              <div className="flex items-start gap-3">
+                <label className={`mt-0.5 ${toolLocked ? "cursor-not-allowed" : "cursor-pointer"}`}>
+                  <input type="checkbox" checked={enabled} disabled={toolLocked}
+                    onChange={(event) => onToolToggle(tool.name, event.target.checked)}
+                    aria-label={`${enabled ? "Disable" : "Enable"} ${tool.name}`}
+                    className="accent-[var(--color-signal)]" />
+                </label>
+                <div className="min-w-0">
+                  <span className="flex flex-wrap items-center gap-2">
+                    <span className="font-mono text-[10px] font-medium text-ink">{tool.name}</span>
+                    {core && <span className="font-mono text-[7px] uppercase tracking-[0.12em] text-state-settled">Required</span>}
+                  </span>
+                  {tool.description && <div className="tool-description-markdown mt-1">
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{tool.description}</ReactMarkdown>
+                  </div>}
+                </div>
+              </div>
               <label className={`flex justify-center ${enabled && !core ? "cursor-pointer" : "cursor-not-allowed opacity-35"}`}
                 title={core ? "Mission Control core tools run without an approval gate" : "Pause before this tool runs"}>
                 <input type="checkbox" checked={approvals.includes(tool.name)} disabled={!enabled || core}
