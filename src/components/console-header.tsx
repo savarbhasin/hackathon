@@ -87,17 +87,17 @@ export function ConsoleShell({ children }: { children: ReactNode }) {
         onClick={toggleSidebar}
         aria-label={sidebarHidden ? "Show navigation" : "Hide navigation"}
         title={sidebarHidden ? "Show navigation" : "Hide navigation"}
-        className={`absolute top-4 z-20 hidden h-7 w-7 items-center justify-center rounded-md border border-line bg-panel text-ink-faint transition-colors hover:border-line-strong hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-signal md:flex ${sidebarHidden ? "left-3" : "left-[198px]"}`}
+        className={`absolute top-4 z-20 hidden h-7 w-7 items-center justify-center rounded-md border border-line bg-panel text-ink-faint transition-all duration-300 ease-out hover:border-line-strong hover:text-ink focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-signal md:flex ${sidebarHidden ? "left-3" : "left-[198px]"}`}
       >
-        <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" aria-hidden="true">
-          <path d={sidebarHidden ? "m6 3 5 5-5 5" : "m10 3-5 5 5 5"} fill="none" stroke="currentColor" strokeWidth="1.35" strokeLinecap="round" strokeLinejoin="round" />
+        <svg viewBox="0 0 18 18" className="h-4 w-4" aria-hidden="true">
+          <rect x="2.5" y="3" width="13" height="12" rx="1.5" fill="none" stroke="currentColor" strokeWidth="1.2" />
+          <path d="M6.5 3v12M9.5 7.25 7.25 9.5l2.25 2.25" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" className={`origin-center transition-transform duration-300 ${sidebarHidden ? "rotate-180" : ""}`} />
         </svg>
       </button>
 
-      <div className={`flex min-w-0 flex-1 flex-col ${sidebarHidden ? "md:pl-12" : ""}`}>
+      <div className={`flex min-w-0 flex-1 flex-col transition-[padding-left] duration-300 ease-out ${sidebarHidden ? "md:pl-12" : ""}`}>
         <header className="flex h-14 shrink-0 items-center border-b border-line bg-panel px-3 md:hidden">
-          <span className="text-signal"><Mark /></span>
-          <span className="ml-2 font-display text-[15px] font-extrabold tracking-[-0.03em] text-ink">The Squad</span>
+          <span className="squad-wordmark text-[19px] text-ink">the squad</span>
         </header>
         <div className="min-h-0 flex-1">{children}</div>
         <div className="shrink-0 md:hidden"><NavLinks mobile /></div>
