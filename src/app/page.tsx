@@ -681,7 +681,6 @@ const TOOL_ACTIVITY: Record<string, { active: string; done: string }> = {
   get_tool_info: { active: "Reading action details", done: "Read action details" },
   call_tool: { active: "Using a connected service", done: "Used a connected service" },
   list_board: { active: "Checking the fleet", done: "Checked the fleet" },
-  list_agents: { active: "Finding the right agent", done: "Found available agents" },
   get_task: { active: "Reading task details", done: "Read task details" },
   create_mission: { active: "Creating a task group", done: "Created a task group" },
   create_task: { active: "Adding work to the board", done: "Added work to the board" },
