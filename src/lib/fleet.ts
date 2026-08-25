@@ -47,10 +47,15 @@ export interface RoleDef {
 
 type AgentMcpServers = NonNullable<TrueForgeApi.AgentSpec["mcpServers"]>;
 
+export interface RoleCapabilities {
+  sandbox?: boolean;
+  dynamicSubAgents?: boolean;
+}
+
 function specialistSpec(
   instructions: string,
   servers: AgentMcpServers = [],
-  capabilities: { sandbox?: boolean; dynamicSubAgents?: boolean } = {}
+  capabilities: RoleCapabilities = {}
 ): RoleDef["spec"] {
   return {
     model: { name: SPECIALIST_MODEL },
@@ -70,99 +75,92 @@ function specialistSpec(
   };
 }
 
+interface DefineRoleInput {
+  id: string;
+  label: string;
+  description: string;
+  instructions: string;
+  servers?: AgentMcpServers;
+  capabilities?: RoleCapabilities;
+}
+
+function defineRole(input: DefineRoleInput): RoleDef {
+  return {
+    id: input.id,
+    label: input.label,
+    description: input.description,
+    instructions: input.instructions,
+    spec: specialistSpec(input.instructions, input.servers, input.capabilities),
+  };
+}
+
 export const ROLES: Record<string, RoleDef> = {
-  planner: {
+  planner: defineRole({
     id: "planner",
     label: "Planner",
     description: "Turns an unclear goal into a small, dependency-aware execution plan.",
     instructions: `Translate the assignment into an execution plan that another agent can follow without guessing.
 Identify the concrete outcome, constraints, unknowns, and acceptance checks. Break the work into the fewest useful steps and make dependencies explicit. Do not perform the work unless the assignment asks for both planning and execution.
 Save a document when the plan needs to be reused.`,
-    spec: specialistSpec(
-      `Translate the assignment into an execution plan that another agent can follow without guessing.
-Identify the concrete outcome, constraints, unknowns, and acceptance checks. Break the work into the fewest useful steps and make dependencies explicit. Do not perform the work unless the assignment asks for both planning and execution.
-Save a document when the plan needs to be reused.`
-    ),
-  },
-  researcher: {
+  }),
+  researcher: defineRole({
     id: "researcher",
     label: "Researcher",
     description: "Finds current evidence, checks important claims, and writes source-backed briefs.",
     instructions: `Investigate the assigned question with web search. Prefer primary sources and current material. Check important claims against a second source.
 Separate sourced facts from your own inference. Record dates, material caveats, and direct links. Put substantial findings in a document with clear headings and source links.`,
-    spec: specialistSpec(
-      `Investigate the assigned question with web search. Prefer primary sources and current material. Check important claims against a second source.
-Separate sourced facts from your own inference. Record dates, material caveats, and direct links. Put substantial findings in a document with clear headings and source links.`,
-      [{ name: "exa" }],
-      { sandbox: true, dynamicSubAgents: true }
-    ),
-  },
-  coder: {
+    servers: [{ name: "exa" }],
+    capabilities: { sandbox: true, dynamicSubAgents: true },
+  }),
+  coder: defineRole({
     id: "coder",
     label: "Coder",
     description: "Implements scoped changes and verifies the behavior that changed.",
     instructions: `Implement only the assigned change. Inspect the existing code and project instructions before editing, and preserve unrelated work.
 Choose the smallest coherent design that fits the current architecture. Handle failure states at system boundaries. Run focused checks for the behavior you changed and report the exact files and checks in your summary. Do not claim a check passed unless you ran it.
 Put substantial context that a successor cannot recover from the changed files in a document.`,
-    spec: specialistSpec(
-      `Implement only the assigned change. Inspect the existing code and project instructions before editing, and preserve unrelated work.
-Choose the smallest coherent design that fits the current architecture. Handle failure states at system boundaries. Run focused checks for the behavior you changed and report the exact files and checks in your summary. Do not claim a check passed unless you ran it.
-Put substantial context that a successor cannot recover from the changed files in a document.`,
-      [],
-      { sandbox: true, dynamicSubAgents: true }
-    ),
-  },
-  reviewer: {
+    capabilities: { sandbox: true, dynamicSubAgents: true },
+  }),
+  reviewer: defineRole({
     id: "reviewer",
     label: "Reviewer",
     description: "Looks for correctness, regressions, unsafe assumptions, and missing tests.",
     instructions: `Review the assigned change as a skeptical maintainer. Read the surrounding code, not only the diff.
 Prioritize concrete bugs, security or data-loss risks, race conditions, broken contracts, and missing tests. Cite exact files and lines for every finding. Do not invent issues to fill a report, and say plainly when you find none. Do not edit code unless the assignment explicitly asks you to fix findings.
 Save a review document when a successor has been assigned to act on substantial findings.`,
-    spec: specialistSpec(
-      `Review the assigned change as a skeptical maintainer. Read the surrounding code, not only the diff.
-Prioritize concrete bugs, security or data-loss risks, race conditions, broken contracts, and missing tests. Cite exact files and lines for every finding. Do not invent issues to fill a report, and say plainly when you find none. Do not edit code unless the assignment explicitly asks you to fix findings.
-Save a review document when a successor has been assigned to act on substantial findings.`
-    ),
-  },
-  writer: {
+  }),
+  writer: defineRole({
     id: "writer",
     label: "Writer",
     description: "Produces clear deliverables from supplied evidence and constraints.",
     instructions: `Turn the supplied context into the requested deliverable for the named audience and format.
 Preserve factual meaning, keep claims tied to the evidence you received, and call out missing support instead of filling gaps. Match the requested voice. Revise for clarity and remove filler before finishing. Create a document when the deliverable should remain available in Mission Control.`,
-    spec: specialistSpec(
-      `Turn the supplied context into the requested deliverable for the named audience and format.
-Preserve factual meaning, keep claims tied to the evidence you received, and call out missing support instead of filling gaps. Match the requested voice. Revise for clarity and remove filler before finishing. Create a document when the deliverable should remain available in Mission Control.`
-    ),
-  },
-  filer: {
+  }),
+  filer: defineRole({
     id: "filer",
     label: "Issue Filer",
     description: "Checks Linear context and prepares issues behind a human approval gate.",
-    instructions: "File issues in Linear from the supplied context. Search for duplicates first and confirm the target team, project, priority, and acceptance criteria from available evidence. Ask for missing details instead of guessing. Present the exact proposed issue before calling save_issue. That call requires human approval. If the user denies it, do not retry it. Record the outcome in mark_done.",
-    spec: specialistSpec(
+    instructions:
       "File issues in Linear from the supplied context. Search for duplicates first and confirm the target team, project, priority, and acceptance criteria from available evidence. Ask for missing details instead of guessing. Present the exact proposed issue before calling save_issue. That call requires human approval. If the user denies it, do not retry it. Record the outcome in mark_done.",
-      [
-        {
-          name: "linear",
-          enableTools: [
-            "list_teams",
-            "get_team",
-            "get_workspace",
-            "list_users",
-            "list_projects",
-            "list_issues",
-            "get_issue",
-            "list_issue_statuses",
-            "list_issue_labels",
-            "save_issue",
-          ],
-          requireApprovalForTools: ["save_issue"],
-        },
-      ]
-    ),
-  },
+    servers: [
+      {
+        name: "linear",
+        enableTools: [
+          "list_teams",
+          "get_team",
+          "get_workspace",
+          "list_users",
+          "list_projects",
+          "list_issues",
+          "get_issue",
+          "list_issue_statuses",
+          "list_issue_labels",
+          "save_issue",
+        ],
+        requireApprovalForTools: ["save_issue"],
+      },
+    ],
+  }),
 };
 
 export const ORCHESTRATOR_INSTRUCTIONS = `You run the agent fleet in Mission Control. Own the plan and delegation. Specialists own only the tasks you assign them.
@@ -173,7 +171,7 @@ Decide whether to delegate:
 - Ask the user only when a missing choice would materially change the result or authorize an external action. Do not ask for information already present in the conversation, board, or saved documents.
 
 Plan before creating anything:
-- Call list_agents first. It is the source of truth for available agents, descriptions, and tool access. Never invent an agent name or assume a connector exists.
+- The Available agents roster in your context is the source of truth for agent ids, descriptions, and tool access. Never invent an agent name or assume a connector exists.
 - Design the smallest useful directed acyclic task graph. Each task must have one owner and one verifiable outcome. Avoid duplicate, ceremonial, monitoring, or manager tasks.
 - Run independent tasks in parallel. Add depends_on only when a task cannot produce a correct result without a predecessor's output. Never create self-dependencies, cycles, or dependencies on tasks from another mission.
 - Create predecessor tasks before successors so you have real task IDs for depends_on.
@@ -223,7 +221,6 @@ export const ORCHESTRATOR_SPEC: TrueForgeApi.AgentSpec = {
       name: MCP_SERVER_NAME,
       enableTools: [
         "list_board",
-        "list_agents",
         "get_task",
         "create_mission",
         "create_task",

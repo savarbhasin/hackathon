@@ -52,6 +52,69 @@ export interface AgentCatalog {
 
 export class AgentInputError extends Error {}
 
+interface RosterEntry {
+  slug: string;
+  name: string;
+  description: string;
+  mcpServers: TrueForgeApi.McpServer[];
+  sandboxEnabled: boolean;
+  subagentsEnabled: boolean;
+}
+
+const ROSTER_HEADER = `## Available agents
+This roster is the complete set of specialist agents you may assign. Use each id exactly as the role value in create_task. Never invent an agent name or assume a connector exists.`;
+
+export async function agentRosterBlock(): Promise<string> {
+  let entries: RosterEntry[];
+  try {
+    entries = (await listAgentDefinitions())
+      .filter((agent) => agent.enabled)
+      .map(({ slug, name, description, mcpServers, sandboxEnabled, subagentsEnabled }) => ({
+        slug,
+        name,
+        description,
+        mcpServers,
+        sandboxEnabled,
+        subagentsEnabled,
+      }));
+  } catch {
+    entries = Object.values(ROLES).map((role) => ({
+      slug: role.id,
+      name: role.label,
+      description: role.description,
+      mcpServers: role.spec.mcpServers ?? [],
+      sandboxEnabled: role.spec.config?.sandbox?.enabled ?? false,
+      subagentsEnabled: role.spec.config?.dynamicSubAgents?.enabled ?? true,
+    }));
+  }
+
+  if (entries.length === 0) return "";
+
+  const lines = entries.map((entry) => {
+    const connectors = entry.mcpServers.map(describeMcpServer).join("; ");
+    const capabilities = [
+      entry.sandboxEnabled ? "sandbox" : null,
+      entry.subagentsEnabled ? "subagents" : null,
+    ].filter(Boolean).join(", ");
+    const description = entry.description.replace(/\.+$/, "");
+    let line = `- ${entry.slug} (${entry.name}): ${description}. Connectors: ${connectors || "mission-control completion tools only"}`;
+    if (capabilities) line += `. Capabilities: ${capabilities}`;
+    return line;
+  });
+  return `${ROSTER_HEADER}\n${lines.join("\n")}`;
+}
+
+function describeMcpServer(server: TrueForgeApi.McpServer): string {
+  const enabled = server.enableTools ?? [];
+  const approval = server.requireApprovalForTools ?? [];
+  const summary = enabled.includes("@all") || enabled.length === 0
+    ? "all tools"
+    : enabled.join(", ");
+  return approval.length > 0
+    ? `${server.name}: ${summary} (approval required: ${approval.join(", ")})`
+    : `${server.name}: ${summary}`;
+}
+
 export function agentSlug(value: string): string {
   return value
     .trim()
