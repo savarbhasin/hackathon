@@ -241,6 +241,34 @@ export async function dispatchTask(taskId: string): Promise<{ ok: boolean; reaso
   }
 }
 
+export async function retryTask(taskId: string): Promise<{ ok: boolean; reason?: string }> {
+  const task = await db.task.findUnique({ where: { id: taskId } });
+  if (!task) return { ok: false, reason: "not_found" };
+  if (task.column !== "blocked") return { ok: false, reason: `column=${task.column}` };
+
+  const pendingActions = task.pendingActions ? JSON.parse(task.pendingActions) as Array<{ type?: string }> : [];
+  if (pendingActions.some((action) => action.type === "tool.response_required")) {
+    return { ok: false, reason: "question_pending" };
+  }
+  if (pendingActions.some((action) => action.type === "mcp.auth_required")) {
+    return { ok: false, reason: "connector_auth_required" };
+  }
+
+  const reset = await db.task.updateMany({
+    where: { id: taskId, column: "blocked" },
+    data: {
+      column: "backlog",
+      sessionId: null,
+      turnId: null,
+      pendingActions: null,
+      error: null,
+    },
+  });
+  if (reset.count === 0) return { ok: false, reason: "lost_race" };
+
+  return dispatchTask(taskId);
+}
+
 async function deleteRemoteSession(sessionId: string) {
   try {
     await tf().sessions.delete(sessionId);

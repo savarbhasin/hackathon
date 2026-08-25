@@ -145,8 +145,6 @@ select:not(:disabled) {
 }
 
 .markdown blockquote {
-  border-left: 3px solid var(--color-role-researcher);
-  padding-left: 1rem;
   color: var(--color-ink-soft);
 }
 
@@ -224,8 +222,7 @@ select:not(:disabled) {
 }
 
 .tool-description-markdown blockquote {
-  border-left: 2px solid var(--color-line-strong);
-  padding-left: 0.5rem;
+  color: var(--color-ink-soft);
 }
 
 .tool-description-markdown table {

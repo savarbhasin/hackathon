@@ -1,5 +1,5 @@
 import { db } from "@/lib/db";
-import { dispatchTask, resolvePause } from "@/lib/engine";
+import { dispatchTask, resolvePause, retryTask } from "@/lib/engine";
 import { getAgentDefinition } from "@/lib/agents";
 
 export const runtime = "nodejs";
@@ -54,7 +54,7 @@ function depIds(raw: string): string[] {
 }
 
 interface Body {
-  action?: "dispatch" | "approve" | "answer";
+  action?: "dispatch" | "retry" | "approve" | "answer";
   allow?: boolean;
   reason?: string;
   content?: string;
@@ -68,6 +68,10 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
   switch (body.action) {
     case "dispatch": {
       const result = await dispatchTask(id);
+      return Response.json(result, { status: result.ok ? 200 : 409 });
+    }
+    case "retry": {
+      const result = await retryTask(id);
       return Response.json(result, { status: result.ok ? 200 : 409 });
     }
     case "approve":
