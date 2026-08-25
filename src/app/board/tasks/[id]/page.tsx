@@ -370,8 +370,7 @@ function ActionPanel({
 
   if (approvals.length > 0) {
     return (
-      <section className="relative mt-6 overflow-hidden rounded-lg border border-state-approval/50 bg-state-approval/[0.07] p-5 sm:p-6">
-        <span className="absolute inset-y-0 left-0 w-1 bg-state-approval" />
+      <section className="mt-6 rounded-lg border border-state-approval/50 bg-state-approval/[0.07] p-5 sm:p-6">
         <p className="font-mono text-[9px] font-semibold uppercase tracking-[0.18em] text-state-approval">Decision required</p>
         <h2 className="mt-2 text-xl font-semibold tracking-[-0.025em] text-ink">Review the proposed action</h2>
         <p className="mt-2 max-w-2xl text-sm leading-6 text-ink-soft">The agent is paused. Nothing below runs until you approve it.</p>
@@ -441,8 +440,7 @@ function ActionPanel({
 
   if (needsAuth) {
     return (
-      <section className="relative mt-6 overflow-hidden rounded-lg border border-state-blocked/50 bg-state-blocked/[0.07] p-5 sm:p-6">
-        <span className="absolute inset-y-0 left-0 w-1 bg-state-blocked" />
+      <section className="mt-6 rounded-lg border border-state-blocked/50 bg-state-blocked/[0.07] p-5 sm:p-6">
         <p className="font-mono text-[9px] font-semibold uppercase tracking-[0.18em] text-state-blocked">Connector sign-in required</p>
         <p className="mt-2 text-sm leading-6 text-ink-soft">Open TrueForge and authorize the connector this agent was using, then return here.</p>
       </section>
@@ -451,10 +449,19 @@ function ActionPanel({
 
   if (task.column === "blocked") {
     return (
-      <section className="relative mt-6 overflow-hidden rounded-lg border border-state-blocked/40 bg-state-blocked/[0.05] p-5">
-        <span className="absolute inset-y-0 left-0 w-1 bg-state-blocked" />
-        <p className="font-mono text-[9px] font-semibold uppercase tracking-[0.18em] text-state-blocked">Agent stopped</p>
-        <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-ink-soft">{task.error ?? "The agent could not continue. Check the activity below for the last recorded event."}</p>
+      <section className="mt-6 flex flex-wrap items-end gap-4 rounded-lg border border-state-blocked/40 bg-state-blocked/[0.05] p-5">
+        <div className="min-w-0 flex-1">
+          <p className="font-mono text-[9px] font-semibold uppercase tracking-[0.18em] text-state-blocked">Agent stopped</p>
+          <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-ink-soft">{task.error ?? "The agent could not continue. Check the activity below for the last recorded event."}</p>
+        </div>
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => void onAct({ action: "retry" })}
+          className="h-fit shrink-0 self-end whitespace-nowrap rounded-md bg-signal px-4 py-2.5 text-xs font-semibold leading-5 text-deck transition-colors hover:brightness-110 disabled:opacity-40"
+        >
+          {busy ? "Retrying..." : "Retry task"}
+        </button>
       </section>
     );
   }

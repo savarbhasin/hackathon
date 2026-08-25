@@ -4,7 +4,7 @@ import type { TrueForgeApi } from "@truefoundry/trueforge-sdk";
 import { ROLES, stripSpecialistRuntimeInstructions } from "./fleet";
 import { reconcileManagedManifest } from "./agents";
 
-test("reconciles role requirements while preserving extra connectors and tools", () => {
+test("reconciles role requirements while preserving the selected model and extra connectors", () => {
   const customInstructions = "Keep this user-edited instruction text exactly as the editable content.";
   const current: TrueForgeApi.AgentSpec = {
     model: { name: "stale-model" },
@@ -28,7 +28,7 @@ test("reconciles role requirements while preserving extra connectors and tools",
   const reconciled = reconcileManagedManifest(current, ROLES.researcher);
   const missionControl = reconciled.mcpServers?.find((server) => server.name === "mission-control");
 
-  assert.equal(reconciled.model.name, ROLES.researcher.spec.model.name);
+  assert.equal(reconciled.model.name, "stale-model");
   assert.equal(stripSpecialistRuntimeInstructions(reconciled.instructions ?? ""), customInstructions);
   assert.equal(reconciled.config?.sandbox?.enabled, true);
   assert.equal(reconciled.config?.sandbox?.fileDownloads, false);

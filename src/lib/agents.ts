@@ -378,7 +378,9 @@ export function reconcileManagedManifest(
 
   return {
     ...current,
-    model: { ...current.model, ...role.spec.model },
+    // The Agents page owns the selected model. Keep the current value while
+    // reconciliation continues to enforce the role's runtime requirements.
+    model: current.model ?? role.spec.model,
     instructions,
     config: mergeRoleConfig(current.config, role.spec.config),
     mcpServers: mergeRoleMcpServers(current.mcpServers ?? [], withRequiredMissionControlTools(role.spec.mcpServers ?? [])),
