@@ -1,6 +1,7 @@
 import { db } from "./db";
 import { tf } from "./tf";
-import { ORCHESTRATOR_SPEC, TITLE_MODEL } from "./fleet";
+import { ORCHESTRATOR_INSTRUCTIONS, ORCHESTRATOR_SPEC, TITLE_MODEL } from "./fleet";
+import { agentRosterBlock } from "./agents";
 import { createConversationTurnLock, ConversationTurnAbortedError } from "./conversation-turn-lock";
 import {
   buildProviderResumeInput,
@@ -13,12 +14,22 @@ import {
   ResumeStateError,
 } from "./orchestrator-pause";
 import { isEventDelta, mergeEventDelta } from "@truefoundry/trueforge-sdk";
+import type { TrueForgeApi } from "@truefoundry/trueforge-sdk";
 
 const conversationTurnLock = createConversationTurnLock();
 
+async function orchestratorSpec(): Promise<TrueForgeApi.AgentSpec> {
+  const roster = await agentRosterBlock();
+  if (!roster) return ORCHESTRATOR_SPEC;
+  return {
+    ...ORCHESTRATOR_SPEC,
+    instructions: `${ORCHESTRATOR_INSTRUCTIONS}\n\n${roster}`,
+  };
+}
+
 async function createOrchestratorSession(): Promise<string> {
   const { data: session } = await tf().sessions.create({
-    agent: { spec: ORCHESTRATOR_SPEC as never },
+    agent: { spec: await orchestratorSpec() as never },
   });
   return session.id;
 }
@@ -42,7 +53,7 @@ async function ensureConversation(conversationId: string | undefined, message: s
     try {
       await tf().sessions.get(conversation.sessionId);
       await tf().sessions.update(conversation.sessionId, {
-        agent: { spec: ORCHESTRATOR_SPEC as never },
+        agent: { spec: await orchestratorSpec() as never },
       });
     } catch {
       const sessionId = await createOrchestratorSession();
@@ -486,6 +497,9 @@ export async function orchestratorSay(prompt: string): Promise<string> {
   if (sessionId) {
     try {
       await tf().sessions.get(sessionId);
+      await tf().sessions.update(sessionId, {
+        agent: { spec: await orchestratorSpec() as never },
+      });
     } catch {
       sessionId = undefined;
     }
