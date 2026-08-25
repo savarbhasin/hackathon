@@ -1,6 +1,5 @@
 # Mission Control — Agent Fleet Control Center
 
-Hackathon build for **The Agent Harness Hackathon** (WeMakeDevs × TrueFoundry, Aug 24–30 2026).
 A Next.js control center where an **Orchestrator** agent decomposes missions into tasks on a kanban board, specialist agents (running on TrueForge) execute them, and every irreversible action pauses as a "⚠ Licence Required" card until a human approves.
 
 ## Architecture
@@ -89,7 +88,7 @@ mission-control/
 11. Dispatch guard: only backlog tasks with `sessionId == null`; claim via `updateMany` race check. Cancelled turns return cards to backlog (redispatch-safe).
 12. Secrets live ONLY in `mission-control/.env.local` (gitignored): `DATABASE_URL`, `TRUEFORGE_BASE_URL=http://localhost:8790`, `OPENROUTER_API_KEY`. Never commit keys; never paste real keys into repo files.
 
-## Hackathon strategy notes
+## Strategy notes
 
 - Tracks: Best Use of TrueForge (DGX Spark), Code Quality w/ Qodo (install Qodo day one, work through PRs — judges read the trail), Best UI (kanban + approval-on-card is the demo moment).
 - Judging penalizes "platform with half-finished features" → demo ONE flagship flow (research → Linear issue with approval gate), show generality briefly.
