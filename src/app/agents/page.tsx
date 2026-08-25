@@ -305,19 +305,21 @@ export default function AgentsPage() {
 
               <EditorSection eyebrow="Tools" title="Connectors and approval gates"
                 description="Select only the connectors this role needs. Approval gates pause the task before the chosen tool runs.">
-                <div className="space-y-3">
-                  {connectors.map((connector) => {
-                    const server = draft.mcpServers.find((item) => item.name === connector.name);
-                    const required = connector.name === CORE_CONNECTOR;
-                    return <ConnectorEditor key={connector.name} connector={connector} server={server}
-                      required={required}
-                      onToolToggle={(tool, checked) => setToolEnabled(connector, tool, checked)}
-                      onAllToolsToggle={(checked) => setAllTools(connector, checked)}
-                      onApprovalToggle={(tool, checked) => setToolApproval(connector, tool, checked)} />;
-                  })}
-                  {connectors.length === 1 && <p className="rounded-md border border-dashed border-line px-4 py-5 text-xs leading-relaxed text-ink-faint">
-                    No external connectors are configured. Add one in TrueForge to make it available here.
-                  </p>}
+                <div className="h-80 overflow-y-auto overscroll-contain pr-1">
+                  <div className="space-y-3">
+                    {connectors.map((connector) => {
+                      const server = draft.mcpServers.find((item) => item.name === connector.name);
+                      const required = connector.name === CORE_CONNECTOR;
+                      return <ConnectorEditor key={connector.name} connector={connector} server={server}
+                        required={required}
+                        onToolToggle={(tool, checked) => setToolEnabled(connector, tool, checked)}
+                        onAllToolsToggle={(checked) => setAllTools(connector, checked)}
+                        onApprovalToggle={(tool, checked) => setToolApproval(connector, tool, checked)} />;
+                    })}
+                    {connectors.length === 1 && <p className="rounded-md border border-dashed border-line px-4 py-5 text-xs leading-relaxed text-ink-faint">
+                      No external connectors are configured. Add one in TrueForge to make it available here.
+                    </p>}
+                  </div>
                 </div>
               </EditorSection>
 
