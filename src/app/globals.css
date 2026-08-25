@@ -310,6 +310,16 @@ select:not(:disabled) {
   color: #aabaff;
 }
 
+.squad-wordmark {
+  display: inline-block;
+  font-family: Georgia, "Times New Roman", ui-serif, serif;
+  font-style: oblique 20deg;
+  font-weight: 900;
+  letter-spacing: -0.075em;
+  white-space: nowrap;
+  text-shadow: 2px 0 0 rgba(126, 159, 255, 0.12);
+}
+
 @media (prefers-reduced-motion: reduce) {
   .led-live {
     animation: none;
