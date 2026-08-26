@@ -6,6 +6,7 @@ import { Cron } from "croner";
 import { db } from "../src/lib/db";
 import { getAgentDefinition } from "../src/lib/agents";
 import { dispatchTask, getBoard, sweep } from "../src/lib/engine";
+import { tf } from "../src/lib/tf";
 import { runScheduleNow } from "../src/lib/schedule-runner";
 import { appendTaskEvent } from "../src/lib/task-events";
 import { dependencyIds, findDependencyCycle } from "../src/lib/task-graph";
@@ -79,7 +80,7 @@ function buildServer(): McpServer {
 
   server.tool(
     "mark_done",
-    "Signal that your assigned task is complete. Call this exactly once when work is finished.",
+    "Signal that your assigned task is complete. Call this exactly once when work is finished. After calling it, stop immediately without using another tool or writing more output.",
     {
       task_id: z.string().describe("The TASK_ID given in your assignment"),
       summary: z
@@ -91,10 +92,17 @@ function buildServer(): McpServer {
       if (!existing) return text(`Unknown task_id ${task_id}`);
       const task = await db.task.update({
         where: { id: task_id },
-        data: { output: summary.trim() },
+        data: { output: summary.trim(), column: "settled", sessionId: null, turnId: null, pendingActions: null, error: null },
       });
       await appendTaskEvent(task_id, "specialist.mark_done", { summary: summary.trim() });
-      return text(`Recorded. Task ${task.title} will settle when your turn ends.`);
+      if (task.sessionId) {
+        try {
+          await tf().sessions.cancel(task.sessionId);
+        } catch (error) {
+          console.error("[mark_done] failed to stop session", task.sessionId, error);
+        }
+      }
+      return text("Recorded. Stop immediately. Do not call another tool or write any more output.");
     }
   );
 

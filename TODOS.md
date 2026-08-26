@@ -74,5 +74,15 @@ given above we should also customize the docs page, on what are user created wha
 - [x] supporting @ing the documents in chat bar when talking to orchestrator (if possible)
 - [x] delete modal has yellow color??? why not uniform with whole web (blue)
 - [x] why display role id and name in the input box when those cant be edited in agents page?
-- [] delete option should only appear on chat ive hovered over not all chats of that day
-- []delete button has yellow color on hover??? why not uniform with whole web (blue)
+- [x] delete option should only appear on chat ive hovered over not all chats of that day
+- [x]delete button has yellow color on hover??? why not uniform with whole web (blue)
+
+## Later improvements
+
+- [x] Instruct agents to stop immediately after calling `mark_done`. They should not do anything else or write extra output after completion.
+- [ ] Add a chat view inside `/board/tasks/[id]` that subscribes to the existing agent session so the user can continue chatting with that model from the task page.
+- [ ] Keep the task activity log subscribed to the same agent session so it continues updating while the user chats with the agent.
+above two should use the same subscription i believe
+
+- [x] When a successor is working, label its dependency clearly as its parent or predecessor.
+- [x] Make the Docs page open to a document library layout instead of opening a document directly. Use the attached reference for the layout direction, not as a literal UI copy.

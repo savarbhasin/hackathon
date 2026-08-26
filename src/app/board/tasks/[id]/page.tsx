@@ -1,9 +1,10 @@
 "use client";
 
 import Link from "next/link";
-import { use, useCallback, useEffect, useState, type ReactNode } from "react";
+import { use, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { ChatMarkdown } from "@/components/chat-markdown";
 
 interface TaskEvent {
   id: string;
@@ -36,6 +37,7 @@ interface TaskDetail {
   agentPrompt: string | null;
   agentInstructions: string | null;
   column: string;
+  sessionId: string | null;
   dependsOn: string;
   handoff: string | null;
   output: string | null;
@@ -107,6 +109,21 @@ export default function TaskPage({ params }: { params: Promise<{ id: string }> }
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [answer, setAnswer] = useState("");
+
+  // One task subscription drives both the live activity log and the chat history.
+  useEffect(() => {
+    if (!task?.id) return;
+    const stream = new EventSource(`/api/tasks/${encodeURIComponent(id)}/stream`);
+    stream.onmessage = (event) => {
+      try {
+        const next = JSON.parse(event.data) as TaskDetail & { error?: string };
+        if (next.error) return;
+        setTask(next);
+      } catch { /* ignore a partial event */ }
+    };
+    stream.onerror = () => { /* EventSource reconnects automatically */ };
+    return () => stream.close();
+  }, [id, task?.id]);
 
   const fetchTask = useCallback(async (): Promise<TaskDetail> => {
     const response = await fetch(`/api/tasks/${encodeURIComponent(id)}`, { cache: "no-store" });
@@ -203,7 +220,7 @@ export default function TaskPage({ params }: { params: Promise<{ id: string }> }
       <TaskHeader />
 
       <div className="mx-auto w-full max-w-[1180px] px-5 py-7 sm:px-8 sm:py-10 lg:px-10">
-        <section className="border-b border-line pb-8">
+        <section className="border-b border-line pb-4">
           <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
             <span className={`inline-flex items-center gap-2 font-mono text-[9px] font-semibold uppercase tracking-[0.16em] ${status.color}`}>
               <span className={`h-1.5 w-1.5 rounded-full ${status.dot} ${task.column === "working" ? "led-live" : ""}`} />
@@ -269,7 +286,7 @@ export default function TaskPage({ params }: { params: Promise<{ id: string }> }
 
             <DocumentsSection documents={task.documents} />
             <ActivitySection items={activity} />
-            <TechnicalEvents events={task.events} />
+            <TaskChat taskId={id} events={task.events} column={task.column} hasSession={Boolean(task.sessionId)} />
           </div>
 
           <aside className="min-w-0 space-y-5 lg:sticky lg:top-6">
@@ -507,6 +524,147 @@ function PendingCalls({ actions, tone = "default" }: { actions: PendingAction[];
   );
 }
 
+interface TaskChatMessage {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+  status?: string;
+  clientMessageId?: string;
+}
+
+function TaskChat({ taskId, events, column, hasSession }: { taskId: string; events: TaskEvent[]; column: string; hasSession: boolean }) {
+  const [messages, setMessages] = useState<TaskChatMessage[]>(() => chatMessages(events));
+  const [input, setInput] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const transcriptRef = useRef<HTMLDivElement>(null);
+
+  const displayedMessages = useMemo(() => {
+    const persisted = chatMessages(events);
+    const persistedClientIds = new Set(persisted.map((message) => message.clientMessageId).filter(Boolean));
+    return [...persisted, ...messages.filter((message) => !message.clientMessageId || !persistedClientIds.has(message.clientMessageId))];
+  }, [events, messages]);
+
+  useEffect(() => {
+    const transcript = transcriptRef.current;
+    if (transcript) transcript.scrollTo({ top: transcript.scrollHeight, behavior: "smooth" });
+  }, [displayedMessages]);
+
+  async function send() {
+    const content = input.trim();
+    if (!content || busy || column === "working" || column === "blocked" || column === "approval") return;
+    setInput(""); setError(null); setBusy(true);
+    const localId = `local-${Date.now()}`;
+    setMessages((current) => [...current, { id: localId, role: "user", content, clientMessageId: localId }, { id: `${localId}-reply`, role: "assistant", content: "", clientMessageId: localId }]);
+    try {
+      const response = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/chat`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message: content, clientMessageId: localId }) });
+      if (!response.ok || !response.body) throw new Error((await response.json().catch(() => null) as { error?: string } | null)?.error ?? "Chat is unavailable.");
+      const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = "";
+      for (;;) {
+        const { done, value } = await reader.read(); if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n\n"); buffer = lines.pop() ?? "";
+        for (const line of lines) {
+          if (!line.startsWith("data: ") || line.slice(6).trim() === "[DONE]") continue;
+          const event = JSON.parse(line.slice(6)) as { kind: string; text?: string; content?: string; status?: string };
+          if (event.kind === "delta") setMessages((current) => current.map((message) => message.id === `${localId}-reply` ? { ...message, content: message.content + (event.text ?? "") } : message));
+          if (event.kind === "done") setMessages((current) => current.map((message) => message.id === `${localId}-reply` ? { ...message, content: event.content ?? message.content, status: event.status } : message));
+          if (event.kind === "error") throw new Error(event.text ?? "The chat turn failed.");
+        }
+      }
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+      setMessages((current) => current.map((message) => message.id === `${localId}-reply` ? { ...message, content: "The agent could not answer." } : message));
+    } finally { setBusy(false); }
+  }
+
+  const available = hasSession && column !== "working" && column !== "approval" && column !== "blocked";
+  const unavailableCopy = !hasSession
+    ? "Dispatch the task to start an agent session before chatting."
+    : column === "working"
+      ? "The agent is still running. Chat opens when this turn finishes."
+      : "Resolve the pending action above before continuing this session.";
+
+  return (
+    <section aria-labelledby="task-chat-heading">
+      <h2 id="task-chat-heading" className="text-xl font-semibold tracking-[-0.025em] text-ink">Chat with the agent</h2>
+
+      <div className="mt-4 overflow-hidden rounded-lg border border-line bg-panel/40">
+        <div ref={transcriptRef} className="scrollbar-none min-h-[360px] max-h-[min(58vh,620px)] space-y-7 overflow-y-auto px-5 py-7 sm:px-8">
+          {displayedMessages.length > 0 ? displayedMessages.map((message) => message.role === "user" ? (
+            <div key={message.id} className="flex justify-end">
+              <div className="max-w-[85%] text-right">
+                <p className="mb-1 font-mono text-[8px] uppercase tracking-[0.2em] text-ink-faint">You</p>
+                <p className="whitespace-pre-wrap text-sm leading-relaxed text-ink">{message.content}</p>
+              </div>
+            </div>
+          ) : (
+            <div key={message.id} className="relative max-w-3xl pl-6 before:absolute before:bottom-0 before:left-[3px] before:top-0 before:w-px before:bg-line">
+              <span className={`absolute left-0 top-1.5 h-[7px] w-[7px] rounded-full ${busy && !message.content ? "bg-signal led-live" : "border border-line bg-deck"}`} />
+              <p className="mb-2 flex items-center gap-2 font-mono text-[8px] uppercase tracking-[0.2em] text-state-working">
+                Task agent
+                {busy && !message.content && <span className="text-ink-faint">thinking</span>}
+              </p>
+              {message.content ? <ChatMarkdown>{message.content}</ChatMarkdown> : <span className="inline-block h-4 w-28 animate-pulse rounded bg-panel-hi" />}
+            </div>
+          )) : (
+            <div className="flex min-h-[300px] items-center justify-center text-center">
+              <div className="max-w-sm">
+                <span className="mx-auto flex h-10 w-10 items-center justify-center rounded-full border border-line-strong bg-panel-hi text-signal">
+                  <svg viewBox="0 0 18 18" className="h-4 w-4" aria-hidden="true"><path d="M3.5 4.5h11v8H8l-3 2v-2H3.5z" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" /><path d="M6.5 7h5M6.5 9.5h3.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" /></svg>
+                </span>
+                <p className="mt-4 text-sm font-semibold text-ink">Continue where the task left off</p>
+                <p className="mt-1.5 text-xs leading-5 text-ink-faint">Ask for a summary, challenge a finding, or request a refinement.</p>
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div className="px-3 pb-3 pt-3 sm:px-4 sm:pb-4 sm:pt-4">
+          {available ? (
+            <form onSubmit={(event) => { event.preventDefault(); void send(); }} className="signal-glow mx-auto flex flex-col rounded-2xl border border-line-strong bg-panel-hi px-4 pb-3 pt-3 focus-within:border-signal/60">
+              <label htmlFor="task-chat-input" className="sr-only">Message this agent</label>
+              <textarea
+                id="task-chat-input"
+                value={input}
+                onChange={(event) => setInput(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && !event.shiftKey) {
+                    event.preventDefault();
+                    void send();
+                  }
+                }}
+                disabled={busy}
+                rows={2}
+                placeholder={busy ? "The agent is thinking…" : "Ask a follow-up about this task"}
+                className="scrollbar-none min-h-[58px] w-full resize-none border-0 bg-transparent px-2 text-sm leading-6 text-ink outline-none placeholder:text-ink-faint disabled:opacity-50"
+              />
+              <div className="flex items-center gap-3">
+                <span className="text-[10px] text-ink-faint">Enter to send</span>
+                <span className="hidden text-[10px] text-ink-faint sm:inline">Shift + Enter for a new line</span>
+                <button type="submit" disabled={busy || !input.trim()} className="ml-auto flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-signal text-deck transition-transform hover:scale-[1.03] disabled:opacity-25" aria-label="Send message">
+                  <svg viewBox="0 0 20 20" className="h-4 w-4" aria-hidden="true"><path d="m4 10 11-6-3.3 12-2-4.2L4 10Z" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" /><path d="m9.7 11.8 2-2.2" stroke="currentColor" strokeWidth="1.6" /></svg>
+                </button>
+              </div>
+            </form>
+          ) : (
+            <p className="text-xs text-ink-faint">{unavailableCopy}</p>
+          )}
+          {error && <p className="mt-3 text-xs text-state-blocked" role="alert">{error}</p>}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function chatMessages(events: TaskEvent[]): TaskChatMessage[] {
+  return events.flatMap((event) => {
+    if (event.type !== "chat.user" && event.type !== "chat.assistant") return [];
+    const payload = parsePayload(event.payload);
+    return typeof payload?.content === "string" ? [{ id: event.id, role: event.type === "chat.user" ? "user" : "assistant", content: payload.content, status: typeof payload.status === "string" ? payload.status : undefined, clientMessageId: typeof payload.clientMessageId === "string" ? payload.clientMessageId : undefined }] : [];
+  });
+}
+
 function ResultSection({ output, column }: { output: string | null; column: string }) {
   return (
     <section>
@@ -601,33 +759,9 @@ function ActivitySection({ items }: { items: ActivityItem[] }) {
   );
 }
 
-function TechnicalEvents({ events }: { events: TaskEvent[] }) {
-  return (
-    <details className="group border-t border-line">
-      <summary className="flex cursor-pointer list-none items-center gap-3 py-4 [&::-webkit-details-marker]:hidden">
-        <Chevron />
-        <span className="font-mono text-[9px] font-semibold uppercase tracking-[0.16em] text-ink-faint">Raw technical events</span>
-        <span className="ml-auto font-mono text-[9px] tabular-nums text-ink-faint">{events.length}</span>
-      </summary>
-      <div className="space-y-2 pb-4">
-        {events.map((event) => (
-          <details key={event.id} className="rounded-md border border-line bg-panel/40">
-            <summary className="flex cursor-pointer list-none items-center gap-3 px-3 py-2.5 font-mono text-[9px] text-ink-soft [&::-webkit-details-marker]:hidden">
-              <span className="text-ink-faint">{formatEventTime(event.createdAt)}</span>
-              <span className="truncate">{event.type}</span>
-              <span className="ml-auto text-ink-faint">#{event.seq}</span>
-            </summary>
-            <pre className="max-h-80 overflow-auto border-t border-line bg-deck p-3 font-mono text-[10px] leading-5 text-ink-soft">{prettyJson(event.payload)}</pre>
-          </details>
-        ))}
-      </div>
-    </details>
-  );
-}
-
 function Dependencies({ items }: { items: Predecessor[] }) {
   return (
-    <InfoCard title="Dependencies" suffix={String(items.length)}>
+    <InfoCard title={items.length === 1 ? "Parent task" : "Parent tasks"} suffix={String(items.length)}>
       {items.length > 0 ? (
         <ul className="space-y-2">
           {items.map((item) => (

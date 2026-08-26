@@ -27,7 +27,6 @@ MCP server (port 3100, `server/mcp.ts`, tsx watch) ─┘ registered as connecto
 ## Running
 
 ```bash
-cd mission-control
 npm run dev        # Next.js on :3000
 npm run dev:mcp    # MCP server on :3100 (tsx watch)
 ```
@@ -37,10 +36,9 @@ Prereqs: TrueForge running (`npx @truefoundry/trueforge` → :8790), model provi
 ## File structure
 
 ```
-mission-control/
+trueforge-mc/
 ├── server/mcp.ts              # Express + @modelcontextprotocol/sdk, stateless StreamableHTTP at /mcp
 ├── prisma/schema.prisma       # Mission, Task, TaskEvent, Schedule, Setting
-├── scripts/smoke.mjs          # SDK smoke test (session → streamed turn)
 └── src/
     ├── app/
     │   ├── page.tsx           # Orchestrator chat home

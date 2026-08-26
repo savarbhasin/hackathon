@@ -317,7 +317,7 @@ async function runPump(taskId: string, sessionId: string, input: Array<Record<st
           break;
         case "turn.done":
           await handleDone(taskId, sessionId, ev, events);
-          break;
+          return;
       }
     }
   } catch (err) {
@@ -331,7 +331,7 @@ async function runPump(taskId: string, sessionId: string, input: Array<Record<st
   }
 }
 
-async function handleDone(
+export async function handleDone(
   taskId: string,
   sessionId: string,
   done: PumpEvent,
@@ -365,6 +365,22 @@ async function handleDone(
   }
 
   if (status === "cancelled") {
+    const current = await db.task.findUnique({
+      where: { id: taskId },
+      select: { output: true, column: true },
+    });
+    if (current?.column === "settled" && current.output?.trim()) {
+      await db.task.update({
+        where: { id: taskId },
+        data: { error: null },
+      });
+      await appendTaskEvent(taskId, "activity.completed", {
+        title: "Task completed",
+        summary: current.output,
+      });
+      await sweep();
+      return;
+    }
     await db.task.update({
       where: { id: taskId },
       data: {
