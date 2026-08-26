@@ -10,7 +10,10 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
       let last = "";
+      let inFlight = false;
       const push = async () => {
+        if (inFlight) return;
+        inFlight = true;
         try {
           const task = await getTaskDetail(id);
           if (!task) {
@@ -24,6 +27,7 @@ export async function GET(req: Request, ctx: { params: Promise<{ id: string }> }
             controller.enqueue(encoder.encode(`data: ${json}\n\n`));
           }
         } catch { /* keep the subscription alive across transient sqlite locks */ }
+        finally { inFlight = false; }
       };
       void push();
       timer = setInterval(() => void push(), 500);

@@ -4,9 +4,11 @@ const PAYLOAD_CAP = 4000;
 const RETRYABLE_TRANSACTION_CODES = new Set(["P1008", "P2002", "P2034"]);
 const eventQueues = new Map<string, Promise<unknown>>();
 
-function serializePayload(payload: unknown): string {
+function serializePayload(payload: unknown, cap = PAYLOAD_CAP): string {
   const json = typeof payload === "string" ? payload : JSON.stringify(payload ?? {});
-  return json.length <= PAYLOAD_CAP ? json : `${json.slice(0, PAYLOAD_CAP)}…[truncated]`;
+  if (json.length <= cap) return json;
+  // Keep the payload parseable. Chat messages opt out of this display-log cap.
+  return JSON.stringify({ truncated: true, preview: json.slice(0, cap) });
 }
 
 function isRetryableTransactionError(error: unknown): boolean {
@@ -49,8 +51,8 @@ async function allocateTaskEvent(taskId: string, type: string, serialized: strin
   }
 }
 
-export function appendTaskEvent(taskId: string, type: string, payload: unknown) {
-  const serialized = serializePayload(payload);
+export function appendTaskEvent(taskId: string, type: string, payload: unknown, options?: { preservePayload?: boolean }) {
+  const serialized = serializePayload(payload, options?.preservePayload ? Number.MAX_SAFE_INTEGER : PAYLOAD_CAP);
   const previous = eventQueues.get(taskId) ?? Promise.resolve();
   const current = previous
     .catch(() => undefined)

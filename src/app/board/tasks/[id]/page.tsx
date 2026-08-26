@@ -529,6 +529,7 @@ interface TaskChatMessage {
   role: "user" | "assistant";
   content: string;
   status?: string;
+  clientMessageId?: string;
 }
 
 function TaskChat({ taskId, events, column, hasSession }: { taskId: string; events: TaskEvent[]; column: string; hasSession: boolean }) {
@@ -540,8 +541,8 @@ function TaskChat({ taskId, events, column, hasSession }: { taskId: string; even
 
   const displayedMessages = useMemo(() => {
     const persisted = chatMessages(events);
-    const persistedContent = new Set(persisted.map((message) => `${message.role}:${message.content}`));
-    return [...persisted, ...messages.filter((message) => !persistedContent.has(`${message.role}:${message.content}`))];
+    const persistedClientIds = new Set(persisted.map((message) => message.clientMessageId).filter(Boolean));
+    return [...persisted, ...messages.filter((message) => !message.clientMessageId || !persistedClientIds.has(message.clientMessageId))];
   }, [events, messages]);
 
   useEffect(() => {
@@ -554,9 +555,9 @@ function TaskChat({ taskId, events, column, hasSession }: { taskId: string; even
     if (!content || busy || column === "working" || column === "blocked" || column === "approval") return;
     setInput(""); setError(null); setBusy(true);
     const localId = `local-${Date.now()}`;
-    setMessages((current) => [...current, { id: localId, role: "user", content }, { id: `${localId}-reply`, role: "assistant", content: "" }]);
+    setMessages((current) => [...current, { id: localId, role: "user", content, clientMessageId: localId }, { id: `${localId}-reply`, role: "assistant", content: "", clientMessageId: localId }]);
     try {
-      const response = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/chat`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message: content }) });
+      const response = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/chat`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message: content, clientMessageId: localId }) });
       if (!response.ok || !response.body) throw new Error((await response.json().catch(() => null) as { error?: string } | null)?.error ?? "Chat is unavailable.");
       const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = "";
       for (;;) {
@@ -660,7 +661,7 @@ function chatMessages(events: TaskEvent[]): TaskChatMessage[] {
   return events.flatMap((event) => {
     if (event.type !== "chat.user" && event.type !== "chat.assistant") return [];
     const payload = parsePayload(event.payload);
-    return typeof payload?.content === "string" ? [{ id: event.id, role: event.type === "chat.user" ? "user" : "assistant", content: payload.content, status: typeof payload.status === "string" ? payload.status : undefined }] : [];
+    return typeof payload?.content === "string" ? [{ id: event.id, role: event.type === "chat.user" ? "user" : "assistant", content: payload.content, status: typeof payload.status === "string" ? payload.status : undefined, clientMessageId: typeof payload.clientMessageId === "string" ? payload.clientMessageId : undefined }] : [];
   });
 }
 

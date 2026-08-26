@@ -331,7 +331,7 @@ async function runPump(taskId: string, sessionId: string, input: Array<Record<st
   }
 }
 
-async function handleDone(
+export async function handleDone(
   taskId: string,
   sessionId: string,
   done: PumpEvent,
