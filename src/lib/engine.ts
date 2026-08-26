@@ -367,12 +367,12 @@ export async function handleDone(
   if (status === "cancelled") {
     const current = await db.task.findUnique({
       where: { id: taskId },
-      select: { output: true },
+      select: { output: true, column: true },
     });
-    if (current?.output?.trim()) {
+    if (current?.column === "settled" && current.output?.trim()) {
       await db.task.update({
         where: { id: taskId },
-        data: { column: "settled", error: null },
+        data: { error: null },
       });
       await appendTaskEvent(taskId, "activity.completed", {
         title: "Task completed",

@@ -92,7 +92,7 @@ function buildServer(): McpServer {
       if (!existing) return text(`Unknown task_id ${task_id}`);
       const task = await db.task.update({
         where: { id: task_id },
-        data: { output: summary.trim() },
+        data: { output: summary.trim(), column: "settled", sessionId: null, turnId: null, pendingActions: null, error: null },
       });
       await appendTaskEvent(task_id, "specialist.mark_done", { summary: summary.trim() });
       if (task.sessionId) {
