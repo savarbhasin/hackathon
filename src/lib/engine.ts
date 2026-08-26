@@ -39,8 +39,12 @@ interface PumpEvent extends Record<string, unknown> {
   };
 }
 
-async function setColumn(taskId: string, column: Column, extra: Partial<{ turnId: string; error: string | null }> = {}) {
-  await db.task.update({ where: { id: taskId }, data: { column, ...extra } });
+async function setColumn(taskId: string, column: Column, extra: Partial<{ turnId: string; error: string | null }> = {}, sessionId?: string) {
+  const result = await db.task.updateMany({
+    where: { id: taskId, ...(sessionId ? { sessionId } : {}) },
+    data: { column, ...extra },
+  });
+  return result.count > 0;
 }
 
 export function buildKickoff(input: {
@@ -306,14 +310,14 @@ async function runPump(taskId: string, sessionId: string, input: Array<Record<st
 
       switch (type) {
         case "turn.created":
-          await db.task.update({ where: { id: taskId }, data: { turnId: ev.turnId } });
+          await db.task.updateMany({ where: { id: taskId, sessionId }, data: { turnId: ev.turnId } });
           break;
         case "tool.approval_required":
-          await setColumn(taskId, "approval");
+          await setColumn(taskId, "approval", {}, sessionId);
           break;
         case "tool.response_required":
         case "mcp.auth_required":
-          await setColumn(taskId, "blocked");
+          await setColumn(taskId, "blocked", {}, sessionId);
           break;
         case "turn.done":
           await handleDone(taskId, sessionId, ev, events);
@@ -322,7 +326,7 @@ async function runPump(taskId: string, sessionId: string, input: Array<Record<st
     }
   } catch (err) {
     const message = String(err).slice(0, 500);
-    await setColumn(taskId, "blocked", { error: message });
+    if (!await setColumn(taskId, "blocked", { error: message }, sessionId)) return;
     await appendTaskEvent(taskId, "pump.error", { message, providerStreamId });
     await appendTaskEvent(taskId, "activity.failed", {
       title: "Agent run failed",
@@ -340,22 +344,24 @@ export async function handleDone(
   const status = done.state?.status;
   const requiredActions: PendingAction[] =
     done.state?.requiredActions ?? done.state?.required_actions ?? [];
+  const current = await db.task.findUnique({
+    where: { id: taskId },
+    select: { output: true, sessionId: true },
+  });
+  if (!current || current.sessionId !== sessionId) return;
 
   if (status === "done" && requiredActions.length === 0) {
     const fallbackOutput =
       done.state?.output?.content ??
       done.state?.output?.text ??
       null;
-    const current = await db.task.findUnique({
-      where: { id: taskId },
-      select: { output: true },
-    });
     const recordedSummary = current?.output?.trim() ? current.output : null;
     const output = recordedSummary ?? (fallbackOutput ? truncate(String(fallbackOutput), 8000) : null);
-    await db.task.update({
-      where: { id: taskId },
-      data: { column: "settled", output, error: null },
+    const settled = await db.task.updateMany({
+      where: { id: taskId, sessionId },
+      data: { column: "settled", output, error: null, sessionId: null, turnId: null },
     });
+    if (settled.count === 0) return;
     await appendTaskEvent(taskId, "activity.completed", {
       title: "Task completed",
       summary: output,
@@ -365,15 +371,12 @@ export async function handleDone(
   }
 
   if (status === "cancelled") {
-    const current = await db.task.findUnique({
-      where: { id: taskId },
-      select: { output: true, column: true },
-    });
-    if (current?.column === "settled" && current.output?.trim()) {
-      await db.task.update({
-        where: { id: taskId },
-        data: { error: null },
+    if (current?.output?.trim()) {
+      const settled = await db.task.updateMany({
+        where: { id: taskId, sessionId },
+        data: { column: "settled", sessionId: null, turnId: null, pendingActions: null, error: null },
       });
+      if (settled.count === 0) return;
       await appendTaskEvent(taskId, "activity.completed", {
         title: "Task completed",
         summary: current.output,
@@ -381,8 +384,8 @@ export async function handleDone(
       await sweep();
       return;
     }
-    await db.task.update({
-      where: { id: taskId },
+    await db.task.updateMany({
+      where: { id: taskId, sessionId },
       data: {
         column: "backlog",
         sessionId: null,
@@ -402,7 +405,7 @@ export async function handleDone(
 
   if (status === "error") {
     const message = truncate(String(done.state?.message ?? "unknown"));
-    await setColumn(taskId, "blocked", { error: message });
+    if (!await setColumn(taskId, "blocked", { error: message }, sessionId)) return;
     await appendTaskEvent(taskId, "activity.failed", {
       title: "Agent run failed",
       message,
@@ -447,12 +450,11 @@ export async function handleDone(
       tools: activityToolNames(enriched),
     }
   );
-  await db.task.update({
-    where: { id: taskId },
+  await db.task.updateMany({
+    where: { id: taskId, sessionId },
     data: { pendingActions: JSON.stringify(enriched) },
   });
-  await setColumn(taskId, waitingForApproval ? "approval" : "blocked");
-  void sessionId;
+  await setColumn(taskId, waitingForApproval ? "approval" : "blocked", {}, sessionId);
 }
 
 export async function sweep(): Promise<void> {
@@ -517,7 +519,7 @@ export async function resolvePause(
     });
   }
   await db.task.update({ where: { id: taskId }, data: { pendingActions: null } });
-  await setColumn(taskId, "working", { error: null });
+  await setColumn(taskId, "working", { error: null }, task.sessionId);
   void runPumpResume(taskId, task.sessionId, [...approvals, ...responses]);
   return { ok: true };
 }
