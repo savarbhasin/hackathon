@@ -104,19 +104,24 @@ export default function DocsPage() {
     const query = searchTerm.trim().toLowerCase();
     const documentsInGroup = activeDocumentGroup?.items ?? [];
     const filtered = query
-      ? documentsInGroup.filter((document) => [
-        document.title,
-        document.content,
+      ? documentsInGroup.filter((document) => {
+        const currentDraft = drafts[document.id];
+        return [
+          currentDraft?.title ?? document.title,
+          currentDraft?.content ?? document.content,
         document.mission?.title,
         document.task?.title,
-      ].some((value) => value?.toLowerCase().includes(query)))
+        ].some((value) => value?.toLowerCase().includes(query));
+      })
       : documentsInGroup;
     return [...filtered].sort((a, b) => {
-      if (sortBy === "title") return a.title.localeCompare(b.title);
+      if (sortBy === "title") {
+        return (drafts[a.id]?.title ?? a.title).localeCompare(drafts[b.id]?.title ?? b.title);
+      }
       const direction = sortBy === "recent" ? -1 : 1;
       return direction * (+new Date(a.updatedAt) - +new Date(b.updatedAt));
     });
-  }, [activeDocumentGroup, searchTerm, sortBy]);
+  }, [activeDocumentGroup, drafts, searchTerm, sortBy]);
 
   function updateDraft(next: Partial<DocumentDraft>) {
     if (!selected || !draft) return;
@@ -136,6 +141,42 @@ export default function DocsPage() {
   function selectGroup(id: DocumentGroupId) {
     setActiveGroup(id);
     setSearchTerm("");
+  }
+
+  async function flushDraft(id: string): Promise<boolean> {
+    const currentDraft = drafts[id];
+    if (!currentDraft) return true;
+    const title = currentDraft.title.trim() || "Untitled document";
+    setSaving(true);
+    setError(null);
+    try {
+      const response = await fetch(`/api/docs/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title, content: currentDraft.content }),
+      });
+      if (!response.ok) throw new Error("Could not save the document.");
+      const updated = await response.json() as AgentDocument;
+      setDocuments((current) => current.map((document) => document.id === updated.id ? { ...document, ...updated } : document));
+      setDrafts((current) => {
+        const latest = current[id];
+        if (!latest || latest.title !== currentDraft.title || latest.content !== currentDraft.content) return current;
+        const next = { ...current };
+        delete next[id];
+        return next;
+      });
+      return true;
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+      return false;
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function returnToLibrary() {
+    if (selectedId && !await flushDraft(selectedId)) return;
+    selectDocument(null);
   }
 
   function updateDocumentContent(id: string, base: DocumentDraft, content: string) {
@@ -227,7 +268,7 @@ export default function DocsPage() {
       ) : selected && draft ? (
         <section className="console-grid flex min-h-0 flex-1 flex-col bg-deck">
           <div className="flex shrink-0 items-center gap-3 border-b border-line bg-deck/95 px-4 py-3 sm:px-6">
-            <button type="button" onClick={() => selectDocument(null)} className="flex h-8 shrink-0 items-center gap-2 rounded border border-line px-2.5 font-mono text-[9px] uppercase tracking-[0.12em] text-ink-soft transition-colors hover:border-line-strong hover:text-ink" aria-label="Back to document library">
+            <button type="button" onClick={() => void returnToLibrary()} disabled={saving} className="flex h-8 shrink-0 items-center gap-2 rounded border border-line px-2.5 font-mono text-[9px] uppercase tracking-[0.12em] text-ink-soft transition-colors hover:border-line-strong hover:text-ink disabled:opacity-40" aria-label="Back to document library">
               <span aria-hidden="true">←</span> Library
             </button>
             <input value={draft.title} onChange={(event) => updateDraft({ title: event.target.value })} placeholder="Untitled document" className="min-w-0 flex-1 border-0 bg-transparent text-lg font-semibold tracking-[-0.025em] text-ink outline-none placeholder:text-ink-faint" />
@@ -311,20 +352,25 @@ export default function DocsPage() {
 
             {visibleDocuments.length > 0 ? (
               <div className="mt-4 grid gap-4 md:grid-cols-2">
-                {visibleDocuments.map((document) => (
-                  <button key={document.id} type="button" onClick={() => selectDocument(document.id)} className="group flex min-h-56 flex-col rounded-lg border border-line bg-panel p-5 text-left transition-colors hover:border-line-strong hover:bg-panel-hi focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-signal">
+                {visibleDocuments.map((document) => {
+                  const currentDraft = drafts[document.id];
+                  const title = currentDraft?.title || document.title;
+                  const content = currentDraft?.content ?? document.content;
+                  return (
+                    <button key={document.id} type="button" onClick={() => selectDocument(document.id)} className="group flex min-h-56 flex-col rounded-lg border border-line bg-panel p-5 text-left transition-colors hover:border-line-strong hover:bg-panel-hi focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-signal">
                     <div className="flex items-start justify-between gap-4">
                       <span className="font-mono text-[8px] uppercase tracking-[0.16em] text-ink-faint">{document.authorRole === "user" ? "Your document" : roleLabel(document.authorRole)}</span>
                       <span className="rounded bg-deck px-2 py-1 font-mono text-[8px] uppercase tracking-[0.12em] text-ink-faint">{document.kind === "handoff" ? "Handoff" : "Document"}</span>
                     </div>
-                    <h2 className="mt-5 line-clamp-2 text-xl font-semibold tracking-[-0.03em] text-ink group-hover:text-signal">{drafts[document.id]?.title || document.title}</h2>
-                    <p className="mt-3 line-clamp-3 flex-1 text-sm leading-6 text-ink-soft">{document.content.trim() ? previewText(document.content) : "No content yet. Open this document to start writing."}</p>
+                    <h2 className="mt-5 line-clamp-2 text-xl font-semibold tracking-[-0.03em] text-ink group-hover:text-signal">{title}</h2>
+                    <p className="mt-3 line-clamp-3 flex-1 text-sm leading-6 text-ink-soft">{content.trim() ? previewText(content) : "No content yet. Open this document to start writing."}</p>
                     <div className="mt-6 flex items-center justify-between gap-3 border-t border-line pt-3 font-mono text-[8px] uppercase tracking-[0.12em] text-ink-faint">
                       <span>{formatDocumentDate(document.updatedAt)}</span>
-                      <span>{wordCount(document.content)} words</span>
+                      <span>{wordCount(content)} words</span>
                     </div>
-                  </button>
-                ))}
+                    </button>
+                  );
+                })}
               </div>
             ) : (
               <div className="mt-4 rounded-lg border border-line bg-panel/40 px-6 py-12 text-center">
