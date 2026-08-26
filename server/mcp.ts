@@ -90,16 +90,17 @@ function buildServer(): McpServer {
     async ({ task_id, summary }) => {
       const existing = await db.task.findUnique({ where: { id: task_id } });
       if (!existing) return text(`Unknown task_id ${task_id}`);
-      const task = await db.task.update({
+      const sessionId = existing.sessionId;
+      await db.task.update({
         where: { id: task_id },
         data: { output: summary.trim() },
       });
       await appendTaskEvent(task_id, "specialist.mark_done", { summary: summary.trim() });
-      if (task.sessionId) {
+      if (sessionId) {
         try {
-          await tf().sessions.cancel(task.sessionId);
+          await tf().sessions.cancel(sessionId);
         } catch (error) {
-          console.error("[mark_done] failed to stop session", task.sessionId, error);
+          console.error("[mark_done] failed to stop session", sessionId, error);
         }
       }
       return text("Recorded. Stop immediately. Do not call another tool or write any more output.");
