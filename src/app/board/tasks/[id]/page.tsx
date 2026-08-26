@@ -627,7 +627,7 @@ function TechnicalEvents({ events }: { events: TaskEvent[] }) {
 
 function Dependencies({ items }: { items: Predecessor[] }) {
   return (
-    <InfoCard title="Dependencies" suffix={String(items.length)}>
+    <InfoCard title={items.length === 1 ? "Parent task" : "Parent tasks"} suffix={String(items.length)}>
       {items.length > 0 ? (
         <ul className="space-y-2">
           {items.map((item) => (

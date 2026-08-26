@@ -26,7 +26,8 @@ interface DocumentDraft {
   content: string;
 }
 
-type DocumentGroupId = "mine" | "agents" | "handoffs";
+type DocumentGroupId = "all" | "mine" | "agents" | "handoffs";
+type DocumentSort = "recent" | "oldest" | "title";
 
 export default function DocsPage() {
   const [documents, setDocuments] = useState<AgentDocument[]>([]);
@@ -37,7 +38,9 @@ export default function DocsPage() {
   const [error, setError] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<AgentDocument | null>(null);
   const [deleting, setDeleting] = useState(false);
-  const [activeGroup, setActiveGroup] = useState<DocumentGroupId>("mine");
+  const [activeGroup, setActiveGroup] = useState<DocumentGroupId>("all");
+  const [searchTerm, setSearchTerm] = useState("");
+  const [sortBy, setSortBy] = useState<DocumentSort>("recent");
 
   useEffect(() => {
     void fetch("/api/docs", { cache: "no-store" })
@@ -48,7 +51,7 @@ export default function DocsPage() {
       .then((items) => {
         setDocuments(items);
         const requestedId = new URLSearchParams(window.location.search).get("document");
-        const initial = items.find((document) => document.id === requestedId) ?? items[0];
+        const initial = items.find((document) => document.id === requestedId);
         setSelectedId(initial?.id ?? null);
         if (initial) setActiveGroup(documentGroupId(initial));
       })
@@ -67,6 +70,13 @@ export default function DocsPage() {
     [documents]
   );
   const documentGroups = useMemo(() => [
+    {
+      id: "all" as const,
+      label: "All documents",
+      shortLabel: "All documents",
+      description: "Everything saved by you and the squad",
+      items: sortedDocuments,
+    },
     {
       id: "mine" as const,
       label: "Created by me",
@@ -90,7 +100,23 @@ export default function DocsPage() {
     },
   ], [sortedDocuments]);
   const activeDocumentGroup = documentGroups.find((group) => group.id === activeGroup);
-  const activeDocuments = activeDocumentGroup?.items ?? [];
+  const visibleDocuments = useMemo(() => {
+    const query = searchTerm.trim().toLowerCase();
+    const documentsInGroup = activeDocumentGroup?.items ?? [];
+    const filtered = query
+      ? documentsInGroup.filter((document) => [
+        document.title,
+        document.content,
+        document.mission?.title,
+        document.task?.title,
+      ].some((value) => value?.toLowerCase().includes(query)))
+      : documentsInGroup;
+    return [...filtered].sort((a, b) => {
+      if (sortBy === "title") return a.title.localeCompare(b.title);
+      const direction = sortBy === "recent" ? -1 : 1;
+      return direction * (+new Date(a.updatedAt) - +new Date(b.updatedAt));
+    });
+  }, [activeDocumentGroup, searchTerm, sortBy]);
 
   function updateDraft(next: Partial<DocumentDraft>) {
     if (!selected || !draft) return;
@@ -109,8 +135,7 @@ export default function DocsPage() {
 
   function selectGroup(id: DocumentGroupId) {
     setActiveGroup(id);
-    const firstDocument = documentGroups.find((group) => group.id === id)?.items[0];
-    selectDocument(firstDocument?.id ?? null);
+    setSearchTerm("");
   }
 
   function updateDocumentContent(id: string, base: DocumentDraft, content: string) {
@@ -154,8 +179,7 @@ export default function DocsPage() {
       return next;
     });
     if (selectedId === deleteTarget.id) {
-      const nextDocument = sortedDocuments.find((document) => document.id !== deleteTarget.id);
-      selectDocument(nextDocument?.id ?? null);
+      selectDocument(null);
     }
     setDeleteTarget(null);
     setDeleting(false);
@@ -198,108 +222,118 @@ export default function DocsPage() {
 
   return (
     <main className="flex h-full min-w-0 flex-col bg-deck">
-      <header className="flex h-16 shrink-0 items-center gap-4 border-b border-line bg-deck px-5 sm:px-6">
-        <div>
-          <p className="font-mono text-[8px] uppercase tracking-[0.2em] text-ink-faint">Fleet output</p>
-          <h1 className="mt-0.5 text-[15px] font-semibold tracking-[-0.02em] text-ink">Documents</h1>
-        </div>
-        <span className="hidden font-mono text-[9px] uppercase tracking-[0.14em] text-ink-faint sm:block">{documents.length} saved</span>
-        <button type="button" onClick={() => void createDocument()} className="ml-auto rounded-md bg-signal px-3 py-2 font-mono text-[9px] font-semibold uppercase tracking-[0.14em] text-deck transition-colors hover:brightness-110">
-          New doc
-        </button>
-      </header>
-
       {loading ? (
         <p className="p-6 font-mono text-xs text-ink-faint">Loading docs...</p>
-      ) : documents.length === 0 ? (
-        <div className="mx-auto mt-[16vh] max-w-lg border-l border-line-strong px-6 text-left">
-          <p className="font-mono text-[9px] uppercase tracking-[0.2em] text-role-researcher">No saved documents</p>
-          <h2 className="mt-4 text-3xl font-semibold tracking-[-0.035em] text-ink">Start a document or ask an agent to write one.</h2>
-          <p className="mt-4 text-sm leading-7 text-ink-soft">Research briefs, plans, and written deliverables appear here. You can edit their Markdown directly.</p>
-        </div>
+      ) : selected && draft ? (
+        <section className="console-grid flex min-h-0 flex-1 flex-col bg-deck">
+          <div className="flex shrink-0 items-center gap-3 border-b border-line bg-deck/95 px-4 py-3 sm:px-6">
+            <button type="button" onClick={() => selectDocument(null)} className="flex h-8 shrink-0 items-center gap-2 rounded border border-line px-2.5 font-mono text-[9px] uppercase tracking-[0.12em] text-ink-soft transition-colors hover:border-line-strong hover:text-ink" aria-label="Back to document library">
+              <span aria-hidden="true">←</span> Library
+            </button>
+            <input value={draft.title} onChange={(event) => updateDraft({ title: event.target.value })} placeholder="Untitled document" className="min-w-0 flex-1 border-0 bg-transparent text-lg font-semibold tracking-[-0.025em] text-ink outline-none placeholder:text-ink-faint" />
+            <span className="shrink-0 font-mono text-[9px] uppercase tracking-[0.14em] text-ink-faint">
+              {saving ? "Saving..." : dirty ? "Unsaved" : "Saved"}
+            </span>
+            <button
+              type="button"
+              onClick={() => setDeleteTarget(selected)}
+              className="flex h-8 w-8 shrink-0 items-center justify-center rounded text-ink-faint transition-colors hover:bg-panel-hi hover:text-state-blocked focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-line-strong"
+              aria-label={`Delete ${draft.title || "document"}`}
+              title="Delete document"
+            >
+              <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" aria-hidden="true"><path d="M3.5 4.5h9M6.2 4.5V3.2h3.6v1.3m-5.1 0 .55 8h5.7l.55-8M7 7v3.2m2-3.2v3.2" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" /></svg>
+            </button>
+          </div>
+
+          <div className="min-h-0 flex-1 overflow-y-auto">
+            <MarkdownDocumentEditor
+              key={selected.id}
+              value={draft.content}
+              onChange={(content) => updateDocumentContent(selected.id, pickDraft(selected), content)}
+            />
+          </div>
+
+          {error && <p className="shrink-0 border-t border-state-blocked/30 bg-state-blocked/[0.04] px-4 py-2 text-xs text-state-blocked">{error}</p>}
+        </section>
       ) : (
-        <div className="flex min-h-0 flex-1 flex-col">
-          <nav aria-label="Document type" className="scrollbar-none shrink-0 overflow-x-auto border-b border-line bg-panel/40 px-4 sm:px-6">
-            <div className="flex min-w-max gap-1">
-              {documentGroups.map((group) => {
-                const active = group.id === activeGroup;
-                return (
-                  <button
-                    key={group.id}
-                    type="button"
-                    onClick={() => selectGroup(group.id)}
-                    className={`relative flex items-center gap-2 px-3 py-3.5 text-left font-mono text-[9px] uppercase tracking-[0.13em] transition-colors ${active ? "text-ink" : "text-ink-faint hover:text-ink-soft"}`}
-                    aria-current={active ? "page" : undefined}
-                  >
-                    <span>{group.label}</span>
-                    <span className={`rounded-full px-1.5 py-0.5 text-[8px] tabular-nums ${active ? "bg-signal/15 text-signal" : "bg-panel-hi text-ink-faint"}`}>{group.items.length}</span>
-                    {active && <span className="absolute inset-x-3 bottom-0 h-px bg-signal" />}
-                  </button>
-                );
-              })}
+        <section className="min-h-0 flex-1 overflow-y-auto">
+          <div className="mx-auto w-full max-w-[1440px] px-5 py-8 sm:px-8 lg:px-12">
+            <header className="flex flex-col gap-6 lg:flex-row lg:items-end lg:justify-between">
+              <div className="max-w-2xl">
+                <p className="font-mono text-[9px] uppercase tracking-[0.2em] text-role-researcher">Fleet output / library</p>
+                <h1 className="mt-3 text-3xl font-semibold tracking-[-0.04em] text-ink sm:text-4xl">Documents</h1>
+                <p className="mt-3 text-sm leading-6 text-ink-soft">Research briefs, plans, and written deliverables from you and the squad.</p>
+              </div>
+              <button type="button" onClick={() => void createDocument()} className="self-start rounded-md bg-signal px-3.5 py-2.5 font-mono text-[9px] font-semibold uppercase tracking-[0.14em] text-deck transition-colors hover:brightness-110 lg:self-auto">
+                New doc
+              </button>
+            </header>
+
+            {error && <p className="mt-6 rounded-md border border-state-blocked/40 bg-state-blocked/[0.05] px-3 py-2 text-xs text-state-blocked">{error}</p>}
+
+            <div className="mt-8 flex flex-col gap-3 border-b border-line pb-4 xl:flex-row xl:items-center xl:justify-between">
+              <nav aria-label="Document type" className="scrollbar-none overflow-x-auto">
+                <div className="flex min-w-max gap-1">
+                  {documentGroups.map((group) => {
+                    const active = group.id === activeGroup;
+                    return (
+                      <button key={group.id} type="button" onClick={() => selectGroup(group.id)} className={`rounded-md px-3 py-2 text-left text-[11px] transition-colors ${active ? "bg-panel-hi text-ink" : "text-ink-faint hover:bg-panel hover:text-ink-soft"}`} aria-current={active ? "page" : undefined}>
+                        {group.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </nav>
+              <div className="flex flex-col gap-3 sm:flex-row">
+                <label className="flex min-w-0 items-center gap-2 rounded-md border border-line bg-panel/50 px-3 py-2 focus-within:border-line-strong sm:w-72">
+                  <span className="text-ink-faint" aria-hidden="true">⌕</span>
+                  <span className="sr-only">Search documents</span>
+                  <input value={searchTerm} onChange={(event) => setSearchTerm(event.target.value)} placeholder="Search documents" className="min-w-0 flex-1 bg-transparent text-xs text-ink outline-none placeholder:text-ink-faint" />
+                </label>
+                <label className="flex items-center gap-2 rounded-md border border-line bg-panel/50 px-3 py-2 text-xs text-ink-soft">
+                  <span className="font-mono text-[8px] uppercase tracking-[0.14em] text-ink-faint">Sort</span>
+                  <select value={sortBy} onChange={(event) => setSortBy(event.target.value as DocumentSort)} className="bg-transparent text-xs text-ink outline-none">
+                    <option value="recent">Recently edited</option>
+                    <option value="oldest">Oldest first</option>
+                    <option value="title">Title</option>
+                  </select>
+                </label>
+              </div>
             </div>
-          </nav>
 
-          <div className="grid min-h-0 flex-1 grid-cols-1 lg:grid-cols-[minmax(0,1fr)_256px]">
-            <aside className="scrollbar-none order-1 max-h-48 overflow-y-auto border-b border-line bg-panel/35 p-2 lg:order-2 lg:max-h-none lg:border-b-0 lg:border-l lg:p-3">
-              <div className="flex items-start justify-between gap-3 px-2 pb-3 pt-1">
-                <div>
-                  <p className="font-mono text-[8px] uppercase tracking-[0.16em] text-ink-faint">{documentGroups.find((group) => group.id === activeGroup)?.shortLabel}</p>
-                  <p className="mt-1 text-[11px] leading-4 text-ink-soft">{documentGroups.find((group) => group.id === activeGroup)?.description}</p>
-                </div>
-                <span className="pt-0.5 font-mono text-[9px] tabular-nums text-ink-faint">{activeDocuments.length}</span>
+            <div className="mt-8 flex items-center justify-between gap-4">
+              <div>
+                <p className="font-mono text-[9px] uppercase tracking-[0.18em] text-ink-faint">{activeDocumentGroup?.shortLabel}</p>
+                <p className="mt-1 text-xs text-ink-soft">{activeDocumentGroup?.description}</p>
               </div>
-              {activeDocuments.length > 0 ? activeDocuments.map((document) => (
-                <button key={document.id} type="button" onClick={() => selectDocument(document.id)} className={`mb-1 block w-full rounded-md border px-3 py-3 text-left transition-colors ${document.id === selectedId ? "border-line-strong bg-panel-hi text-ink" : "border-transparent text-ink-soft hover:border-line hover:bg-panel-hi hover:text-ink"}`}>
-                  <span className="line-clamp-2 text-xs font-semibold leading-snug">{drafts[document.id]?.title || document.title}</span>
-                  <span className="mt-1.5 block font-mono text-[8px] uppercase tracking-[0.12em] text-ink-faint">{document.authorRole === "user" ? "Edited by you" : roleLabel(document.authorRole)} / {new Date(document.updatedAt).toLocaleDateString()}</span>
-                </button>
-              )) : (
-                <p className="px-2 py-5 text-xs leading-5 text-ink-faint">Nothing here yet.</p>
-              )}
-            </aside>
+              <span className="font-mono text-[9px] uppercase tracking-[0.14em] text-ink-faint">{visibleDocuments.length} {visibleDocuments.length === 1 ? "document" : "documents"}</span>
+            </div>
 
-            {selected && draft ? (
-              <section className="console-grid order-2 flex min-h-0 flex-col bg-deck lg:order-1">
-                <div className="flex shrink-0 items-center gap-3 border-b border-line bg-deck/95 px-4 py-3 sm:px-6">
-                <input value={draft.title} onChange={(event) => updateDraft({ title: event.target.value })} placeholder="Untitled document" className="min-w-0 flex-1 border-0 bg-transparent text-lg font-semibold tracking-[-0.025em] text-ink outline-none placeholder:text-ink-faint" />
-                <span className="shrink-0 font-mono text-[9px] uppercase tracking-[0.14em] text-ink-faint">
-                  {saving ? "Saving..." : dirty ? "Unsaved" : "Saved"}
-                </span>
-                <button
-                  type="button"
-                  onClick={() => setDeleteTarget(selected)}
-                  className="flex h-8 w-8 shrink-0 items-center justify-center rounded text-ink-faint transition-colors hover:bg-panel-hi hover:text-state-blocked focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-line-strong"
-                  aria-label={`Delete ${draft.title || "document"}`}
-                  title="Delete document"
-                >
-                  <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" aria-hidden="true"><path d="M3.5 4.5h9M6.2 4.5V3.2h3.6v1.3m-5.1 0 .55 8h5.7l.55-8M7 7v3.2m2-3.2v3.2" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" /></svg>
-                </button>
+            {visibleDocuments.length > 0 ? (
+              <div className="mt-4 grid gap-4 md:grid-cols-2">
+                {visibleDocuments.map((document) => (
+                  <button key={document.id} type="button" onClick={() => selectDocument(document.id)} className="group flex min-h-56 flex-col rounded-lg border border-line bg-panel p-5 text-left transition-colors hover:border-line-strong hover:bg-panel-hi focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-signal">
+                    <div className="flex items-start justify-between gap-4">
+                      <span className="font-mono text-[8px] uppercase tracking-[0.16em] text-ink-faint">{document.authorRole === "user" ? "Your document" : roleLabel(document.authorRole)}</span>
+                      <span className="rounded bg-deck px-2 py-1 font-mono text-[8px] uppercase tracking-[0.12em] text-ink-faint">{document.kind === "handoff" ? "Handoff" : "Document"}</span>
+                    </div>
+                    <h2 className="mt-5 line-clamp-2 text-xl font-semibold tracking-[-0.03em] text-ink group-hover:text-signal">{drafts[document.id]?.title || document.title}</h2>
+                    <p className="mt-3 line-clamp-3 flex-1 text-sm leading-6 text-ink-soft">{document.content.trim() ? previewText(document.content) : "No content yet. Open this document to start writing."}</p>
+                    <div className="mt-6 flex items-center justify-between gap-3 border-t border-line pt-3 font-mono text-[8px] uppercase tracking-[0.12em] text-ink-faint">
+                      <span>{formatDocumentDate(document.updatedAt)}</span>
+                      <span>{wordCount(document.content)} words</span>
+                    </div>
+                  </button>
+                ))}
               </div>
-
-                <div className="min-h-0 flex-1 overflow-y-auto">
-                  <MarkdownDocumentEditor
-                    key={selected.id}
-                    value={draft.content}
-                    onChange={(content) => updateDocumentContent(selected.id, pickDraft(selected), content)}
-                  />
-                </div>
-
-                {error && <p className="shrink-0 border-t border-state-blocked/30 bg-state-blocked/[0.04] px-4 py-2 text-xs text-state-blocked">{error}</p>}
-              </section>
             ) : (
-              <section className="console-grid order-2 flex min-h-0 items-center bg-deck px-8 py-12 lg:order-1 lg:px-16">
-                <div className="max-w-md border-l border-line-strong pl-5">
-                  <p className="font-mono text-[9px] uppercase tracking-[0.18em] text-ink-faint">{activeDocumentGroup?.shortLabel}</p>
-                  <h2 className="mt-3 text-2xl font-semibold tracking-[-0.03em] text-ink">Nothing saved here yet.</h2>
-                  <p className="mt-3 text-sm leading-6 text-ink-soft">
-                    {activeGroup === "mine" ? "Create a document to start writing." : activeDocumentGroup?.description}
-                  </p>
-                </div>
-              </section>
+              <div className="mt-4 rounded-lg border border-line bg-panel/40 px-6 py-12 text-center">
+                <p className="font-mono text-[9px] uppercase tracking-[0.18em] text-ink-faint">No matching documents</p>
+                <p className="mt-3 text-sm text-ink-soft">Try a different search or create a new document.</p>
+              </div>
             )}
           </div>
-        </div>
+        </section>
       )}
       <ConfirmDialog
         open={Boolean(deleteTarget)}
@@ -321,6 +355,18 @@ function roleLabel(role: string): string {
   if (role === "squad-lead") return "Squad lead";
   if (role === "filer") return "Issue filer";
   return role.replace(/[_-]+/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function previewText(content: string): string {
+  return content.replace(/[#>*_`~-]/g, "").replace(/\s+/g, " ").trim();
+}
+
+function wordCount(content: string): number {
+  return content.trim() ? content.trim().split(/\s+/).length : 0;
+}
+
+function formatDocumentDate(value: string): string {
+  return new Date(value).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
 }
 
 function documentGroupId(document: AgentDocument): DocumentGroupId {
