@@ -10,12 +10,40 @@ import { tf } from "../src/lib/tf";
 import { runScheduleNow } from "../src/lib/schedule-runner";
 import { appendTaskEvent } from "../src/lib/task-events";
 import { dependencyIds, findDependencyCycle } from "../src/lib/task-graph";
+import { durableRunsEnabled, durableSchedulesEnabled } from "../src/lib/queue/env";
+import {
+  durableBoard,
+  durableTask,
+  durableCreateMission,
+  durableCreateTask,
+  durableMarkDone,
+  durableCreateDoc,
+  durableUpdateDoc,
+  durableSaveDocument,
+  durableListDocs,
+  durableGetDoc,
+  durableCreateSchedule,
+  durableListSchedules,
+  durableCancelSchedule,
+  durableDispatchTask,
+  durableSweep,
+} from "../src/lib/mcp-durable";
 
 const PORT = Number(process.env.MCP_PORT ?? 3100);
 const HOST = process.env.MCP_HOST?.trim() || "127.0.0.1";
 const NEW_TASK_NODE = "__new_task__";
 
-const jobs = new Map<string, Cron>();
+// Legacy Cron ownership is initialized lazily so durable mode has no
+// in-memory scheduler map or background jobs at all.
+let jobs: Map<string, Cron> | undefined;
+
+function durableSchedulesActive(): boolean {
+  return durableRunsEnabled() && durableSchedulesEnabled();
+}
+
+function legacyJobs(): Map<string, Cron> {
+  return jobs ??= new Map<string, Cron>();
+}
 
 function text(t: unknown) {
   return { content: [{ type: "text" as const, text: typeof t === "string" ? t : JSON.stringify(t) }] };
@@ -86,8 +114,16 @@ function buildServer(): McpServer {
       summary: z
         .string()
         .describe("A concise completion report in 2 to 4 factual sentences stating what you did and the outcome"),
+      handoff: z.any().optional().describe("Optional explicit context for downstream successors"),
     },
-    async ({ task_id, summary }) => {
+    async ({ task_id, summary, handoff }) => {
+      if (durableRunsEnabled()) {
+        const result = await durableMarkDone({ taskId: task_id, summary, handoff });
+        if (result?.kind === "not_found") return text(`Unknown task_id ${task_id}`);
+        if (result?.kind === "conflict" || result?.kind === "invalid_state") return text(`Could not record completion: ${result.reason ?? result.kind}`);
+        return text("Recorded. Stop immediately. Do not call another tool or write any more output.");
+      }
+
       const existing = await db.task.findUnique({ where: { id: task_id } });
       if (!existing) return text(`Unknown task_id ${task_id}`);
       const sessionId = existing.sessionId;
@@ -111,7 +147,7 @@ function buildServer(): McpServer {
     "list_board",
     "Current state of all missions and tasks on the kanban board.",
     {},
-    async () => text(await getBoard())
+    async () => text(durableRunsEnabled() ? await durableBoard() : await getBoard())
   );
 
   server.tool(
@@ -119,6 +155,7 @@ function buildServer(): McpServer {
     "Full detail of one task including its recent event log.",
     { task_id: z.string() },
     async ({ task_id }) => {
+      if (durableRunsEnabled()) return text((await durableTask(task_id)) ?? `No task ${task_id}`);
       const task = await db.task.findUnique({
         where: { id: task_id },
         include: { events: { orderBy: { seq: "desc" }, take: 20 } },
@@ -140,6 +177,12 @@ function buildServer(): McpServer {
         .describe("Required decision: use handoff when any successor needs this document as input; use artifact only for durable material that no successor needs"),
     },
     async ({ task_id, title, content, kind }) => {
+      if (durableRunsEnabled()) {
+        const doc = await durableCreateDoc({ taskId: task_id, title, content, kind });
+        if (doc?.kind === "not_found") return text(`Unknown task_id ${task_id}`);
+        if (doc?.kind === "conflict") return text(`Could not create document: ${doc.reason ?? doc.kind}`);
+        return text(`Document created. id=${doc?.id ?? doc?._id} title="${doc?.title ?? title}" kind=${doc?.kind ?? kind}`);
+      }
       const task = await db.task.findUnique({ where: { id: task_id } });
       if (!task) return text(`Unknown task_id ${task_id}`);
       const doc = await db.document.create({
@@ -172,6 +215,12 @@ function buildServer(): McpServer {
     },
     async ({ task_id, doc_id, title, content }) => {
       if (title == null && content == null) return text("Provide title or content.");
+      if (durableRunsEnabled()) {
+        const doc = await durableUpdateDoc({ taskId: task_id, docId: doc_id, title, content });
+        if (doc?.kind === "not_found") return text(`No document ${doc_id} belongs to task ${task_id}`);
+        if (doc?.kind === "conflict") return text(`Could not update document: ${doc.reason ?? doc.kind}`);
+        return text(`Document updated. id=${doc?.id ?? doc?._id} title="${doc?.title ?? title ?? ""}"`);
+      }
       const existing = await db.document.findFirst({ where: { id: doc_id, taskId: task_id } });
       if (!existing) return text(`No document ${doc_id} belongs to task ${task_id}`);
       const doc = await db.document.update({
@@ -195,6 +244,11 @@ function buildServer(): McpServer {
       content: z.string().min(1).describe("The complete document in Markdown"),
     },
     async ({ title, content }) => {
+      if (durableRunsEnabled()) {
+        const doc = await durableSaveDocument(title, content);
+        if (doc?.kind === "conflict" || doc?.kind === "not_found") return text(`Could not save document: ${doc.reason ?? doc.kind}`);
+        return text(`Document saved. id=${doc?.id ?? doc?._id} title="${doc?.title ?? title}"`);
+      }
       const existing = await db.document.findFirst({ where: { title } });
       const doc = existing
         ? await db.document.update({ where: { id: existing.id }, data: { content } })
@@ -207,8 +261,9 @@ function buildServer(): McpServer {
     "list_docs",
     "List saved agent documents with their mission and task names.",
     {},
-    async () =>
-      text(
+    async () => {
+      if (durableRunsEnabled()) return text(await durableListDocs());
+      return text(
         await db.document.findMany({
           include: {
             mission: { select: { title: true } },
@@ -216,7 +271,8 @@ function buildServer(): McpServer {
           },
           orderBy: { updatedAt: "desc" },
         })
-      )
+      );
+    }
   );
 
   server.tool(
@@ -224,6 +280,7 @@ function buildServer(): McpServer {
     "Read one saved agent document.",
     { doc_id: z.string() },
     async ({ doc_id }) => {
+      if (durableRunsEnabled()) return text((await durableGetDoc(doc_id)) ?? `No document ${doc_id}`);
       const doc = await db.document.findUnique({
         where: { id: doc_id },
         include: {
@@ -240,6 +297,11 @@ function buildServer(): McpServer {
     "Create a mission (a goal that will be broken into tasks). Returns the mission id.",
     { title: z.string(), goal: z.string().describe("What success looks like") },
     async ({ title, goal }) => {
+      if (durableRunsEnabled()) {
+        const mission = await durableCreateMission(title, goal);
+        if (mission?.kind === "conflict" || mission?.kind === "not_found") return text(`Could not create mission: ${mission.reason ?? mission.kind}`);
+        return text(`Mission created. id=${mission?.id ?? mission?._id} title="${mission?.title ?? title}"`);
+      }
       const mission = await db.mission.create({ data: { title, goal, status: "active" } });
       return text(`Mission created. id=${mission.id} title="${mission.title}"`);
     }
@@ -259,6 +321,12 @@ function buildServer(): McpServer {
       depends_on: z.array(z.string()).default([]).describe("Same-mission predecessor task IDs whose output is required. Leave empty for work that can start independently"),
     },
     async ({ mission_id, title, detail, role, depends_on }) => {
+      if (durableRunsEnabled()) {
+        const task = await durableCreateTask({ missionId: mission_id, title, detail, role, dependsOn: depends_on });
+        if (task?.kind === "invalid_role") return text(`Unknown or disabled agent "${role}". Use an agent id exactly as listed in the Available agents roster.`);
+        if (task?.kind === "not_found" || task?.kind === "conflict") return text(task.reason ?? task.kind);
+        return text(`Task created. id=${task?.id ?? task?._id} column=${task?.column ?? "backlog"}`);
+      }
       const profile = await getAgentDefinition(role);
       if (!profile?.enabled) {
         return text(`Unknown or disabled agent "${role}". Use an agent id exactly as listed in the Available agents roster.`);
@@ -286,7 +354,7 @@ function buildServer(): McpServer {
     "dispatch_task",
     "Start an agent on a backlog task immediately, even if dependencies are unmet.",
     { task_id: z.string() },
-    async ({ task_id }) => text(await dispatchTask(task_id))
+    async ({ task_id }) => text(await (durableRunsEnabled() ? durableDispatchTask(task_id) : dispatchTask(task_id)))
   );
 
   server.tool(
@@ -294,7 +362,8 @@ function buildServer(): McpServer {
     "Start every backlog task whose dependencies are satisfied.",
     {},
     async () => {
-      await sweep();
+      if (durableRunsEnabled()) await durableSweep();
+      else await sweep();
       return text("Sweep complete.");
     }
   );
@@ -303,10 +372,30 @@ function buildServer(): McpServer {
     "create_schedule",
     "Schedule a recurring instruction for the orchestrator (cron syntax).",
     { name: z.string(), cron_expr: z.string().describe("Standard cron, e.g. '0 7 * * *' = daily 07:00"), prompt: z.string() },
-    async ({ name, cron_expr, prompt }) => {
+    async ({ name, cron_expr, prompt }, extra) => {
       const cronExpr = cron_expr.trim();
       const validationError = cronValidationError(cronExpr);
       if (validationError) return text(`Invalid cron expression: ${validationError}`);
+
+      if (durableSchedulesActive()) {
+        try {
+          const schedule = await durableCreateSchedule({
+            name,
+            cronExpr,
+            prompt,
+            requestId: extra.requestId,
+            sessionId: extra.sessionId,
+          });
+          const scheduleId = schedule?.id ?? schedule?._id;
+          const schedulerId = schedule?.schedulerId ?? "pending";
+          const tombstoned = schedule?.deletedAt != null;
+          return text(tombstoned
+            ? `Schedule already exists and is cancelled. id=${scheduleId} scheduler=${schedulerId} enabled=false sync=${schedule?.syncState ?? "pending"}`
+            : `Scheduled "${name}" (${cronExpr}). id=${scheduleId} scheduler=${schedulerId} enabled=${schedule?.enabled !== false} sync=${schedule?.syncState ?? "pending"}`);
+        } catch (error) {
+          return text(`Could not create schedule: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
 
       const schedule = await db.schedule.create({ data: { name, cronExpr, prompt } });
       registerJob(schedule.id, cronExpr);
@@ -314,18 +403,36 @@ function buildServer(): McpServer {
     }
   );
 
-  server.tool("list_schedules", "List scheduled recurring instructions.", {}, async () =>
-    text(await db.schedule.findMany())
-  );
+  server.tool("list_schedules", "List scheduled recurring instructions.", {}, async () => {
+    if (durableSchedulesActive()) {
+      try {
+        return text(await durableListSchedules());
+      } catch (error) {
+        return text(`Could not list schedules: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    return text(await db.schedule.findMany());
+  });
 
   server.tool(
     "cancel_schedule",
     "Disable a scheduled instruction permanently.",
     { schedule_id: z.string() },
     async ({ schedule_id }) => {
+      if (durableSchedulesActive()) {
+        try {
+          const result = await durableCancelSchedule(schedule_id);
+          const outcome = result?.outcome ?? "deleted";
+          if (outcome === "not_found") return text(`Schedule ${schedule_id} is already cancelled or missing.`);
+          return text(`Cancelled schedule. id=${schedule_id} scheduler=${result?.schedulerId ?? "unknown"} outcome=${outcome}. Worker reconciliation will remove the scheduler.`);
+        } catch (error) {
+          return text(`Could not cancel schedule ${schedule_id}: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+
       await db.schedule.update({ where: { id: schedule_id }, data: { enabled: false } }).catch(() => null);
-      jobs.get(schedule_id)?.stop();
-      jobs.delete(schedule_id);
+      jobs?.get(schedule_id)?.stop();
+      jobs?.delete(schedule_id);
       return text("Cancelled.");
     }
   );
@@ -334,24 +441,27 @@ function buildServer(): McpServer {
 }
 
 function registerJob(id: string, cronExpr: string) {
+  if (durableSchedulesActive()) throw new Error("Legacy Cron schedules are disabled while durable schedules are active");
   const validationError = cronValidationError(cronExpr);
   if (validationError) throw new Error(`Invalid cron expression: ${validationError}`);
 
   const job = new Cron(cronExpr).schedule(() => {
     void runScheduleNow(id).catch((error) => {
       if (error instanceof Error && error.name === "ScheduleDisabledError") {
-        jobs.get(id)?.stop();
-        jobs.delete(id);
+        jobs?.get(id)?.stop();
+        jobs?.delete(id);
         return;
       }
       console.error("[schedule]", id, error);
     });
   });
-  jobs.get(id)?.stop();
-  jobs.set(id, job);
+  const legacy = legacyJobs();
+  legacy.get(id)?.stop();
+  legacy.set(id, job);
 }
 
 async function bootJobs() {
+  if (durableSchedulesActive()) return;
   const schedules = await db.schedule.findMany({ where: { enabled: true } });
   let active = 0;
   for (const schedule of schedules) {
@@ -388,5 +498,5 @@ app.get("/health", (_req, res) => res.json({ ok: true }));
 
 app.listen(PORT, HOST, async () => {
   console.log(`[mcp] mission-control MCP listening on http://${HOST}:${PORT}/mcp`);
-  await bootJobs().catch(console.error);
+  if (!durableSchedulesActive()) await bootJobs().catch(console.error);
 });

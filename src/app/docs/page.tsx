@@ -1,8 +1,12 @@
 "use client";
 
 import dynamic from "next/dynamic";
+import { useQuery } from "convex/react";
+import { anyApi } from "convex/server";
 import { useEffect, useMemo, useState } from "react";
 import { ConfirmDialog } from "@/components/confirm-dialog";
+
+const convexApi = anyApi as any;
 
 const MarkdownDocumentEditor = dynamic(
   () => import("@/components/markdown-document-editor").then((module) => module.MarkdownDocumentEditor),
@@ -30,10 +34,15 @@ type DocumentGroupId = "all" | "mine" | "agents" | "handoffs";
 type DocumentSort = "recent" | "oldest" | "title";
 
 export default function DocsPage() {
-  const [documents, setDocuments] = useState<AgentDocument[]>([]);
+  const documentRows = useQuery(convexApi.documents.list, { limit: 200 }) as unknown;
+  const documents = useMemo(
+    () => Array.isArray(documentRows)
+      ? documentRows.map(documentFromConvex).filter((document): document is AgentDocument => document !== null)
+      : [],
+    [documentRows],
+  );
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [drafts, setDrafts] = useState<Record<string, DocumentDraft>>({});
-  const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<AgentDocument | null>(null);
@@ -42,22 +51,17 @@ export default function DocsPage() {
   const [searchTerm, setSearchTerm] = useState("");
   const [sortBy, setSortBy] = useState<DocumentSort>("recent");
 
+  const loading = documentRows === undefined;
+
   useEffect(() => {
-    void fetch("/api/docs", { cache: "no-store" })
-      .then((response) => {
-        if (!response.ok) throw new Error("Could not load documents.");
-        return response.json() as Promise<AgentDocument[]>;
-      })
-      .then((items) => {
-        setDocuments(items);
-        const requestedId = new URLSearchParams(window.location.search).get("document");
-        const initial = items.find((document) => document.id === requestedId);
-        setSelectedId(initial?.id ?? null);
-        if (initial) setActiveGroup(documentGroupId(initial));
-      })
-      .catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)))
-      .finally(() => setLoading(false));
-  }, []);
+    if (documentRows === undefined) return;
+    const requestedId = new URLSearchParams(window.location.search).get("document");
+    const initial = documents.find((document) => document.id === requestedId);
+    if (initial) {
+      setSelectedId((current) => current ?? initial.id);
+      setActiveGroup(documentGroupId(initial));
+    }
+  }, [documentRows, documents]);
 
   const selected = documents.find((document) => document.id === selectedId) ?? null;
   const draft = selected ? drafts[selected.id] ?? pickDraft(selected) : null;
@@ -156,8 +160,7 @@ export default function DocsPage() {
         body: JSON.stringify({ title, content: currentDraft.content }),
       });
       if (!response.ok) throw new Error("Could not save the document.");
-      const updated = await response.json() as AgentDocument;
-      setDocuments((current) => current.map((document) => document.id === updated.id ? { ...document, ...updated } : document));
+      await response.json();
       setDrafts((current) => {
         const latest = current[id];
         if (!latest || latest.title !== currentDraft.title || latest.content !== currentDraft.content) return current;
@@ -197,8 +200,11 @@ export default function DocsPage() {
       setError("Could not create the document.");
       return;
     }
-    const document = (await response.json()) as AgentDocument;
-    setDocuments((current) => [document, ...current]);
+    const document = (await response.json()) as { id?: string };
+    if (!document.id) {
+      setError("Document created but no document id was returned.");
+      return;
+    }
     setActiveGroup("mine");
     selectDocument(document.id);
   }
@@ -213,7 +219,6 @@ export default function DocsPage() {
       setDeleting(false);
       return;
     }
-    setDocuments((current) => current.filter((document) => document.id !== deleteTarget.id));
     setDrafts((current) => {
       const next = { ...current };
       delete next[deleteTarget.id];
@@ -239,12 +244,9 @@ export default function DocsPage() {
       })
         .then(async (response) => {
           if (!response.ok) throw new Error("Could not save the document.");
-          return response.json() as Promise<AgentDocument>;
+          return response.json();
         })
-        .then((updated) => {
-          setDocuments((current) =>
-            current.map((document) => document.id === updated.id ? { ...document, ...updated } : document)
-          );
+        .then(() => {
           setDrafts((current) => {
             const currentDraft = current[selectedDocumentId];
             if (!currentDraft || currentDraft.title !== draftTitle || currentDraft.content !== draftContent) {
@@ -391,6 +393,38 @@ export default function DocsPage() {
       />
     </main>
   );
+}
+
+function documentFromConvex(value: unknown): AgentDocument | null {
+  if (!value || typeof value !== "object") return null;
+  const row = value as {
+    _id?: string;
+    title?: string;
+    content?: string;
+    authorRole?: string;
+    kind?: string;
+    createdAt?: number;
+    updatedAt?: number;
+    mission?: { _id?: string; title?: string } | null;
+    task?: { _id?: string; title?: string; role?: string } | null;
+  };
+  if (!row._id || typeof row.title !== "string" || typeof row.content !== "string") return null;
+  const timestamp = (value: number | undefined) => new Date(typeof value === "number" ? value : Date.now()).toISOString();
+  return {
+    id: String(row._id),
+    title: row.title,
+    content: row.content,
+    authorRole: row.authorRole ?? "unknown",
+    kind: row.kind ?? "artifact",
+    createdAt: timestamp(row.createdAt),
+    updatedAt: timestamp(row.updatedAt),
+    mission: row.mission?._id && typeof row.mission.title === "string"
+      ? { id: String(row.mission._id), title: row.mission.title }
+      : null,
+    task: row.task?._id && typeof row.task.title === "string"
+      ? { id: String(row.task._id), title: row.task.title, role: row.task.role ?? "unknown" }
+      : null,
+  };
 }
 
 function pickDraft(document: AgentDocument): DocumentDraft {

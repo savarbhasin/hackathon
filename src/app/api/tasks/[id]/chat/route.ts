@@ -1,4 +1,5 @@
 import { db } from "@/lib/db";
+import { durableRunsEnabled } from "@/lib/queue/env";
 import { handleDone } from "@/lib/engine";
 import { tf } from "@/lib/tf";
 import { appendTaskEvent } from "@/lib/task-events";
@@ -28,6 +29,14 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
   const body = await req.json().catch(() => null) as { message?: string; clientMessageId?: string } | null;
   const message = body?.message?.trim();
   const clientMessageId = body?.clientMessageId?.trim() || undefined;
+  if (durableRunsEnabled()) {
+    return Response.json({
+      error: "durable_followup_unsupported",
+      code: "durable_followup_unsupported",
+      mode: "durable",
+      message: "Durable task follow-up chat is not available yet. Use the task actions above; Phase 4 will add subscribed follow-up runs.",
+    }, { status: 409 });
+  }
   if (!message) return Response.json({ error: "message_required" }, { status: 400 });
   const task = await db.task.findUnique({ where: { id }, select: { sessionId: true, column: true } });
   if (!task) return Response.json({ error: "not_found" }, { status: 404 });

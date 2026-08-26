@@ -1,20 +1,28 @@
 "use client";
 
+import { anyApi } from "convex/server";
+import { useQuery } from "convex/react";
 import Link from "next/link";
 import { useEffect, useState } from "react";
 
+// The generated bindings can lag behind newly added Convex modules. Keep the
+// dynamic reference local to this page until the next codegen pass.
+const convexApi = anyApi as any;
+
 interface Task {
-  id: string;
+  _id: string;
   title: string;
   role: string;
   column: string;
-  dependsOn: string;
-  error: string | null;
-  pendingActions?: string | null;
-  updatedAt: string;
+  dependsOn: string[];
+  error?: string;
+  pendingActions?: unknown;
+  updatedAt: number;
 }
 
 interface Mission {
+  _id: string;
+  title: string;
   tasks: Task[];
 }
 
@@ -27,24 +35,12 @@ const COLUMNS = [
 ] as const;
 
 export default function Board() {
-  const [missions, setMissions] = useState<Mission[]>([]);
-  const [connected, setConnected] = useState(false);
+  const board = useQuery(convexApi.missions.boardSnapshot, {
+    limit: 100,
+    taskLimit: 500,
+  }) as Mission[] | undefined;
+  const missions = board ?? [];
   const [now, setNow] = useState(() => Date.now());
-
-  useEffect(() => {
-    const es = new EventSource("/api/stream");
-    es.onopen = () => setConnected(true);
-    es.onerror = () => setConnected(false);
-    es.onmessage = (e) => {
-      setConnected(true);
-      try {
-        setMissions(JSON.parse(e.data));
-      } catch {
-        /* partial */
-      }
-    };
-    return () => es.close();
-  }, []);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(Date.now()), 30_000);
@@ -67,9 +63,9 @@ export default function Board() {
           <span><b className="font-medium text-state-working">{activeCount}</b> running</span>
         </div>
         <div className="ml-auto flex items-center gap-2">
-          <span className={`hidden items-center gap-1.5 font-mono text-[9px] uppercase tracking-[0.16em] sm:flex ${connected ? "text-state-settled" : "text-state-blocked"}`}>
-            <span className={`h-1.5 w-1.5 rounded-full ${connected ? "bg-state-settled led-live" : "bg-signal"}`} />
-            {connected ? "Live" : "Reconnecting"}
+          <span className={`hidden items-center gap-1.5 font-mono text-[9px] uppercase tracking-[0.16em] sm:flex ${board === undefined ? "text-state-blocked" : "text-state-settled"}`}>
+            <span className={`h-1.5 w-1.5 rounded-full ${board === undefined ? "bg-signal" : "bg-state-settled led-live"}`} />
+            {board === undefined ? "Connecting" : "Live"}
           </span>
         </div>
       </header>
@@ -139,7 +135,7 @@ function StateTaskGroups({
   return (
     <div className="space-y-2">
       {today.tasks.map((task) => (
-        <Card key={task.id} task={task} now={now} />
+        <Card key={task._id} task={task} now={now} />
       ))}
 
       {today.tasks.length === 0 && (
@@ -167,7 +163,7 @@ function Card({
 
   return (
     <Link
-      href={`/board/tasks/${task.id}`}
+      href={`/board/tasks/${task._id}`}
       className="group block w-full rounded-md border border-line bg-panel p-3.5 text-left transition-colors focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-signal hover:border-line-strong hover:bg-panel-hi"
     >
       <div className="mb-2.5 flex items-center gap-2">
@@ -218,7 +214,7 @@ function TaskDateGroup({
   const cards = (
     <div className="space-y-2">
       {group.tasks.map((task) => (
-        <Card key={task.id} task={task} now={now} />
+        <Card key={task._id} task={task} now={now} />
       ))}
     </div>
   );
@@ -239,29 +235,22 @@ function TaskDateGroup({
   );
 }
 
-function safeParseActions(raw: string | null | undefined): PendingAction[] {
-  if (!raw) return [];
-  try {
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? (parsed as PendingAction[]) : [];
-  } catch {
-    return [];
-  }
+function safeParseActions(raw: unknown): PendingAction[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((action): action is PendingAction => typeof action === "object" && action !== null);
 }
 
-function firstPendingTool(raw: string | null | undefined): string | null {
+function firstPendingTool(raw: unknown): string | null {
   const actions = safeParseActions(raw);
-  for (const a of actions) for (const c of a.calls) if (c.name) return c.name;
+  for (const action of actions) {
+    if (action.name) return action.name;
+    for (const call of action.calls ?? []) if (call.name) return call.name;
+  }
   return null;
 }
 
-function safeDependencyCount(raw: string): number {
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed.length : 0;
-  } catch {
-    return 0;
-  }
+function safeDependencyCount(dependencies: string[]): number {
+  return dependencies.length;
 }
 
 function roleLabel(role: string): string {
@@ -269,8 +258,8 @@ function roleLabel(role: string): string {
   return role.replace(/[_-]+/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
-function relativeTime(value: string, now: number): string {
-  const elapsed = Math.max(0, now - new Date(value).getTime());
+function relativeTime(value: number, now: number): string {
+  const elapsed = Math.max(0, now - value);
   const minutes = Math.floor(elapsed / 60_000);
   if (minutes < 1) return "Now";
   if (minutes < 60) return `${minutes}m ago`;
@@ -306,13 +295,14 @@ function groupTasksByDate(tasks: Task[], now: number): Array<{ label: string; ta
     label: range.label,
     tasks: tasks
       .filter((task) => {
-        const updatedAt = new Date(task.updatedAt).getTime();
+        const updatedAt = task.updatedAt;
         return Number.isFinite(updatedAt) && updatedAt >= range.start && updatedAt < range.end;
       })
-      .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()),
+      .sort((a, b) => b.updatedAt - a.updatedAt),
   }));
 }
 
 interface PendingAction {
-  calls: Array<{ name?: string }>;
+  name?: string;
+  calls?: Array<{ name?: string }>;
 }

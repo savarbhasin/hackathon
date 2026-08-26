@@ -1,6 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useQuery } from "convex/react";
+import { api } from "../../convex/_generated/api";
 import { ChatMarkdown } from "@/components/chat-markdown";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 
@@ -30,6 +32,7 @@ interface ChatEvent {
 
 interface Msg {
   id?: string;
+  runId?: string;
   role: "user" | "assistant";
   content: string;
   tools?: string[];
@@ -38,23 +41,54 @@ interface Msg {
   pause?: PauseAction[];
 }
 
+type RunStatus = string | null | undefined;
+
 interface ConversationSummary {
   id: string;
   title: string;
   updatedAt: string;
   _count: { messages: number };
+  runStatus?: RunStatus;
+  activeRun?: { _id?: string; status?: string } | null;
 }
 
-interface StoredConversation {
-  id: string;
-  messages: Array<{
-    id: string;
-    role: string;
-    content: string;
-    tools: string;
-    status: string | null;
-    pauseActions: string | null;
-  }>;
+interface ConvexConversationSummary {
+  _id?: string;
+  title?: string;
+  updatedAt?: number;
+  summaryUpdatedAt?: number;
+  messageCount?: number;
+  latestRun?: { _id?: string; status?: string } | null;
+  activeRun?: { _id?: string; status?: string } | null;
+}
+
+interface ConvexMessage {
+  _id?: string;
+  conversationId?: string;
+  role?: string;
+  content?: string;
+  tools?: unknown;
+  status?: string;
+  pauseActions?: unknown;
+  runId?: string;
+}
+
+interface ConversationRunState {
+  latest?: { _id?: string; status?: string } | null;
+  active?: { _id?: string; status?: string } | null;
+}
+
+const anyApi = api as unknown as Record<string, Record<string, any>>;
+
+interface DurableAdmission {
+  admissionKind?: string;
+  conversationId?: string;
+  runId?: string;
+  status?: string;
+  queue?: { kind?: string; state?: string; code?: string };
+  error?: string;
+  code?: string;
+  message?: string;
 }
 
 interface MentionableDocument {
@@ -69,78 +103,168 @@ const EXAMPLE_REQUESTS = [
   "Every weekday at 9am, check the board and summarize stuck tasks.",
 ];
 
+const ACTIVE_RUN_STATUSES = new Set(["queued", "enqueued", "connecting", "running"]);
+const WAITING_RUN_STATUSES = new Set(["waiting_for_user", "waiting_for_approval"]);
+
+function isActiveStatus(status: RunStatus): boolean {
+  return typeof status === "string" && (ACTIVE_RUN_STATUSES.has(status) || WAITING_RUN_STATUSES.has(status));
+}
+
+function parseMessageTools(raw: unknown): string[] {
+  if (Array.isArray(raw)) return raw.filter((item): item is string => typeof item === "string");
+  if (typeof raw !== "string") return [];
+  return parseTools(raw);
+}
+
+function parseMessagePause(raw: unknown, messageId: string): PauseAction[] | undefined {
+  if (Array.isArray(raw)) return parsePauseArray(raw, messageId);
+  if (typeof raw === "string") return parsePauseActions(raw, messageId);
+  return undefined;
+}
+
+function messageFromConvex(message: ConvexMessage): Msg {
+  const id = message._id ?? `message-${message.runId ?? "unknown"}`;
+  const role = message.role === "user" ? "user" : "assistant";
+  const status = message.status ?? undefined;
+  return {
+    id,
+    runId: message.runId,
+    role,
+    content: message.content ?? "",
+    tools: parseMessageTools(message.tools),
+    status,
+    pending: role === "assistant" && typeof status === "string" && ACTIVE_RUN_STATUSES.has(status),
+    pause: parseMessagePause(message.pauseActions, id),
+  };
+}
+
+function requestKey(): string {
+  return `chat-${Date.now()}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
+}
+
+function summaryFromConvex(value: unknown): ConversationSummary | null {
+  if (!value || typeof value !== "object") return null;
+  const row = value as ConvexConversationSummary;
+  if (!row._id || typeof row.title !== "string") return null;
+  const activeRun = row.activeRun ?? null;
+  return {
+    id: String(row._id),
+    title: row.title,
+    updatedAt: new Date(typeof row.summaryUpdatedAt === "number" ? row.summaryUpdatedAt : row.updatedAt ?? Date.now()).toISOString(),
+    _count: { messages: typeof row.messageCount === "number" ? row.messageCount : 0 },
+    runStatus: activeRun?.status ?? row.latestRun?.status ?? null,
+    activeRun: activeRun ? { _id: activeRun._id ? String(activeRun._id) : undefined, status: activeRun.status } : null,
+  };
+}
+
+function documentFromConvex(value: unknown): MentionableDocument | null {
+  if (!value || typeof value !== "object") return null;
+  const row = value as { _id?: string; title?: string; authorRole?: string };
+  if (!row._id || typeof row.title !== "string") return null;
+  return { id: String(row._id), title: row.title, authorRole: row.authorRole ?? "unknown" };
+}
+
 export default function Home() {
   const [messages, setMessages] = useState<Msg[]>([]);
-  const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [input, setInput] = useState("");
-  const [documents, setDocuments] = useState<MentionableDocument[]>([]);
   const [attachedDocumentIds, setAttachedDocumentIds] = useState<string[]>([]);
   const [mentionOpen, setMentionOpen] = useState(false);
   const inputRef = useRef<HTMLTextAreaElement>(null);
-  const [busy, setBusy] = useState(false);
-  const [loadingConversation, setLoadingConversation] = useState(false);
+  const [submitting, setSubmitting] = useState<Record<string, boolean>>({});
   const [historyOpen, setHistoryOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<ConversationSummary | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [, setPendingPlaceholders] = useState<Record<string, Msg>>({});
+  const pendingPlaceholdersRef = useRef<Record<string, Msg>>({});
   const bottomRef = useRef<HTMLDivElement>(null);
+  const selectedRef = useRef<string | null>(null);
 
-  const refreshConversations = useCallback(async () => {
-    const res = await fetch("/api/conversations", { cache: "no-store" });
-    if (res.ok) setConversations((await res.json()) as ConversationSummary[]);
-  }, []);
+  const summaryRows = useQuery(anyApi.conversations.listSummaries, { limit: 200 }) as unknown;
+  const conversations = useMemo(
+    () => Array.isArray(summaryRows) ? summaryRows.map(summaryFromConvex).filter((row): row is ConversationSummary => row !== null) : [],
+    [summaryRows],
+  );
+  const documentsRows = useQuery(anyApi.documents.list, { limit: 200 }) as unknown;
+  const documents = useMemo(
+    () => Array.isArray(documentsRows) ? documentsRows.map(documentFromConvex).filter((row): row is MentionableDocument => row !== null) : [],
+    [documentsRows],
+  );
+  const selectedConversationState = useQuery(
+    anyApi.conversations.conversationState,
+    conversationId ? { conversationId: conversationId as never } : "skip",
+  ) as unknown;
+  const selectedMessages = useQuery(
+    anyApi.conversations.conversationMessages,
+    conversationId ? { conversationId: conversationId as never, limit: 2000 } : "skip",
+  ) as unknown;
+  const selectedRunState = useQuery(
+    anyApi.agentRuns.conversationRunState,
+    conversationId ? { conversationId: conversationId as never } : "skip",
+  ) as ConversationRunState | undefined;
+  const runStatusByConversation = useMemo(() => {
+    const statuses: Record<string, RunStatus> = {};
+    for (const conversation of conversations) statuses[conversation.id] = conversation.runStatus ?? null;
+    if (conversationId && selectedRunState) {
+      statuses[conversationId] = selectedRunState.active?.status ?? selectedRunState.latest?.status ?? statuses[conversationId] ?? null;
+    }
+    return statuses;
+  }, [conversationId, conversations, selectedRunState]);
+
+  useEffect(() => { selectedRef.current = conversationId; }, [conversationId]);
+
+  const setPlaceholderMap = (update: (current: Record<string, Msg>) => Record<string, Msg>) => {
+    const next = update(pendingPlaceholdersRef.current);
+    pendingPlaceholdersRef.current = next;
+    setPendingPlaceholders(next);
+  };
 
   useEffect(() => {
-    void refreshConversations();
-  }, [refreshConversations]);
-
-  useEffect(() => {
-    void fetch("/api/docs", { cache: "no-store" })
-      .then(async (response) => response.ok ? await response.json() as MentionableDocument[] : [])
-      .then(setDocuments);
-  }, []);
+    if (!conversationId || !Array.isArray(selectedMessages)) return;
+    const loaded = (selectedMessages as ConvexMessage[])
+      .filter((message) => !message.conversationId || String(message.conversationId) === conversationId)
+      .filter((message) => message.role === "user" || message.role === "assistant")
+      .map(messageFromConvex);
+    const placeholder = pendingPlaceholdersRef.current[conversationId];
+    const hasPersistedAssistant = Boolean(placeholder?.runId && loaded.some((message) => message.role === "assistant" && message.runId === placeholder.runId));
+    if (hasPersistedAssistant) {
+      setPlaceholderMap((current) => {
+        if (!current[conversationId]) return current;
+        const next = { ...current };
+        delete next[conversationId];
+        return next;
+      });
+    }
+    setMessages(placeholder && !hasPersistedAssistant ? [...loaded, placeholder] : loaded);
+  }, [conversationId, selectedMessages]);
 
   useEffect(() => {
     if (!historyOpen) return;
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setHistoryOpen(false);
-    };
+    const closeOnEscape = (event: KeyboardEvent) => { if (event.key === "Escape") setHistoryOpen(false); };
     window.addEventListener("keydown", closeOnEscape);
     return () => window.removeEventListener("keydown", closeOnEscape);
   }, [historyOpen]);
 
-  const scrollDown = () =>
-    setTimeout(() => bottomRef.current?.scrollIntoView({ behavior: "smooth" }), 50);
+  const selectedStatus = conversationId
+    ? selectedRunState?.active?.status ?? selectedRunState?.latest?.status ?? runStatusByConversation[conversationId] ?? null
+    : null;
+  const selectedBusy = isActiveStatus(selectedStatus) || Boolean(submitting[conversationId ?? "new"]);
+  const loadingConversation = Boolean(conversationId && (selectedConversationState === undefined || selectedMessages === undefined));
+  const loadingConversationId = loadingConversation ? conversationId : null;
 
-  async function loadConversation(id: string) {
-    if (busy || id === conversationId) return;
-    setLoadingConversation(true);
-    try {
-      const res = await fetch(`/api/conversations/${id}`, { cache: "no-store" });
-      if (!res.ok) return;
-      const stored = (await res.json()) as StoredConversation;
-      setConversationId(stored.id);
-      setMessages(
-        stored.messages
-          .filter((message) => message.role === "user" || message.role === "assistant")
-          .map((message) => ({
-            id: message.id,
-            role: message.role as Msg["role"],
-            content: message.content,
-            tools: parseTools(message.tools),
-            status: message.status ?? undefined,
-            pause: parsePauseActions(message.pauseActions, message.id),
-          }))
-      );
-      setHistoryOpen(false);
-      scrollDown();
-    } finally {
-      setLoadingConversation(false);
-    }
+  const scrollDown = () => setTimeout(() => bottomRef.current?.scrollIntoView({ behavior: "smooth" }), 50);
+
+  function selectConversation(id: string) {
+    if (id === conversationId) return;
+    selectedRef.current = id;
+    setConversationId(id);
+    setMessages([]);
+    setHistoryOpen(false);
+    scrollDown();
   }
 
   function newConversation() {
-    if (busy) return;
+    selectedRef.current = null;
     setConversationId(null);
     setMessages([]);
     setInput("");
@@ -149,92 +273,168 @@ export default function Home() {
   }
 
   async function deleteConversation() {
-    if (!deleteTarget || busy || loadingConversation || deleting) return;
+    if (!deleteTarget || deleting) return;
+    const target = deleteTarget;
     setDeleting(true);
-    const response = await fetch(`/api/conversations/${deleteTarget.id}`, { method: "DELETE" });
+    const response = await fetch(`/api/conversations/${target.id}`, { method: "DELETE" });
     if (!response.ok) {
       setDeleting(false);
       return;
     }
-    setConversations((current) => current.filter((conversation) => conversation.id !== deleteTarget.id));
-    if (conversationId === deleteTarget.id) {
-      setConversationId(null);
-      setMessages([]);
-      setInput("");
-    }
+    if (conversationId === target.id) newConversation();
     setDeleteTarget(null);
     setDeleting(false);
   }
 
   async function runTurn(body: Record<string, unknown>, userBubble?: string): Promise<boolean> {
-    if (busy || loadingConversation) return false;
-    let completed = false;
-    setBusy(true);
-    setMessages((current) => [
-      ...current,
-      ...(userBubble !== undefined
-        ? [{ role: "user" as const, content: userBubble }]
-        : []),
-      { role: "assistant", content: "", tools: [], pending: true },
-    ]);
+    const targetConversation = typeof body.conversationId === "string" ? body.conversationId : conversationId;
+    const targetKey = targetConversation ?? "new";
+    const isResume = body.answers !== undefined;
+    const currentStatus = targetConversation ? runStatusByConversation[targetConversation] ?? null : null;
+    if (submitting[targetKey] || (targetConversation && isActiveStatus(currentStatus) && !(isResume && WAITING_RUN_STATUSES.has(String(currentStatus))))) return false;
+    const key = typeof body.requestId === "string" ? body.requestId : requestKey();
+    const requestBody = { ...body, requestId: key };
+    const requestSelection = selectedRef.current;
+    const placeholderId = `pending:${key}`;
+    setSubmitting((current) => ({ ...current, [targetKey]: true }));
+    if (userBubble !== undefined && requestSelection === selectedRef.current) {
+      setMessages((current) => [...current, { role: "user", content: userBubble }]);
+    }
+    if (requestSelection === selectedRef.current) {
+      const placeholder: Msg = { id: placeholderId, role: "assistant", content: "", tools: [], pending: true, status: "queued" };
+      setPlaceholderMap((current) => ({ ...current, [targetKey]: placeholder }));
+      setMessages((current) => [...current, placeholder]);
+    }
     scrollDown();
 
+    let completed = false;
+    let placeholderConversationKey = targetKey;
+    let submissionKey = targetKey;
+    let streamConversationId = targetConversation;
     try {
-      const res = await fetch("/api/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      if (!res.ok || !res.body) throw new Error(`chat request failed (${res.status})`);
-
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n\n");
-        buffer = lines.pop() ?? "";
-        for (const line of lines) {
-          if (!line.startsWith("data: ")) continue;
-          const payload = line.slice(6).trim();
-          if (payload === "[DONE]") continue;
-          const event = JSON.parse(payload) as ChatEvent;
-          if (event.kind === "done" && event.name !== "error") completed = true;
-          if (event.kind === "error") completed = false;
-          handleEvent(event);
+      let response: Response | undefined;
+      let lastError: unknown;
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+          response = await fetch("/api/chat", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "Idempotency-Key": key },
+            body: JSON.stringify(requestBody),
+          });
+          break;
+        } catch (error) {
+          lastError = error;
+          if (attempt === 1) throw error;
+        }
+      }
+      if (!response) throw lastError ?? new Error("chat request failed");
+      const contentType = response.headers.get("content-type") ?? "";
+      if (!contentType.includes("text/event-stream")) {
+        const admission = await response.json().catch(() => ({})) as DurableAdmission;
+        const accepted = admission.admissionKind === "accepted" || admission.admissionKind === "already_accepted";
+        if (!response.ok && !accepted) throw new Error(admission.message ?? admission.error ?? `chat request failed (${response.status})`);
+        const returnedConversationId = admission.conversationId;
+        const returnedRunId = admission.runId;
+        if (returnedConversationId) {
+          placeholderConversationKey = returnedConversationId;
+          if (submissionKey !== returnedConversationId) {
+            setSubmitting((current) => {
+              const next = { ...current, [returnedConversationId]: true };
+              delete next[submissionKey];
+              return next;
+            });
+            submissionKey = returnedConversationId;
+          }
+          setPlaceholderMap((current) => {
+            const next = { ...current, [returnedConversationId]: { id: placeholderId, runId: returnedRunId, role: "assistant", content: "", tools: [], pending: true, status: admission.status ?? "queued" } };
+            if (targetKey !== returnedConversationId) delete next[targetKey];
+            return next;
+          });
+          if (selectedRef.current === requestSelection) {
+            selectedRef.current = returnedConversationId;
+            setConversationId(returnedConversationId);
+          }
+        }
+        completed = accepted && (admission.status === "completed" || admission.status === "failed" || admission.status === "cancelled");
+      } else {
+        if (!response.ok || !response.body) throw new Error(`chat request failed (${response.status})`);
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split("\n\n");
+          buffer = lines.pop() ?? "";
+          for (const line of lines) {
+            if (!line.startsWith("data: ")) continue;
+            const payload = line.slice(6).trim();
+            if (payload === "[DONE]") continue;
+            const event = JSON.parse(payload) as ChatEvent;
+            if (event.kind === "done" && event.name !== "error") completed = true;
+            if (event.kind === "error") completed = false;
+            if (event.kind === "conversation" && event.conversationId) streamConversationId = event.conversationId;
+            const ownsSelection = selectedRef.current === requestSelection
+              || (requestSelection === null && selectedRef.current === null && event.kind === "conversation")
+              || (requestSelection === null && streamConversationId !== undefined && selectedRef.current === streamConversationId);
+            if (ownsSelection) handleEvent(event);
+          }
         }
       }
     } catch (error) {
       completed = false;
-      setMessages((current) => {
-        const copy = [...current];
-        copy[copy.length - 1] = {
-          ...copy[copy.length - 1],
-          pending: false,
-          content: `Connection error: ${String(error).slice(0, 200)}`,
-        };
-        return copy;
-      });
+      if (selectedRef.current === requestSelection) {
+        setMessages((current) => current.map((message) => message.id === placeholderId
+          ? { ...message, pending: false, content: `Connection error: ${String(error).slice(0, 200)}` }
+          : message));
+      }
     } finally {
-      setBusy(false);
-      await refreshConversations();
+      setSubmitting((current) => { const next = { ...current }; delete next[submissionKey]; return next; });
+      setPlaceholderMap((current) => {
+        const next = { ...current };
+        if (completed) delete next[placeholderConversationKey];
+        return next;
+      });
       scrollDown();
     }
     return completed;
   }
 
+  function handleEvent(event: ChatEvent) {
+    if (event.kind === "conversation" && event.conversationId) {
+      setConversationId(event.conversationId);
+      selectedRef.current = event.conversationId;
+      return;
+    }
+    setMessages((current) => {
+      if (current.length === 0) return current;
+      const copy = [...current];
+      const index = copy.length - 1;
+      const last = { ...copy[index] };
+      switch (event.kind) {
+        case "delta": last.content += event.text ?? ""; break;
+        case "tool": last.tools = [...(last.tools ?? []), event.name ?? "unknown tool"]; break;
+        case "status": last.status = event.text ?? undefined; break;
+        case "pause": last.pause = event.actions ?? []; last.pending = false; break;
+        case "error": last.content = event.text ?? "The turn could not be completed."; last.status = event.code ?? "error"; last.pending = false; break;
+        case "done": if (!last.content && event.text) last.content = event.text; last.pending = false; break;
+      }
+      copy[index] = last;
+      return copy;
+    });
+    scrollDown();
+  }
+
   async function send() {
     const text = input.trim();
-    if (!text || busy || loadingConversation) return;
+    if (!text || selectedBusy || loadingConversation) return;
     setInput("");
     setMentionOpen(false);
     const attached = documents.filter((document) => attachedDocumentIds.includes(document.id));
     setAttachedDocumentIds([]);
     const display = attached.length > 0 ? `${text}\n\nAttached: ${attached.map((document) => `@${document.title}`).join(", ")}` : text;
-    await runTurn({ message: text, conversationId, documentIds: attached.map((document) => document.id) }, display);
+    await runTurn({ message: text, ...(conversationId ? { conversationId } : {}), documentIds: attached.map((document) => document.id) }, display);
   }
 
   const mentionQuery = useMemo(() => {
@@ -271,10 +471,8 @@ export default function Home() {
   }
 
   async function answer(answers: AnswerPayload[]) {
-    if (!conversationId || busy) return;
-    const summary = answers.map((answer) =>
-      answer.decision === "allow" ? "Approved" : answer.decision === "deny" ? "Denied" : answer.content?.trim() ?? ""
-    ).filter(Boolean).join(" · ");
+    if (!conversationId || submitting[conversationId]) return;
+    const summary = answers.map((answer) => answer.decision === "allow" ? "Approved" : answer.decision === "deny" ? "Denied" : answer.content?.trim() ?? "").filter(Boolean).join(" · ");
     const completed = await runTurn({ answers, conversationId }, summary);
     if (completed) {
       const selectors = new Set(answers.map((answer) => answer.selector));
@@ -283,45 +481,6 @@ export default function Home() {
         return message.pause ? { ...message, pause: pause?.length ? pause : undefined } : message;
       }));
     }
-  }
-
-  function handleEvent(event: ChatEvent) {
-    if (event.kind === "conversation" && event.conversationId) {
-      setConversationId(event.conversationId);
-      return;
-    }
-
-    setMessages((current) => {
-      const copy = [...current];
-      const last = { ...copy[copy.length - 1] };
-      switch (event.kind) {
-        case "delta":
-          last.content += event.text ?? "";
-          break;
-        case "tool":
-          last.tools = [...(last.tools ?? []), event.name ?? "unknown tool"];
-          break;
-        case "status":
-          last.status = event.text ?? undefined;
-          break;
-        case "pause":
-          last.pause = event.actions ?? [];
-          last.pending = false;
-          break;
-        case "error":
-          last.content = event.text ?? "The turn could not be completed.";
-          last.status = event.code ?? "error";
-          last.pending = false;
-          break;
-        case "done":
-          if (!last.content && event.text) last.content = event.text;
-          last.pending = false;
-          break;
-      }
-      copy[copy.length - 1] = last;
-      return copy;
-    });
-    scrollDown();
   }
 
   return (
@@ -345,7 +504,7 @@ export default function Home() {
 
           <div className="mx-auto max-w-3xl space-y-7">
             {messages.map((message, index) => (
-              <Message key={message.id ?? index} message={message} busy={busy} onAnswer={(a) => void answer(a)} />
+              <Message key={message.id ?? index} message={message} busy={Boolean(submitting[conversationId ?? "new"])} onAnswer={(a) => void answer(a)} />
             ))}
             <div ref={bottomRef} />
           </div>
@@ -373,8 +532,8 @@ export default function Home() {
                   void send();
                 }
               }}
-              placeholder={busy ? "The fleet is working..." : "Assign work or ask a follow-up"}
-              disabled={busy || loadingConversation}
+              placeholder={selectedBusy ? "The fleet is working..." : "Assign work or ask a follow-up"}
+              disabled={selectedBusy || loadingConversation}
               rows={2}
               className="scrollbar-none min-h-[58px] w-full resize-none border-0 bg-transparent text-sm leading-6 text-ink outline-none placeholder:text-ink-faint disabled:opacity-50"
             />
@@ -384,7 +543,7 @@ export default function Home() {
               <span className="text-[10px] text-ink-faint">Shift + Enter for a new line</span>
               <button
                 type="submit"
-                disabled={busy || loadingConversation || !input.trim()}
+                disabled={selectedBusy || loadingConversation || !input.trim()}
                 className="ml-auto flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-signal text-deck transition-transform hover:scale-[1.03] disabled:opacity-25"
                 aria-label="Send request"
               >
@@ -399,9 +558,11 @@ export default function Home() {
         <SideContent
           conversations={conversations}
           activeId={conversationId}
-          busy={busy}
+          runStatusByConversation={runStatusByConversation}
+          submitting={submitting}
+          loadingConversationId={loadingConversationId}
           onNew={newConversation}
-          onSelect={(id) => void loadConversation(id)}
+          onSelect={selectConversation}
           onDelete={setDeleteTarget}
         />
       </aside>
@@ -421,10 +582,12 @@ export default function Home() {
             <SideContent
               conversations={conversations}
               activeId={conversationId}
-              busy={busy}
+              runStatusByConversation={runStatusByConversation}
+              submitting={submitting}
+              loadingConversationId={loadingConversationId}
               onClose={() => setHistoryOpen(false)}
               onNew={newConversation}
-              onSelect={(id) => void loadConversation(id)}
+              onSelect={selectConversation}
               onDelete={setDeleteTarget}
             />
           </aside>
@@ -447,7 +610,9 @@ export default function Home() {
 function SideContent({
   conversations,
   activeId,
-  busy,
+  runStatusByConversation,
+  submitting,
+  loadingConversationId,
   onNew,
   onSelect,
   onDelete,
@@ -455,7 +620,9 @@ function SideContent({
 }: {
   conversations: ConversationSummary[];
   activeId: string | null;
-  busy: boolean;
+  runStatusByConversation: Record<string, RunStatus>;
+  submitting: Record<string, boolean>;
+  loadingConversationId: string | null;
   onNew: () => void;
   onSelect: (id: string) => void;
   onDelete: (conversation: ConversationSummary) => void;
@@ -468,7 +635,6 @@ function SideContent({
         <button
           type="button"
           onClick={onNew}
-          disabled={busy}
           aria-label="Start a new chat"
           className="ml-auto inline-flex h-8 items-center gap-2 rounded-md border border-line-strong bg-panel-hi px-3 font-mono text-[9px] font-semibold uppercase tracking-[0.1em] text-ink transition-colors hover:border-signal/60 hover:bg-signal/10 hover:text-ink disabled:opacity-40"
         >
@@ -490,7 +656,9 @@ function SideContent({
         <ConversationList
           conversations={conversations}
           activeId={activeId}
-          disabled={busy}
+          runStatusByConversation={runStatusByConversation}
+          submitting={submitting}
+          loadingConversationId={loadingConversationId}
           onSelect={onSelect}
           onDelete={onDelete}
         />
@@ -502,13 +670,17 @@ function SideContent({
 function ConversationList({
   conversations,
   activeId,
-  disabled,
+  runStatusByConversation,
+  submitting,
+  loadingConversationId,
   onSelect,
   onDelete,
 }: {
   conversations: ConversationSummary[];
   activeId: string | null;
-  disabled: boolean;
+  runStatusByConversation: Record<string, RunStatus>;
+  submitting: Record<string, boolean>;
+  loadingConversationId: string | null;
   onSelect: (id: string) => void;
   onDelete: (conversation: ConversationSummary) => void;
 }) {
@@ -533,14 +705,14 @@ function ConversationList({
           >
             <button
               onClick={() => onSelect(conversation.id)}
-              disabled={disabled}
+              disabled={loadingConversationId === conversation.id}
               className="min-w-0 flex-1 px-3 py-2.5 text-left focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-line-strong disabled:opacity-50"
             >
               <span className="line-clamp-2 text-xs font-medium leading-snug">{conversation.title}</span>
             </button>
             <button
               type="button"
-              disabled={disabled}
+              disabled={Boolean(submitting[conversation.id]) || isActiveStatus(runStatusByConversation[conversation.id] ?? conversation.runStatus)}
               onClick={() => onDelete(conversation)}
               className="mr-1 flex h-7 w-7 shrink-0 items-center justify-center rounded text-ink-faint opacity-0 transition-colors hover:bg-signal/10 hover:text-signal focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-line-strong disabled:opacity-40 group-hover/chat-row:opacity-100 group-focus-within/chat-row:opacity-100"
               aria-label={`Delete ${conversation.title}`}
@@ -825,28 +997,32 @@ function parseTools(raw: string): string[] {
   }
 }
 
+function parsePauseArray(parsed: unknown[], messageId: string): PauseAction[] | undefined {
+  const actions = parsed.flatMap((item, index) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+    const action = item as Record<string, unknown>;
+    if (typeof action.type !== "string") return [];
+    return [{
+      selector: typeof action.selector === "string" && action.selector.trim()
+        ? action.selector
+        : `legacy_${messageId}_${index}`,
+      type: action.type,
+      name: typeof action.name === "string" ? action.name : undefined,
+      question: typeof action.question === "string" ? action.question : undefined,
+      options: Array.isArray(action.options) && action.options.every((option) => typeof option === "string")
+        ? action.options
+        : undefined,
+      argsPreview: typeof action.argsPreview === "string" ? action.argsPreview : undefined,
+    }];
+  });
+  return actions.length > 0 ? actions : undefined;
+}
+
 function parsePauseActions(raw: string | null, messageId: string): PauseAction[] | undefined {
   if (!raw) return undefined;
   try {
     const parsed: unknown = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return undefined;
-    return parsed.flatMap((item, index) => {
-      if (!item || typeof item !== "object" || Array.isArray(item)) return [];
-      const action = item as Record<string, unknown>;
-      if (typeof action.type !== "string") return [];
-      return [{
-        selector: typeof action.selector === "string" && action.selector.trim()
-          ? action.selector
-          : `legacy_${messageId}_${index}`,
-        type: action.type,
-        name: typeof action.name === "string" ? action.name : undefined,
-        question: typeof action.question === "string" ? action.question : undefined,
-        options: Array.isArray(action.options) && action.options.every((option) => typeof option === "string")
-          ? action.options
-          : undefined,
-        argsPreview: typeof action.argsPreview === "string" ? action.argsPreview : undefined,
-      }];
-    });
+    return Array.isArray(parsed) ? parsePauseArray(parsed, messageId) : undefined;
   } catch {
     return undefined;
   }

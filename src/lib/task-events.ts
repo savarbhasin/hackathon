@@ -1,4 +1,6 @@
 import { db } from "./db";
+import { durableRunsEnabled } from "./queue/env";
+import { appendDurableTaskEvent } from "./durable-task-engine";
 
 const PAYLOAD_CAP = 4000;
 const RETRYABLE_TRANSACTION_CODES = new Set(["P1008", "P2002", "P2034"]);
@@ -51,7 +53,11 @@ async function allocateTaskEvent(taskId: string, type: string, serialized: strin
   }
 }
 
-export function appendTaskEvent(taskId: string, type: string, payload: unknown, options?: { preservePayload?: boolean }) {
+export function appendTaskEvent(taskId: string, type: string, payload: unknown, options?: { preservePayload?: boolean; operationKey?: string }) {
+  if (durableRunsEnabled()) {
+    return appendDurableTaskEvent(taskId, type, payload, options?.operationKey);
+  }
+
   const serialized = serializePayload(payload, options?.preservePayload ? Number.MAX_SAFE_INTEGER : PAYLOAD_CAP);
   const previous = eventQueues.get(taskId) ?? Promise.resolve();
   const current = previous

@@ -5,6 +5,9 @@
   "scripts": {
     "dev": "next dev",
     "dev:mcp": "tsx watch --env-file=.env.local server/mcp.ts",
+    "dev:worker": "tsx watch --env-file=.env.local worker/agent-runs.ts",
+    "worker": "tsx --env-file=.env.local worker/agent-runs.ts",
+    "enqueue:run": "tsx --env-file=.env.local worker/enqueue-agent-run.ts",
     "build": "next build",
     "start": "next start",
     "lint": "eslint"
@@ -14,8 +17,11 @@
     "@modelcontextprotocol/sdk": "^1.30.0",
     "@prisma/client": "^6.19.3",
     "@truefoundry/trueforge-sdk": "^0.1.3",
+    "bullmq": "^5.81.3",
+    "convex": "^1.45.0",
     "croner": "^10.0.1",
     "express": "^5.2.1",
+    "ioredis": "^5.11.1",
     "next": "16.3.2",
     "react": "19.2.8",
     "react-dom": "19.2.8",

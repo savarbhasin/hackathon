@@ -2,9 +2,9 @@ import type { TrueForgeApi } from "@truefoundry/trueforge-sdk";
 
 export const MCP_SERVER_NAME = "mission-control";
 
-export const ORCHESTRATOR_MODEL = "openai/gpt-5-6-luna";
+export const ORCHESTRATOR_MODEL = "google-gemini/gemini-3-6-flash";
 export const SPECIALIST_MODEL = "openai/gpt-5-6-luna";
-export const TITLE_MODEL = SPECIALIST_MODEL;
+export const TITLE_MODEL = "google-gemini/gemini-3-6-flash";
 
 export const SPECIALIST_RUNTIME_PREAMBLE = `You are a specialist agent in a fleet managed by Mission Control.
 

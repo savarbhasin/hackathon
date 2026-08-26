@@ -3,6 +3,14 @@ import { tf } from "./tf";
 import { isEventDelta, mergeEventDelta } from "@truefoundry/trueforge-sdk";
 import { appendTaskEvent } from "./task-events";
 import { dependencyIds } from "./task-graph";
+import { durableRunsEnabled } from "./queue/env";
+import {
+  durableDispatchTask,
+  durableRetryTask,
+  durableResolvePause,
+  durableSweep,
+  durableGetBoard,
+} from "./durable-task-engine";
 
 export type Column = "backlog" | "working" | "blocked" | "approval" | "settled";
 
@@ -168,6 +176,8 @@ async function successorContext(taskId: string, missionId: string) {
 }
 
 export async function dispatchTask(taskId: string): Promise<{ ok: boolean; reason?: string }> {
+  if (durableRunsEnabled()) return durableDispatchTask(taskId);
+
   const task = await db.task.findUnique({ where: { id: taskId }, include: { mission: true } });
   if (!task) return { ok: false, reason: "not_found" };
   if (task.sessionId) return { ok: false, reason: "already_dispatched" };
@@ -246,6 +256,8 @@ export async function dispatchTask(taskId: string): Promise<{ ok: boolean; reaso
 }
 
 export async function retryTask(taskId: string): Promise<{ ok: boolean; reason?: string }> {
+  if (durableRunsEnabled()) return durableRetryTask(taskId);
+
   const task = await db.task.findUnique({ where: { id: taskId } });
   if (!task) return { ok: false, reason: "not_found" };
   if (task.column !== "blocked") return { ok: false, reason: `column=${task.column}` };
@@ -458,6 +470,8 @@ export async function handleDone(
 }
 
 export async function sweep(): Promise<void> {
+  if (durableRunsEnabled()) return durableSweep();
+
   const candidates = await db.task.findMany({ where: { column: "backlog" } });
   const ready: string[] = [];
   for (const t of candidates) {
@@ -477,8 +491,10 @@ export async function sweep(): Promise<void> {
 
 export async function resolvePause(
   taskId: string,
-  decision: { kind: "approve"; allow: boolean; reason?: string } | { kind: "answer"; content: string }
+  decision: { kind: "approve"; allow: boolean; reason?: string; selector?: string } | { kind: "answer"; content: string; selector?: string }
 ): Promise<{ ok: boolean; reason?: string }> {
+  if (durableRunsEnabled()) return durableResolvePause(taskId, decision);
+
   const task = await db.task.findUnique({ where: { id: taskId } });
   if (!task?.sessionId) return { ok: false, reason: "no_session" };
   if (!task.pendingActions) return { ok: false, reason: "nothing_pending" };
@@ -539,6 +555,8 @@ async function runPumpResume(taskId: string, sessionId: string, input: Array<Rec
 }
 
 export async function getBoard() {
+  if (durableRunsEnabled()) return durableGetBoard();
+
   const missions = await db.mission.findMany({
     include: { tasks: { orderBy: { position: "asc" } } },
     orderBy: { createdAt: "desc" },

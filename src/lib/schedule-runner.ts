@@ -1,6 +1,7 @@
 import { db } from "./db";
 import { orchestratorSay } from "./orchestrator";
 import { SerialTaskQueue } from "./serial-task-queue";
+import { durableRunsEnabled, durableSchedulesEnabled } from "./queue/env";
 
 const scheduleRunQueue = new SerialTaskQueue();
 
@@ -26,6 +27,13 @@ export class ScheduleRunnerUnavailableError extends Error {
 }
 
 export async function runScheduleNow(id: string) {
+  // Durable schedules are admitted by Convex and delivered by the worker. Do
+  // not let an API or stale legacy Cron callback invoke orchestratorSay when
+  // durable ownership is enabled.
+  if (durableRunsEnabled() && durableSchedulesEnabled()) {
+    throw new ScheduleRunnerUnavailableError();
+  }
+
   const requestedSchedule = await db.schedule.findUnique({ where: { id } });
   if (!requestedSchedule) throw new ScheduleNotFoundError();
   if (!requestedSchedule.enabled) throw new ScheduleDisabledError();
