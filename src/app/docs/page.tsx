@@ -2,7 +2,7 @@
 
 import dynamic from "next/dynamic";
 import Link from "next/link";
-import { useQuery } from "convex/react";
+import { useMutation, useQuery } from "convex/react";
 import { anyApi } from "convex/server";
 import { useEffect, useMemo, useState } from "react";
 import { ConfirmDialog } from "@/components/confirm-dialog";
@@ -36,6 +36,9 @@ type DocumentSort = "recent" | "oldest" | "title";
 
 export default function DocsPage() {
   const documentRows = useQuery(convexApi.documents.list, { limit: 200 }) as unknown;
+  const createDocumentMutation = useMutation(convexApi.documents.create);
+  const updateDocumentMutation = useMutation(convexApi.documents.update);
+  const removeDocumentMutation = useMutation(convexApi.documents.remove);
   const documents = useMemo(
     () => Array.isArray(documentRows)
       ? documentRows.map(documentFromConvex).filter((document): document is AgentDocument => document !== null)
@@ -155,13 +158,8 @@ export default function DocsPage() {
     setSaving(true);
     setError(null);
     try {
-      const response = await fetch(`/api/docs/${id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title, content: currentDraft.content }),
-      });
-      if (!response.ok) throw new Error("Could not save the document.");
-      await response.json();
+      const result = await updateDocumentMutation({ documentId: id, title, content: currentDraft.content });
+      if (documentMutationFailed(result)) throw new Error("Could not save the document.");
       setDrafts((current) => {
         const latest = current[id];
         if (!latest || latest.title !== currentDraft.title || latest.content !== currentDraft.content) return current;
@@ -192,31 +190,36 @@ export default function DocsPage() {
 
   async function createDocument() {
     setError(null);
-    const response = await fetch("/api/docs", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ title: "Untitled document", content: "", kind: "user" }),
-    });
-    if (!response.ok) {
-      setError("Could not create the document.");
-      return;
+    try {
+      const document = await createDocumentMutation({
+        operationKey: `user-doc:${crypto.randomUUID()}`,
+        title: "Untitled document",
+        content: "",
+        authorRole: "user",
+        kind: "user",
+      });
+      if (documentMutationFailed(document)) throw new Error("Could not create the document.");
+      const id = documentId(document);
+      if (!id) {
+        setError("Document created but no document id was returned.");
+        return;
+      }
+      setActiveGroup("mine");
+      selectDocument(id);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not create the document.");
     }
-    const document = (await response.json()) as { id?: string };
-    if (!document.id) {
-      setError("Document created but no document id was returned.");
-      return;
-    }
-    setActiveGroup("mine");
-    selectDocument(document.id);
   }
 
   async function deleteDocument() {
     if (!deleteTarget || deleting) return;
     setDeleting(true);
     setError(null);
-    const response = await fetch(`/api/docs/${deleteTarget.id}`, { method: "DELETE" });
-    if (!response.ok) {
-      setError("Could not delete the document.");
+    try {
+      const result = await removeDocumentMutation({ documentId: deleteTarget.id });
+      if (documentMutationFailed(result)) throw new Error("Could not delete the document.");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not delete the document.");
       setDeleting(false);
       return;
     }
@@ -238,14 +241,9 @@ export default function DocsPage() {
     const timer = window.setTimeout(() => {
       setSaving(true);
       setError(null);
-      void fetch(`/api/docs/${selectedDocumentId}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title, content: draftContent }),
-      })
-        .then(async (response) => {
-          if (!response.ok) throw new Error("Could not save the document.");
-          return response.json();
+      void updateDocumentMutation({ documentId: selectedDocumentId, title, content: draftContent })
+        .then((result) => {
+          if (documentMutationFailed(result)) throw new Error("Could not save the document.");
         })
         .then(() => {
           setDrafts((current) => {
@@ -262,7 +260,7 @@ export default function DocsPage() {
         .finally(() => setSaving(false));
     }, 650);
     return () => window.clearTimeout(timer);
-  }, [dirty, draftContent, draftTitle, selectedDocumentId]);
+  }, [dirty, draftContent, draftTitle, selectedDocumentId, updateDocumentMutation]);
 
   return (
     <main className="flex h-full min-w-0 flex-col bg-deck">
@@ -408,6 +406,19 @@ export default function DocsPage() {
       />
     </main>
   );
+}
+
+function documentMutationFailed(value: unknown): boolean {
+  if (!value || typeof value !== "object") return true;
+  const kind = (value as { kind?: unknown }).kind;
+  return kind === "conflict" || kind === "not_found";
+}
+
+function documentId(value: unknown): string | null {
+  if (!value || typeof value !== "object") return null;
+  const row = value as { _id?: unknown; id?: unknown };
+  if (typeof row._id === "string") return row._id;
+  return typeof row.id === "string" ? row.id : null;
 }
 
 function documentFromConvex(value: unknown): AgentDocument | null {

@@ -69,6 +69,7 @@ function runState(run: any, includePending = false): Record<string, unknown> {
     ...(includePending && run.pendingActionSelector !== undefined ? { pendingActionSelector: run.pendingActionSelector } : {}),
     ...(includePending && run.errorCode !== undefined ? { errorCode: run.errorCode } : {}),
     ...(includePending && run.errorMessage !== undefined ? { errorMessage: run.errorMessage } : {}),
+    ...(includePending && run.output !== undefined ? { output: run.output } : {}),
   };
 }
 
@@ -230,7 +231,7 @@ export const checkpointSessionTurn = mutation({
   returns: v.boolean(),
   handler: async (ctx, args) => {
     const run = await guardedRun(ctx, args);
-    if (!run || (args.expectedTurnId !== undefined && run.turnId !== args.expectedTurnId)) return false;
+    if (!run || (run.status !== "connecting" && run.status !== "running") || (args.expectedTurnId !== undefined && run.turnId !== args.expectedTurnId)) return false;
     await ctx.db.patch(args.runId, { sessionId: args.sessionId, turnId: args.turnId, status: "running", updatedAt: Date.now() });
     return true;
   },

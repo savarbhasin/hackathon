@@ -149,7 +149,7 @@ function composeTaskDetail(coreValue: unknown, activityValue: unknown, documentV
     sessionId: stringValue(core.sessionId) ?? stringValue(run?.sessionId),
     dependsOn: JSON.stringify(Array.isArray(core.dependsOn) ? core.dependsOn.map(idValue) : []),
     handoff: textValue(core.handoff),
-    output: textValue(core.output),
+    output: textValue(core.output) ?? textValue(run?.output),
     error: textValue(core.error) ?? textValue(run?.errorMessage),
     pendingActions: pendingActions.length > 0 ? JSON.stringify(pendingActions) : null,
     createdAt: dateText(core.createdAt),
