@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "next dev",
     "dev:mcp": "tsx watch --env-file=.env.local server/mcp.ts",
+    "mcp:prod": "tsx server/mcp.ts",
     "dev:worker": "tsx watch --env-file=.env.local worker/agent-runs.ts",
     "worker": "tsx --env-file=.env.local worker/agent-runs.ts",
     "worker:prod": "tsx worker/agent-runs.ts",

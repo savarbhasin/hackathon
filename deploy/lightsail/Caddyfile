@@ -1,4 +1,12 @@
 {$TRUEFORGE_DOMAIN} {
   encode zstd gzip
-  reverse_proxy trueforge:8790
+
+  @mission_control_mcp path /mcp /mcp/*
+  handle @mission_control_mcp {
+    reverse_proxy mcp:3100
+  }
+
+  handle {
+    reverse_proxy trueforge:8790
+  }
 }
