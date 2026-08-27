@@ -191,6 +191,15 @@ async function requireCheckpoint(ok: boolean, code: string): Promise<void> {
   if (!ok) throw new RecoverableRunError(code, `Durable checkpoint was rejected: ${code}`);
 }
 
+function completionTokenStatus(metrics: RecordValue | undefined): string {
+  const outputTokens = metrics?.totalOutputTokens;
+  const totalTokens = metrics?.totalTokens;
+  const tokens = typeof outputTokens === "number" && Number.isFinite(outputTokens)
+    ? outputTokens
+    : typeof totalTokens === "number" && Number.isFinite(totalTokens) ? totalTokens : 0;
+  return tokens > 0 ? `${Math.round(tokens).toLocaleString()} tokens` : "";
+}
+
 async function project(
   store: AgentRunStore,
   run: AgentRunRecord,
@@ -329,7 +338,7 @@ export async function processDurableOrchestratorRun(store: AgentRunStore, run: A
           workerLog("run.orchestrator_paused", { runId: run._id, attempt, turnId, actionCount: actions.length });
           return;
         }
-        await project(store, run, mergedText, tools, "completed", []);
+        await project(store, run, mergedText, tools, completionTokenStatus(metrics), []);
         if (!await store.complete({ runId: run._id, attempt, workerId: context.workerId, turnId, output: { content: mergedText, status: stateStatus, tools, ...(metrics ? { metrics } : {}) } })) return;
         return;
       }

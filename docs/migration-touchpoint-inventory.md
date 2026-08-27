@@ -109,7 +109,7 @@ Stateful things owned by this process (must move):
 ## TrueForge SDK integration
 
 - Client singleton `tf.ts`: `new TrueForge({ baseUrl: TRUEFORGE_BASE_URL ?? :8790, timeoutInSeconds: 900 })`.
-- Used APIs: sessions create/get/update/delete, `createTurnStream(...).withMetadata()` (engine 285–288 — no abort signal passed), agents CRUD (seeding/reconciliation 310–351), mcpServers/models/capabilities probes.
+- Used APIs: sessions create/get/update/delete, `createTurnStream(...).withMetadata()` (engine 285–288 — no abort signal passed), agents list plus explicit user CRUD (no startup seeding or reconciliation), mcpServers/models/capabilities probes.
 - Delta merging confirmed in both engine and orchestrator (`isEventDelta`/`mergeEventDelta`); camelCase dual-reads (`requiredActions ?? required_actions`).
 - Approval pauses: Task.pendingActions array `{type, threadId, calls:[{id, threadId, name, args}]}` (approve/answer source of truth); ChatMessage.pauseActions `{selector uuid, type, threadId, toolCallId, name, question, options, argsPreview}`.
 - **Cursor/sequence checkpointing does not exist**: `Task.lastSeq` is a local log sequence, not a provider cursor; a crashed pump loses the stream (recovery = manual retry or pause/resume path). Migration must add provider-seq checkpointing — see companion SDK research for `subscribeToTurn(afterSequenceNumber)`.

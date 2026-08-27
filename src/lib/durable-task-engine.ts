@@ -193,6 +193,30 @@ export async function durableDispatchTask(taskId: string, retry = false): Promis
   return delivery;
 }
 
+export async function durableFollowupTask(taskId: string, message: string, clientMessageId?: string): Promise<{ ok: boolean; reason?: string; runId?: string }> {
+  const raw = await convex().query(convexApi.missions.getTaskDispatchContext, { taskId });
+  const context = asContext(raw);
+  if (!context) return { ok: false, reason: "not_found" };
+  const key = clientMessageId?.trim() || operationHash(message);
+  const externalId = `specialist:${context.task._id}:followup:${key}`;
+  const admission = await convex().mutation(convexApi.missions.admitFollowup, {
+    taskId: context.task._id,
+    externalId,
+    operationKey: `admission:${externalId}`,
+    input: { agentName: context.task.role, followup: true, clientMessageId: clientMessageId ?? null, items: [{ type: "user.message", content: message }] },
+    owner: `web:${process.pid}`,
+  });
+  if (!admission || !["created", "idempotent"].includes(String(admission.kind))) return { ok: false, reason: admissionError(admission) };
+  const runId = id(admission.run);
+  if (!runId) return { ok: false, reason: "admission_missing_run" };
+  if (String(admission.kind) === "idempotent" && !["queued", "enqueued"].includes(String(admission.run?.status))) {
+    return { ok: true, runId };
+  }
+  const delivery = await enqueue(admission.run);
+  if (!delivery.ok) return { ...delivery, runId };
+  return { ok: true, runId };
+}
+
 export async function durableRetryTask(taskId: string): Promise<{ ok: boolean; reason?: string }> {
   const raw = await convex().query(convexApi.missions.getTaskDispatchContext, { taskId });
   const context = asContext(raw);

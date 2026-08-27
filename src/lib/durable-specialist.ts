@@ -11,14 +11,19 @@ function record(value: unknown): Value | null {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Value : null;
 }
 
-function launchInput(input: unknown): { agentName: string; items: Value[] } {
+function launchInput(input: unknown): { agentName: string; items: Value[]; followup: boolean; clientMessageId?: string } {
   const value = record(input);
   const agentName = typeof value?.agentName === "string" ? value.agentName : undefined;
   const items = Array.isArray(value?.items) ? value.items : Array.isArray(value?.input) ? value.input : undefined;
   if (!agentName || !items || !items.every((item) => record(item))) {
     throw new Error("Invalid durable specialist input: expected { agentName, items: TurnInputItem[] }");
   }
-  return { agentName, items: items as Value[] };
+  return {
+    agentName,
+    items: items as Value[],
+    followup: value?.followup === true,
+    ...(typeof value?.clientMessageId === "string" ? { clientMessageId: value.clientMessageId } : {}),
+  };
 }
 
 function resumeItems(value: unknown): Value[] {
@@ -147,9 +152,13 @@ export async function processDurableSpecialistRun(store: AgentRunStore, run: Age
   let fallbackText = "";
   let tools: string[] = [];
   const messages = new Map<string, Value>();
+  let followup = false;
+  let clientMessageId: string | undefined;
 
   try {
     const input = launchInput(run.input);
+    followup = input.followup;
+    clientMessageId = input.clientMessageId;
     const hasResume = run.resumeInput !== undefined && run.resumeInput !== null;
     if (!sessionId) {
       const { data: session } = await client.sessions.create({ agent: { name: input.agentName } });
@@ -199,7 +208,10 @@ export async function processDurableSpecialistRun(store: AgentRunStore, run: Age
       const newest = turns.data[0];
       if (newest && record(newest.state)?.status === "running") turnId = newest.id;
       else {
-        const { data: turn } = await client.sessions.createTurn(sessionId, { input: input.items as never, previousTurnId: "none" as never });
+        const { data: turn } = await client.sessions.createTurn(sessionId, {
+          input: input.items as never,
+          ...(!followup ? { previousTurnId: "none" as never } : {}),
+        });
         turnId = turn.id;
       }
       await checkpoint(await store.checkpointSessionTurn({ runId: run._id, attempt, workerId: context.workerId, sessionId, turnId }), "checkpoint_new_turn");
@@ -249,6 +261,14 @@ export async function processDurableSpecialistRun(store: AgentRunStore, run: Age
       tools = namesFromMessages(messages);
       if (status === "done") {
         const actions = pendingActions(run._id, Array.isArray(state.requiredActions) ? state.requiredActions : [], messages);
+        if (followup) {
+          await semantic(store, taskId, run._id, "chat.assistant", {
+            content,
+            tools,
+            status: actions.length > 0 ? "waiting" : "completed",
+            ...(clientMessageId ? { clientMessageId } : {}),
+          }, `chat-assistant:${clientMessageId ?? run._id}`);
+        }
         if (actions.length > 0) {
           const waitingStatus = actions.some((action) => action.type === "tool.approval_required") ? "waiting_for_approval" : "waiting_for_user";
           const selector = actions.length === 1 ? actions[0].selector : undefined;
@@ -287,6 +307,13 @@ export async function processDurableSpecialistRun(store: AgentRunStore, run: Age
     if (failure) {
       await store.releaseForRetry({ runId: run._id, attempt, workerId: context.workerId, errorCode: failure.code, errorMessage: failure.message });
       throw failure;
+    }
+    if (followup) {
+      await semantic(store, taskId, run._id, "chat.assistant", {
+        content: `The chat turn failed: ${message}`,
+        status: "failed",
+        ...(clientMessageId ? { clientMessageId } : {}),
+      }, `chat-assistant:${clientMessageId ?? run._id}`);
     }
     await store.finalizeSpecialist({ taskId, runId: run._id, status: "failed", sessionId, turnId, errorCode: "worker_permanent", errorMessage: message, operationKey: `worker:${run._id}:failed` });
   }

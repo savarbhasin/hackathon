@@ -45,8 +45,8 @@ lets commit what we have already done, start a new branch from here where we do 
 
 - [x] agents are supported by truefoundry, so instead of generating agent ourselves, i think we should shift to that , there we will be able to customize tools for agents as well so that ll be good.
 so we can have an agent called issue tracker agent which only has tools linear, jira, and github issues
-a coder agent which will have access to sandbox and also allowed to spwan subagents
-researcher agent only exa web search and (sandbox?) along with subagents thing
+a coder agent which will have access to sandbox and its configured tools
+researcher agent only exa web search and (sandbox?)
 like this, think of clubbing tools and building efficient agents
 - [x] prompts need to be heavily improved for orchestrator, it should know how to prompt a mission it is starting what kind of work to be delegated, and how output of work. like instead of getting handoff from one agent, it should i think create document if its extensive, so that document id will be preloaded in the successor agent started if it needs. or if the goal of the subagent was to create a script lets say content script it should just generate a doc and when we click on the agent card along with result we should be able to see hyperlink to doc
 given above we should also customize the docs page, on what are user created what are agent created, think how we can effectively show user, maybe not even a sidebar, something like finder?
@@ -80,9 +80,16 @@ given above we should also customize the docs page, on what are user created wha
 ## Later improvements
 
 - [x] Instruct agents to stop immediately after calling `mark_done`. They should not do anything else or write extra output after completion.
-- [ ] Add a chat view inside `/board/tasks/[id]` that subscribes to the existing agent session so the user can continue chatting with that model from the task page.
-- [ ] Keep the task activity log subscribed to the same agent session so it continues updating while the user chats with the agent.
+- [x] Add a chat view inside `/board/tasks/[id]` that subscribes to the existing agent session so the user can continue chatting with that model from the task page.
+- [x] Keep the task activity log subscribed to the same agent session so it continues updating while the user chats with the agent.
 above two should use the same subscription i believe
 
 - [x] When a successor is working, label its dependency clearly as its parent or predecessor.
 - [x] Make the Docs page open to a document library layout instead of opening a document directly. Use the attached reference for the layout direction, not as a literal UI copy.
+
+# improvements time again..
+- [x] you changed system prompts for agents, earlier our internal instructions werent shown to ui, only agaent specific were shown(maybe use regex to hide the internal systme instructions that we can define using a markdown heading or some). also make the system instructions markdown.
+- [x] enabled tools should be shown at the top, with clear border or something higlhighting that this company tools are being used
+- [x] subagents button disappered in agents disappeared
+- [x] move sandbox button and suagents button below model selector in a single row.
+- [x] imrpove model selector ui. use gemini openai icons to show models in readable formats.

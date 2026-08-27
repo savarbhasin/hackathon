@@ -1,4 +1,5 @@
 import { db } from "@/lib/db";
+import { appendDurableTaskEvent, durableFollowupTask } from "@/lib/durable-task-engine";
 import { durableRunsEnabled } from "@/lib/queue/env";
 import { handleDone } from "@/lib/engine";
 import { tf } from "@/lib/tf";
@@ -29,15 +30,13 @@ export async function POST(req: Request, ctx: { params: Promise<{ id: string }> 
   const body = await req.json().catch(() => null) as { message?: string; clientMessageId?: string } | null;
   const message = body?.message?.trim();
   const clientMessageId = body?.clientMessageId?.trim() || undefined;
-  if (durableRunsEnabled()) {
-    return Response.json({
-      error: "durable_followup_unsupported",
-      code: "durable_followup_unsupported",
-      mode: "durable",
-      message: "Durable task follow-up chat is not available yet. Use the task actions above; Phase 4 will add subscribed follow-up runs.",
-    }, { status: 409 });
-  }
   if (!message) return Response.json({ error: "message_required" }, { status: 400 });
+  if (durableRunsEnabled()) {
+    const accepted = await durableFollowupTask(id, message, clientMessageId);
+    if (!accepted.ok) return Response.json({ error: accepted.reason ?? "followup_rejected", mode: "durable" }, { status: 409 });
+    await appendDurableTaskEvent(id, "chat.user", { content: message, ...(clientMessageId ? { clientMessageId } : {}) }, `chat-user:${clientMessageId ?? accepted.runId}`);
+    return Response.json({ ok: true, mode: "durable", runId: accepted.runId }, { status: 202 });
+  }
   const task = await db.task.findUnique({ where: { id }, select: { sessionId: true, column: true } });
   if (!task) return Response.json({ error: "not_found" }, { status: 404 });
   if (!task.sessionId) return Response.json({ error: "no_session" }, { status: 409 });

@@ -493,6 +493,52 @@ export const admitSpecialist = mutation({
   handler: async (ctx, args) => await admitSpecialistInternal(ctx, args),
 });
 
+/** Admit a follow-up turn on the task's retained TrueForge session. */
+export const admitFollowup = mutation({
+  args: { taskId, externalId: v.string(), operationKey: v.optional(v.string()), input: v.any(), owner: v.optional(v.string()) }, returns: v.any(),
+  handler: async (ctx, args) => {
+    const task = await ctx.db.get(args.taskId);
+    if (!task) return result("not_found", { entity: "task" });
+    const existing = await ctx.db.query("agentRuns").withIndex("by_externalId", (q: any) => q.eq("externalId", args.externalId)).first()
+      ?? (args.operationKey ? await ctx.db.query("agentRuns").withIndex("by_operationKey", (q: any) => q.eq("operationKey", args.operationKey)).first() : null);
+    if (existing) {
+      if (existing.taskId !== args.taskId) return result("conflict", { reason: "operation_key_owned_by_other_task" });
+      return result("idempotent", { task, run: existing });
+    }
+    const previous = task.specialistRunId ? await ctx.db.get(task.specialistRunId) : null;
+    if (task.column !== "settled" || task.activeRunId !== undefined || !previous || previous.kind !== "specialist" || previous.sessionId === undefined) {
+      return result("invalid_state", { reason: "followup_requires_settled_task_session" });
+    }
+    const now = Date.now();
+    const created = await ctx.db.insert("agentRuns", {
+      externalId: args.externalId,
+      operationKey: args.operationKey,
+      kind: "specialist",
+      status: "queued",
+      taskId: args.taskId,
+      input: args.input,
+      sessionId: previous.sessionId,
+      attempt: 0,
+      createdAt: now,
+      updatedAt: now,
+    });
+    await ctx.db.patch(args.taskId, {
+      column: "working",
+      sessionId: previous.sessionId,
+      turnId: undefined,
+      pendingActions: undefined,
+      error: undefined,
+      output: undefined,
+      claimedBy: args.owner,
+      specialistRunId: created,
+      activeRunId: created,
+      updatedAt: now,
+    });
+    await insertTaskEvent(ctx, args.taskId, "activity.started", { title: "Follow-up started", runId: created }, `admission:${created}`);
+    return result("created", { task: await ctx.db.get(args.taskId), run: await ctx.db.get(created) });
+  },
+});
+
 export const resumeSpecialist = mutation({
   args: { taskId, runId, selector: v.string(), decisionType: v.union(v.literal("approve"), v.literal("answer")), resumeInput: v.any(), operationKey: v.optional(v.string()) }, returns: v.any(),
   handler: async (ctx, args) => {

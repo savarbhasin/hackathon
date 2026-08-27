@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "convex/react";
 import { api } from "../../convex/_generated/api";
 import { ChatMarkdown } from "@/components/chat-markdown";
@@ -105,9 +105,18 @@ const EXAMPLE_REQUESTS = [
 
 const ACTIVE_RUN_STATUSES = new Set(["queued", "enqueued", "connecting", "running"]);
 const WAITING_RUN_STATUSES = new Set(["waiting_for_user", "waiting_for_approval"]);
+const RETRYING_STATUS = "retrying";
 
 function isActiveStatus(status: RunStatus): boolean {
   return typeof status === "string" && (ACTIVE_RUN_STATUSES.has(status) || WAITING_RUN_STATUSES.has(status));
+}
+
+function isPendingMessageStatus(status?: string): boolean {
+  return typeof status === "string" && (ACTIVE_RUN_STATUSES.has(status) || status === RETRYING_STATUS);
+}
+
+function isWorkerProcessingStatus(status: RunStatus): boolean {
+  return typeof status === "string" && (ACTIVE_RUN_STATUSES.has(status) || status === RETRYING_STATUS);
 }
 
 function parseMessageTools(raw: unknown): string[] {
@@ -133,7 +142,7 @@ function messageFromConvex(message: ConvexMessage): Msg {
     content: message.content ?? "",
     tools: parseMessageTools(message.tools),
     status,
-    pending: role === "assistant" && typeof status === "string" && ACTIVE_RUN_STATUSES.has(status),
+    pending: role === "assistant" && isPendingMessageStatus(status),
     pause: parseMessagePause(message.pauseActions, id),
   };
 }
@@ -177,8 +186,18 @@ export default function Home() {
   const [deleting, setDeleting] = useState(false);
   const [, setPendingPlaceholders] = useState<Record<string, Msg>>({});
   const pendingPlaceholdersRef = useRef<Record<string, Msg>>({});
-  const bottomRef = useRef<HTMLDivElement>(null);
+  const scrollAreaRef = useRef<HTMLDivElement>(null);
+  const latestTurnRef = useRef<HTMLDivElement>(null);
+  const [scrollViewportHeight, setScrollViewportHeight] = useState(0);
+  const [pinLatestTurn, setPinLatestTurn] = useState(false);
+  const pinLatestTurnRef = useRef(false);
+  const atLatestRef = useRef(true);
+  const initialScrollConversationRef = useRef<string | null>(null);
+  const pendingLatestScrollRef = useRef(false);
+  const [showJumpToLatest, setShowJumpToLatest] = useState(false);
   const selectedRef = useRef<string | null>(null);
+  // Prevent late events from an in-flight request reclaiming a newly opened chat.
+  const selectionEpochRef = useRef(0);
 
   const summaryRows = useQuery(anyApi.conversations.listSummaries, { limit: 200 }) as unknown;
   const conversations = useMemo(
@@ -245,28 +264,151 @@ export default function Home() {
     return () => window.removeEventListener("keydown", closeOnEscape);
   }, [historyOpen]);
 
+  const latestUserIndex = useMemo(
+    () => messages.reduce((latest, message, index) => message.role === "user" ? index : latest, -1),
+    [messages],
+  );
+
   const selectedStatus = conversationId
     ? selectedRunState?.active?.status ?? selectedRunState?.latest?.status ?? runStatusByConversation[conversationId] ?? null
     : null;
-  const selectedBusy = isActiveStatus(selectedStatus) || Boolean(submitting[conversationId ?? "new"]);
+  const selectedBusy = isActiveStatus(selectedStatus) || Boolean(conversationId && submitting[conversationId]);
+  const selectedWorkerProcessing = isWorkerProcessingStatus(selectedStatus) || Boolean(conversationId && submitting[conversationId]);
   const loadingConversation = Boolean(conversationId && (selectedConversationState === undefined || selectedMessages === undefined));
   const loadingConversationId = loadingConversation ? conversationId : null;
 
-  const scrollDown = () => setTimeout(() => bottomRef.current?.scrollIntoView({ behavior: "smooth" }), 50);
+  const setAtLatest = (atLatest: boolean) => {
+    atLatestRef.current = atLatest;
+    setShowJumpToLatest(!atLatest);
+  };
+
+  const scrollToLatestTurn = (force = false, behavior: ScrollBehavior = "smooth") => {
+    window.setTimeout(() => {
+      const scrollArea = scrollAreaRef.current;
+      const latestTurn = latestTurnRef.current;
+      if (!scrollArea || !latestTurn || (!force && !atLatestRef.current)) return;
+      const scrollAreaTop = scrollArea.getBoundingClientRect().top;
+      const latestTurnTop = latestTurn.getBoundingClientRect().top;
+      scrollArea.scrollTo({
+        top: scrollArea.scrollTop + latestTurnTop - scrollAreaTop,
+        behavior,
+      });
+    }, 50);
+  };
+
+  const scrollToBottom = (force = false, behavior: ScrollBehavior = "smooth") => {
+    window.setTimeout(() => {
+      const scrollArea = scrollAreaRef.current;
+      if (!scrollArea || (!force && !atLatestRef.current)) return;
+      scrollArea.scrollTo({ top: scrollArea.scrollHeight, behavior });
+    }, 50);
+  };
+
+  const followLatest = () => {
+    if (pinLatestTurnRef.current) scrollToLatestTurn();
+    else scrollToBottom();
+  };
+
+  useLayoutEffect(() => {
+    const scrollArea = scrollAreaRef.current;
+    if (!scrollArea) return;
+    setScrollViewportHeight(scrollArea.clientHeight);
+    const onScroll = () => {
+      if (!pinLatestTurnRef.current) {
+        const distanceFromBottom = scrollArea.scrollHeight - scrollArea.clientHeight - scrollArea.scrollTop;
+        setAtLatest(distanceFromBottom <= 72);
+        return;
+      }
+      const latestTurn = latestTurnRef.current;
+      if (!latestTurn) {
+        setAtLatest(true);
+        return;
+      }
+      const scrollAreaTop = scrollArea.getBoundingClientRect().top;
+      const latestTurnTop = latestTurn.getBoundingClientRect().top;
+      setAtLatest(latestTurnTop <= scrollAreaTop + 72);
+    };
+    const resizeObserver = new ResizeObserver(() => setScrollViewportHeight(scrollArea.clientHeight));
+    resizeObserver.observe(scrollArea);
+    scrollArea.addEventListener("scroll", onScroll, { passive: true });
+    onScroll();
+    return () => {
+      resizeObserver.disconnect();
+      scrollArea.removeEventListener("scroll", onScroll);
+    };
+  }, []);
+
+  // Position the transcript before the browser paints. Freshly sent turns and
+  // conversations currently being worked on start at the latest turn; idle
+  // previous conversations open at the bottom.
+  useLayoutEffect(() => {
+    const openingConversation = Boolean(
+      conversationId
+      && !loadingConversation
+      && initialScrollConversationRef.current === conversationId,
+    );
+    if ((!openingConversation && !pendingLatestScrollRef.current) || latestUserIndex < 0) return;
+    const scrollArea = scrollAreaRef.current;
+    const latestTurn = latestTurnRef.current;
+    if (!scrollArea || !latestTurn) return;
+
+    const openAtLatestTurn = openingConversation && selectedWorkerProcessing;
+    if (openingConversation && pinLatestTurn !== openAtLatestTurn) {
+      pinLatestTurnRef.current = openAtLatestTurn;
+      setPinLatestTurn(openAtLatestTurn);
+      return;
+    }
+
+    if (openAtLatestTurn || !openingConversation) {
+      const scrollAreaTop = scrollArea.getBoundingClientRect().top;
+      const latestTurnTop = latestTurn.getBoundingClientRect().top;
+      scrollArea.scrollTo({
+        top: scrollArea.scrollTop + latestTurnTop - scrollAreaTop,
+        behavior: "auto",
+      });
+    } else {
+      scrollArea.scrollTo({ top: scrollArea.scrollHeight, behavior: "auto" });
+    }
+    initialScrollConversationRef.current = null;
+    pendingLatestScrollRef.current = false;
+    atLatestRef.current = true;
+    setShowJumpToLatest(false);
+  }, [conversationId, latestUserIndex, loadingConversation, pinLatestTurn, scrollViewportHeight, selectedWorkerProcessing]);
+
+  function jumpToLatest() {
+    atLatestRef.current = true;
+    setShowJumpToLatest(false);
+    if (pinLatestTurnRef.current) scrollToLatestTurn(true);
+    else scrollToBottom(true);
+  }
 
   function selectConversation(id: string) {
     if (id === conversationId) return;
+    const workerProcessing = isWorkerProcessingStatus(runStatusByConversation[id] ?? null) || Boolean(submitting[id]);
+    selectionEpochRef.current += 1;
     selectedRef.current = id;
+    initialScrollConversationRef.current = id;
+    pendingLatestScrollRef.current = false;
+    pinLatestTurnRef.current = workerProcessing;
+    setPinLatestTurn(workerProcessing);
     setConversationId(id);
     setMessages([]);
+    setShowJumpToLatest(false);
+    atLatestRef.current = true;
     setHistoryOpen(false);
-    scrollDown();
   }
 
   function newConversation() {
+    selectionEpochRef.current += 1;
     selectedRef.current = null;
+    initialScrollConversationRef.current = null;
+    pendingLatestScrollRef.current = false;
+    pinLatestTurnRef.current = false;
+    setPinLatestTurn(false);
     setConversationId(null);
     setMessages([]);
+    setShowJumpToLatest(false);
+    atLatestRef.current = true;
     setInput("");
     setAttachedDocumentIds([]);
     setHistoryOpen(false);
@@ -288,16 +430,26 @@ export default function Home() {
 
   async function runTurn(body: Record<string, unknown>, userBubble?: string): Promise<boolean> {
     const targetConversation = typeof body.conversationId === "string" ? body.conversationId : conversationId;
-    const targetKey = targetConversation ?? "new";
+    const key = typeof body.requestId === "string" ? body.requestId : requestKey();
+    // A new conversation has no ID until admission. Scope it to this request,
+    // rather than a shared "new" key that blocks every fresh composer.
+    const targetKey = targetConversation ?? key;
     const isResume = body.answers !== undefined;
     const currentStatus = targetConversation ? runStatusByConversation[targetConversation] ?? null : null;
     if (submitting[targetKey] || (targetConversation && isActiveStatus(currentStatus) && !(isResume && WAITING_RUN_STATUSES.has(String(currentStatus))))) return false;
-    const key = typeof body.requestId === "string" ? body.requestId : requestKey();
     const requestBody = { ...body, requestId: key };
     const requestSelection = selectedRef.current;
+    const requestSelectionEpoch = selectionEpochRef.current;
+    let streamConversationId = targetConversation;
+    const ownsRequestSelection = () => selectionEpochRef.current === requestSelectionEpoch
+      && (selectedRef.current === requestSelection
+        || (requestSelection === null && streamConversationId !== undefined && selectedRef.current === streamConversationId));
     const placeholderId = `pending:${key}`;
     setSubmitting((current) => ({ ...current, [targetKey]: true }));
     if (userBubble !== undefined && requestSelection === selectedRef.current) {
+      pendingLatestScrollRef.current = true;
+      pinLatestTurnRef.current = true;
+      setPinLatestTurn(true);
       setMessages((current) => [...current, { role: "user", content: userBubble }]);
     }
     if (requestSelection === selectedRef.current) {
@@ -305,12 +457,13 @@ export default function Home() {
       setPlaceholderMap((current) => ({ ...current, [targetKey]: placeholder }));
       setMessages((current) => [...current, placeholder]);
     }
-    scrollDown();
+    // A newly submitted turn is the user's latest context, so bring it into
+    // view even if the previous turn was being inspected above.
+    if (userBubble === undefined) followLatest();
 
     let completed = false;
     let placeholderConversationKey = targetKey;
     let submissionKey = targetKey;
-    let streamConversationId = targetConversation;
     try {
       let response: Response | undefined;
       let lastError: unknown;
@@ -346,11 +499,11 @@ export default function Home() {
             submissionKey = returnedConversationId;
           }
           setPlaceholderMap((current) => {
-            const next = { ...current, [returnedConversationId]: { id: placeholderId, runId: returnedRunId, role: "assistant", content: "", tools: [], pending: true, status: admission.status ?? "queued" } };
+            const next = { ...current, [returnedConversationId]: { id: placeholderId, runId: returnedRunId, role: "assistant" as const, content: "", tools: [], pending: true, status: admission.status ?? "queued" } };
             if (targetKey !== returnedConversationId) delete next[targetKey];
             return next;
           });
-          if (selectedRef.current === requestSelection) {
+          if (ownsRequestSelection()) {
             selectedRef.current = returnedConversationId;
             setConversationId(returnedConversationId);
           }
@@ -375,18 +528,15 @@ export default function Home() {
             if (event.kind === "done" && event.name !== "error") completed = true;
             if (event.kind === "error") completed = false;
             if (event.kind === "conversation" && event.conversationId) streamConversationId = event.conversationId;
-            const ownsSelection = selectedRef.current === requestSelection
-              || (requestSelection === null && selectedRef.current === null && event.kind === "conversation")
-              || (requestSelection === null && streamConversationId !== undefined && selectedRef.current === streamConversationId);
-            if (ownsSelection) handleEvent(event);
+            if (ownsRequestSelection()) handleEvent(event);
           }
         }
       }
     } catch (error) {
       completed = false;
-      if (selectedRef.current === requestSelection) {
+      if (ownsRequestSelection()) {
         setMessages((current) => current.map((message) => message.id === placeholderId
-          ? { ...message, pending: false, content: `Connection error: ${String(error).slice(0, 200)}` }
+          ? { ...message, pending: false, status: "failed", content: `Connection error: ${String(error).slice(0, 200)}` }
           : message));
       }
     } finally {
@@ -396,7 +546,7 @@ export default function Home() {
         if (completed) delete next[placeholderConversationKey];
         return next;
       });
-      scrollDown();
+      followLatest();
     }
     return completed;
   }
@@ -423,7 +573,7 @@ export default function Home() {
       copy[index] = last;
       return copy;
     });
-    scrollDown();
+    followLatest();
   }
 
   async function send() {
@@ -495,19 +645,72 @@ export default function Home() {
           <svg viewBox="0 0 18 18" className="h-4 w-4" aria-hidden="true"><path d="M3.5 4.5h11v8H8l-3 2v-2H3.5z" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" /><path d="M6.5 7h5M6.5 9.5h3.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" /></svg>
         </button>
 
-        <div className="scrollbar-none min-h-0 flex-1 overflow-y-auto px-4 py-6 sm:px-8">
-          {loadingConversation ? (
-            <p className="mx-auto mt-[20vh] max-w-2xl font-mono text-xs text-ink-faint">Loading command history...</p>
-          ) : messages.length === 0 ? (
-            <EmptyState onPick={setInput} />
-          ) : null}
+        <div className="relative min-h-0 flex-1">
+          <div ref={scrollAreaRef} className="scrollbar-none h-full overflow-y-auto px-4 py-6 sm:px-8">
+            {loadingConversation ? (
+              <ChatLoadingSkeleton />
+            ) : messages.length === 0 ? (
+              <EmptyState onPick={setInput} />
+            ) : null}
 
-          <div className="mx-auto max-w-3xl space-y-7">
-            {messages.map((message, index) => (
-              <Message key={message.id ?? index} message={message} busy={Boolean(submitting[conversationId ?? "new"])} onAnswer={(a) => void answer(a)} />
-            ))}
-            <div ref={bottomRef} />
+            <div className="mx-auto max-w-3xl space-y-7">
+              {messages.slice(0, Math.max(latestUserIndex, 0)).map((message, index) => (
+                <Message
+                  key={message.id ?? index}
+                  message={message}
+                  busy={Boolean(conversationId && submitting[conversationId])}
+                  onAnswer={(a) => void answer(a)}
+                />
+              ))}
+              {latestUserIndex >= 0 ? (
+                <div
+                  className="space-y-7"
+                  style={pinLatestTurn ? { minHeight: scrollViewportHeight } : undefined}
+                >
+                  {messages.slice(latestUserIndex).map((message, turnIndex) => {
+                    const index = latestUserIndex + turnIndex;
+                    const rendered = (
+                      <Message
+                        key={message.id ?? index}
+                        message={message}
+                        busy={Boolean(conversationId && submitting[conversationId])}
+                        onAnswer={(a) => void answer(a)}
+                      />
+                    );
+                    if (turnIndex !== 0) return rendered;
+                    return (
+                      <div
+                        key={`pinned-${message.id ?? index}`}
+                        ref={latestTurnRef}
+                        className="-mx-2 px-2 py-3 sm:-mx-4 sm:px-4"
+                        aria-label="Latest message"
+                      >
+                        {rendered}
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : messages.map((message, index) => (
+                <Message
+                  key={message.id ?? index}
+                  message={message}
+                  busy={Boolean(conversationId && submitting[conversationId])}
+                  onAnswer={(a) => void answer(a)}
+                />
+              ))}
+            </div>
           </div>
+          {showJumpToLatest && (
+            <div className="pointer-events-none absolute inset-x-4 bottom-4 z-20 flex justify-center sm:inset-x-8">
+              <button
+                type="button"
+                onClick={jumpToLatest}
+                className="pointer-events-auto shrink-0 rounded-full border border-line-strong bg-panel-hi px-4 py-2 text-xs font-medium text-ink shadow-lg shadow-black/20 transition-colors hover:border-signal/60 hover:text-signal focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-signal/50"
+              >
+                Jump to Latest
+              </button>
+            </div>
+          )}
         </div>
 
         <footer className="bg-deck/90 p-3 backdrop-blur sm:p-4">
@@ -561,6 +764,7 @@ export default function Home() {
           runStatusByConversation={runStatusByConversation}
           submitting={submitting}
           loadingConversationId={loadingConversationId}
+          loadingConversations={summaryRows === undefined}
           onNew={newConversation}
           onSelect={selectConversation}
           onDelete={setDeleteTarget}
@@ -585,6 +789,7 @@ export default function Home() {
               runStatusByConversation={runStatusByConversation}
               submitting={submitting}
               loadingConversationId={loadingConversationId}
+              loadingConversations={summaryRows === undefined}
               onClose={() => setHistoryOpen(false)}
               onNew={newConversation}
               onSelect={selectConversation}
@@ -613,6 +818,7 @@ function SideContent({
   runStatusByConversation,
   submitting,
   loadingConversationId,
+  loadingConversations,
   onNew,
   onSelect,
   onDelete,
@@ -623,6 +829,7 @@ function SideContent({
   runStatusByConversation: Record<string, RunStatus>;
   submitting: Record<string, boolean>;
   loadingConversationId: string | null;
+  loadingConversations: boolean;
   onNew: () => void;
   onSelect: (id: string) => void;
   onDelete: (conversation: ConversationSummary) => void;
@@ -630,7 +837,7 @@ function SideContent({
 }) {
   return (
     <>
-      <div className="flex h-16 shrink-0 items-center gap-1 border-b border-line px-3">
+      <div className="flex h-16 shrink-0 items-center gap-1 px-3">
         <span className="px-2 font-mono text-[9px] font-semibold uppercase tracking-[0.14em] text-ink-faint">Conversations</span>
         <button
           type="button"
@@ -659,11 +866,34 @@ function SideContent({
           runStatusByConversation={runStatusByConversation}
           submitting={submitting}
           loadingConversationId={loadingConversationId}
+          loadingConversations={loadingConversations}
           onSelect={onSelect}
           onDelete={onDelete}
         />
       </div>
     </>
+  );
+}
+
+function ConversationListSkeleton() {
+  const widths = ["w-[82%]", "w-[64%]", "w-[74%]"];
+  return (
+    <div className="space-y-3" role="status" aria-label="Loading conversations">
+      <span className="sr-only">Loading conversations…</span>
+      <div className="flex items-center gap-2 px-2 py-1.5">
+        <div className="h-2 w-2 rounded-full shimmer" />
+        <div className="h-2 w-16 rounded-full shimmer" />
+        <div className="ml-auto h-2 w-3 rounded-full shimmer" />
+      </div>
+      <div className="space-y-1">
+        {widths.map((width) => (
+          <div key={width} className="flex items-center gap-2 rounded-md px-3 py-2.5">
+            <div className="h-3 w-3 shrink-0 rounded-sm shimmer" />
+            <div className={`h-3 ${width} rounded shimmer`} />
+          </div>
+        ))}
+      </div>
+    </div>
   );
 }
 
@@ -673,6 +903,7 @@ function ConversationList({
   runStatusByConversation,
   submitting,
   loadingConversationId,
+  loadingConversations,
   onSelect,
   onDelete,
 }: {
@@ -681,9 +912,11 @@ function ConversationList({
   runStatusByConversation: Record<string, RunStatus>;
   submitting: Record<string, boolean>;
   loadingConversationId: string | null;
+  loadingConversations: boolean;
   onSelect: (id: string) => void;
   onDelete: (conversation: ConversationSummary) => void;
 }) {
+  if (loadingConversations) return <ConversationListSkeleton />;
   if (conversations.length === 0) {
     return <p className="px-2 py-4 text-xs leading-relaxed text-ink-faint">Past commands will appear here.</p>;
   }
@@ -696,32 +929,52 @@ function ConversationList({
         <span className="ml-auto tabular-nums">{group.items.length}</span>
       </summary>
       <div className="mt-1 space-y-1">
-        {group.items.map((conversation) => (
-          <div
-            key={conversation.id}
-            className={`group/chat-row flex items-center gap-1 rounded-md transition-colors ${
-              activeId === conversation.id ? "bg-panel-hi text-ink" : "text-ink-soft hover:bg-panel-hi hover:text-ink"
-            }`}
-          >
-            <button
-              onClick={() => onSelect(conversation.id)}
-              disabled={loadingConversationId === conversation.id}
-              className="min-w-0 flex-1 px-3 py-2.5 text-left focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-line-strong disabled:opacity-50"
+        {group.items.map((conversation) => {
+          const status = runStatusByConversation[conversation.id] ?? conversation.runStatus;
+          const workerProcessing = Boolean(submitting[conversation.id])
+            || (typeof status === "string" && ACTIVE_RUN_STATUSES.has(status));
+
+          return (
+            <div
+              key={conversation.id}
+              className={`group/chat-row flex items-center gap-1 rounded-md transition-colors ${
+                activeId === conversation.id ? "bg-panel-hi text-ink" : "text-ink-soft hover:bg-panel-hi hover:text-ink"
+              }`}
             >
-              <span className="line-clamp-2 text-xs font-medium leading-snug">{conversation.title}</span>
-            </button>
-            <button
-              type="button"
-              disabled={Boolean(submitting[conversation.id]) || isActiveStatus(runStatusByConversation[conversation.id] ?? conversation.runStatus)}
-              onClick={() => onDelete(conversation)}
-              className="mr-1 flex h-7 w-7 shrink-0 items-center justify-center rounded text-ink-faint opacity-0 transition-colors hover:bg-signal/10 hover:text-signal focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-line-strong disabled:opacity-40 group-hover/chat-row:opacity-100 group-focus-within/chat-row:opacity-100"
-              aria-label={`Delete ${conversation.title}`}
-              title="Delete conversation"
-            >
-              <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" aria-hidden="true"><path d="M3.5 4.5h9M6.2 4.5V3.2h3.6v1.3m-5.1 0 .55 8h5.7l.55-8M7 7v3.2m2-3.2v3.2" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" /></svg>
-            </button>
-          </div>
-        ))}
+              <button
+                onClick={() => onSelect(conversation.id)}
+                disabled={loadingConversationId === conversation.id}
+                className="min-w-0 flex-1 px-3 py-2.5 text-left focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-line-strong disabled:opacity-50"
+              >
+                <span className="line-clamp-2 text-xs font-medium leading-snug">{conversation.title}</span>
+              </button>
+              {workerProcessing ? (
+                <span
+                  className="mr-2 flex h-5 w-5 shrink-0 items-center justify-center text-signal"
+                  role="status"
+                  aria-label={`${conversation.title} is being processed`}
+                  title="Worker is processing this chat"
+                >
+                  <svg viewBox="0 0 20 20" className="h-4 w-4 animate-spin motion-reduce:animate-none" aria-hidden="true">
+                    <circle cx="10" cy="10" r="7" fill="none" stroke="currentColor" strokeWidth="2" opacity="0.25" />
+                    <path d="M10 3a7 7 0 0 1 7 7" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+                  </svg>
+                </span>
+              ) : (
+                <button
+                  type="button"
+                  disabled={isActiveStatus(status)}
+                  onClick={() => onDelete(conversation)}
+                  className="mr-1 flex h-7 w-7 shrink-0 items-center justify-center rounded text-ink-faint opacity-0 transition-colors hover:bg-signal/10 hover:text-signal focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-line-strong group-hover/chat-row:opacity-100 group-focus-within/chat-row:opacity-100"
+                  aria-label={`Delete ${conversation.title}`}
+                  title="Delete conversation"
+                >
+                  <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" aria-hidden="true"><path d="M3.5 4.5h9M6.2 4.5V3.2h3.6v1.3m-5.1 0 .55 8h5.7l.55-8M7 7v3.2m2-3.2v3.2" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" /></svg>
+                </button>
+              )}
+            </div>
+          );
+        })}
       </div>
     </details>
   ));
@@ -768,6 +1021,39 @@ function heroCopyForHour(hour: number): HeroCopy {
   return { eyebrow: "Late shift", heading: "Up for a late-night jam session?" };
 }
 
+function ChatLoadingSkeleton() {
+  return (
+    <div
+      className="mx-auto max-w-3xl space-y-8"
+      role="status"
+      aria-label="Loading conversation"
+    >
+      <span className="sr-only">Loading conversation…</span>
+      <div className="flex justify-end">
+        <div className="w-[min(70%,24rem)] space-y-2">
+          <div className="ml-auto h-2 w-10 rounded-full shimmer" />
+          <div className="ml-auto h-3 w-[78%] rounded shimmer" />
+          <div className="ml-auto h-3 w-[56%] rounded shimmer" />
+        </div>
+      </div>
+      <div className="relative space-y-3 pl-6 before:absolute before:bottom-0 before:left-[3px] before:top-0 before:w-px before:bg-line">
+        <span aria-hidden="true" className="absolute left-0 top-1.5 h-[7px] w-[7px] rounded-full shimmer" />
+        <div className="h-2 w-20 rounded-full shimmer" />
+        <div className="space-y-2 pt-1">
+          <div className="h-3 w-[92%] rounded shimmer" />
+          <div className="h-3 w-[84%] rounded shimmer" />
+          <div className="h-3 w-[61%] rounded shimmer" />
+        </div>
+      </div>
+      <div className="relative space-y-3 pl-6 before:absolute before:bottom-0 before:left-[3px] before:top-0 before:w-px before:bg-line">
+        <span aria-hidden="true" className="absolute left-0 top-1.5 h-[7px] w-[7px] rounded-full shimmer" />
+        <div className="h-2 w-24 rounded-full shimmer" />
+        <div className="h-3 w-[73%] rounded shimmer" />
+      </div>
+    </div>
+  );
+}
+
 function EmptyState({ onPick }: { onPick: (value: string) => void }) {
   const [hero, setHero] = useState<HeroCopy>(DEFAULT_HERO);
 
@@ -808,6 +1094,8 @@ function EmptyState({ onPick }: { onPick: (value: string) => void }) {
 }
 
 function Message({ message, busy, onAnswer }: { message: Msg; busy: boolean; onAnswer?: (answers: AnswerPayload[]) => void }) {
+  const completion = completionStatus(message.status);
+  const failed = Boolean(completion?.failed);
   if (message.role === "user") {
     return (
       <div className="flex justify-end">
@@ -821,21 +1109,27 @@ function Message({ message, busy, onAnswer }: { message: Msg; busy: boolean; onA
 
   return (
     <div className="relative pl-6 before:absolute before:bottom-0 before:left-[3px] before:top-0 before:w-px before:bg-line">
-      <span aria-hidden="true" className={`absolute left-0 top-1.5 h-[7px] w-[7px] rounded-full ${message.pending ? "bg-signal led-live" : message.pause?.length ? "border border-state-blocked bg-state-blocked/30" : "border border-line bg-deck"}`} />
-      <p className="mb-2 flex items-center gap-2 font-mono text-[8px] uppercase tracking-[0.2em] text-state-working">
-        Squad Lead
-        {message.pending && <span className="text-ink-faint">working</span>}
+      <span aria-hidden="true" className={`absolute left-0 top-1.5 h-[7px] w-[7px] rounded-full ${failed ? "bg-error" : message.pending ? "bg-signal led-live" : message.pause?.length ? "border border-state-blocked bg-state-blocked/30" : "border border-line bg-deck"}`} />
+      <p className={`mb-2 flex items-center gap-2 font-mono text-[8px] uppercase tracking-[0.2em] ${failed ? "text-error" : "text-state-working"}`}>
+        {failed ? "Error" : "Squad Lead"}
+        {message.pending && <span className="tool-activity-live text-ink-faint">{message.status === RETRYING_STATUS ? "Retrying" : "Thinking"}</span>}
         {!message.pending && message.pause?.length ? <span className="text-state-blocked">paused, input needed</span> : null}
       </p>
       {(message.tools?.length ?? 0) > 0 && (
         <ToolActivity tools={message.tools!} active={Boolean(message.pending)} />
       )}
-      {message.content ? <ChatMarkdown>{message.content}</ChatMarkdown> : !message.pause?.length && <span className={`inline-block ${message.pending ? "h-4 w-28 animate-pulse rounded bg-panel-hi" : ""}`} />}
+      {failed ? (
+        <div role="alert" className="mt-2 rounded-md border border-error/60 bg-error/10 px-3 py-2.5 text-sm leading-relaxed text-error">
+          {message.content || "The response could not be completed."}
+        </div>
+      ) : message.content ? <ChatMarkdown>{message.content}</ChatMarkdown> : null}
       {!message.pending && (message.pause?.length ?? 0) > 0 && onAnswer && (
         <PauseBlock actions={message.pause!} busy={busy} onAnswer={onAnswer} />
       )}
-      {message.status && !message.pending && (
-        <div className="mt-2 font-mono text-[9px] uppercase tracking-[0.16em] text-ink-faint">{message.status}</div>
+      {completion && !completion.failed && !message.pending && (
+        <div className="mt-2 font-mono text-[9px] uppercase tracking-[0.16em] text-ink-faint">
+          {completion.text}
+        </div>
       )}
     </div>
   );
@@ -872,6 +1166,19 @@ function toolActivityLabel(tool: string, active: boolean): string {
   if (known) return active ? known.active : known.done;
   const readable = base.replace(/[_-]+/g, " ").replace(/\s+/g, " ").trim();
   return `${active ? "Using" : "Used"} ${readable || "a tool"}`;
+}
+
+function completionStatus(status?: string): { text: string; failed: boolean } | null {
+  if (!status) return null;
+  const normalized = status.trim().toLowerCase();
+  if (normalized === "failed" || normalized === "error" || normalized.includes("failed")) {
+    return { text: "failed", failed: true };
+  }
+  if (["completed", "done", "unknown"].includes(normalized)) return null;
+  const tokenMatch = status.match(/(?:^|·)\s*([\d,]+)\s+tokens\b/i);
+  if (tokenMatch) return { text: `${tokenMatch[1]} tokens`, failed: false };
+  const outputMatch = status.match(/\bout\s+([\d,]+)\b/i);
+  return outputMatch ? { text: `${outputMatch[1]} tokens`, failed: false } : null;
 }
 
 function PauseBlock({

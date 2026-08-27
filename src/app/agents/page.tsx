@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
@@ -189,6 +189,9 @@ export default function AgentsPage() {
   const visibleConnectors = connectorTerm
     ? connectors.filter((connector) => connectorLabel(connector.name).toLowerCase().includes(connectorTerm))
     : connectors;
+  const orderedConnectors = [...visibleConnectors].sort((left, right) =>
+    connectorPriority(left, draft) - connectorPriority(right, draft)
+  );
 
   return (
     <main className="flex h-full min-w-0 flex-col bg-deck">
@@ -250,11 +253,11 @@ export default function AgentsPage() {
               </div>
 
               {draft.id ? (
-                <div className="mb-7 max-w-2xl">
+                <div className="mb-7">
                   <FieldLabel label="Description">
-                    <input value={draft.description} onChange={(event) => updateDraft({ description: event.target.value })}
-                      maxLength={240} placeholder="One sentence the Squad Lead can use when choosing an agent."
-                      className={inputClass(false)} />
+                    <textarea value={draft.description} onChange={(event) => updateDraft({ description: event.target.value })}
+                      rows={3} placeholder="Describe what this agent is best at and when the Squad Lead should use it."
+                      className={`${inputClass(false)} min-h-[5.5rem] resize-y leading-relaxed`} />
                   </FieldLabel>
                   <p className="mt-2 text-[10px] leading-relaxed text-ink-faint">
                     Used by the Squad Lead when choosing a specialist.
@@ -274,36 +277,26 @@ export default function AgentsPage() {
                     </FieldLabel>
                   </div>
                   <FieldLabel label="Description" className="mt-5">
-                    <input value={draft.description} onChange={(event) => updateDraft({ description: event.target.value })}
-                      maxLength={240} placeholder="One sentence the Squad Lead can use when choosing an agent."
-                      className={inputClass(false)} />
+                    <textarea value={draft.description} onChange={(event) => updateDraft({ description: event.target.value })}
+                      rows={3} placeholder="Describe what this agent is best at and when the Squad Lead should use it."
+                      className={`${inputClass(false)} min-h-[5.5rem] resize-y leading-relaxed`} />
                   </FieldLabel>
                 </EditorSection>
               )}
 
               <EditorSection eyebrow="Runtime" title="Model and agent capabilities"
-                description="Use the lightest model that can do the work. Enable sandbox and subagents only when the assignment needs them.">
-                <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(280px,0.8fr)]">
-                  <FieldLabel label="Model">
-                    <div className="relative">
-                      <select value={draft.model} onChange={(event) => updateDraft({ model: event.target.value })}
-                        className={`${inputClass(false)} appearance-none pr-10`}>
-                        {catalog.models.length === 0 && <option value={draft.model}>{draft.model || "No models configured"}</option>}
-                        {catalog.models.map((model) => <option key={model.name} value={model.name}>{model.name}</option>)}
-                      </select>
-                      <svg viewBox="0 0 12 12" aria-hidden="true" className="pointer-events-none absolute right-3 top-1/2 h-3 w-3 -translate-y-1/2 text-ink-faint">
-                        <path d="m2.5 4.25 3.5 3.5 3.5-3.5" fill="none" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round" />
-                      </svg>
-                    </div>
-                  </FieldLabel>
+                description="Use the lightest model that can do the work. Enable sandbox or subagents only when the assignment needs them.">
+                <div className="space-y-5">
+                  <ModelSelect models={catalog.models} value={draft.model}
+                    onChange={(model) => updateDraft({ model })} />
                   <div>
                     <p className="mb-2 font-mono text-[9px] uppercase tracking-[0.13em] text-ink-faint">Capabilities</p>
-                    <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-1 xl:grid-cols-2">
+                    <div className="grid gap-2 sm:grid-cols-2">
                       <CapabilityToggle label="Sandbox"
                         description={catalog.capabilities.sandbox ? "Files, commands, and code execution" : "Unavailable in TrueForge"}
                         checked={draft.sandboxEnabled} disabled={!catalog.capabilities.sandbox}
                         onChange={(checked) => updateDraft({ sandboxEnabled: checked })} />
-                      <CapabilityToggle label="Dynamic subagents" description="Can split work into parallel specialist threads"
+                      <CapabilityToggle label="Subagents" description="Can split work into parallel specialist threads"
                         checked={draft.subagentsEnabled} onChange={(checked) => updateDraft({ subagentsEnabled: checked })} />
                     </div>
                   </div>
@@ -319,7 +312,7 @@ export default function AgentsPage() {
                 </label>
                 <div className="h-[26rem] overflow-y-auto overscroll-contain pr-1">
                   <div className="space-y-3">
-                    {visibleConnectors.map((connector) => {
+                    {orderedConnectors.map((connector) => {
                       const server = draft.mcpServers.find((item) => item.name === connector.name);
                       const required = connector.name === CORE_CONNECTOR;
                       return <ConnectorEditor key={connector.name} connector={connector} server={server}
@@ -328,10 +321,10 @@ export default function AgentsPage() {
                         onAllToolsToggle={(checked) => setAllTools(connector, checked)}
                         onApprovalToggle={(tool, checked) => setToolApproval(connector, tool, checked)} />;
                     })}
-                    {visibleConnectors.length === 0 && <p className="rounded-md border border-line px-4 py-5 text-xs leading-relaxed text-ink-faint">
+                    {orderedConnectors.length === 0 && <p className="rounded-md border border-line px-4 py-5 text-xs leading-relaxed text-ink-faint">
                       No connectors match {connectorSearch}.
                     </p>}
-                    {connectors.length === 1 && visibleConnectors.length > 0 && <p className="rounded-md border border-dashed border-line px-4 py-5 text-xs leading-relaxed text-ink-faint">
+                    {connectors.length === 1 && orderedConnectors.length > 0 && <p className="rounded-md border border-dashed border-line px-4 py-5 text-xs leading-relaxed text-ink-faint">
                       No external connectors are configured. Add one in TrueForge to make it available here.
                     </p>}
                   </div>
@@ -340,9 +333,17 @@ export default function AgentsPage() {
 
               <EditorSection eyebrow="Behavior" title="System instructions"
                 description="Define the scope, working method, tool rules, and what a finished result must contain.">
+                <div className="mb-2 flex items-center justify-between gap-3">
+                  <p className="text-[10px] leading-relaxed text-ink-faint">Markdown is supported. Use headings and bullets to make the workflow easy to scan.</p>
+                  <span className="rounded border border-line px-2 py-1 font-mono text-[8px] uppercase tracking-[0.1em] text-ink-faint">Markdown</span>
+                </div>
                 <textarea value={draft.instructions} onChange={(event) => updateDraft({ instructions: event.target.value })}
-                  rows={16} placeholder="Give this agent a narrow job, a concrete workflow, and a clear completion rule."
+                  rows={16} placeholder="## Role\n\nDescribe this agent's scope, workflow, and completion rule."
                   className="scrollbar-none min-h-[320px] w-full resize-y rounded-md border border-line-strong bg-panel p-4 font-mono text-[12px] leading-6 text-ink outline-none placeholder:text-ink-faint focus:border-signal" />
+                {draft.instructions.trim() && <div className="markdown mt-4 rounded-md border border-line bg-panel/60 p-4 text-xs">
+                  <p className="mb-3 font-mono text-[8px] uppercase tracking-[0.14em] text-ink-faint">Preview</p>
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{draft.instructions}</ReactMarkdown>
+                </div>}
                 <p className="mt-2 text-right font-mono text-[8px] uppercase tracking-[0.12em] text-ink-faint">
                   {draft.instructions.trim().length} characters / 40 minimum
                 </p>
@@ -366,16 +367,150 @@ export default function AgentsPage() {
   );
 }
 
+function ModelSelect({ models, value, onChange }: {
+  models: ModelOption[]; value: string; onChange: (value: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const selected = models.find((model) => model.name === value) ?? { name: value };
+  const providers = unique(models.map((model) => modelProvider(model.name))).sort((left, right) => {
+    const order = ["OpenAI", "Gemini", "Other"];
+    return order.indexOf(left) - order.indexOf(right);
+  });
+  const [activeProvider, setActiveProvider] = useState(() => modelProvider(value));
+  const popoverRef = useRef<HTMLDivElement>(null);
+  const normalizedQuery = query.trim().toLowerCase();
+  const visibleModels = models.filter((model) => modelProvider(model.name) === activeProvider
+    && (!normalizedQuery || `${modelDisplayName(model.name)} ${modelDescription(model.name)}`.toLowerCase().includes(normalizedQuery)));
+
+  useEffect(() => {
+    if (!open) return;
+    function closeOnOutsideClick(event: MouseEvent) {
+      if (!popoverRef.current?.contains(event.target as Node)) setOpen(false);
+    }
+    function closeOnEscape(event: KeyboardEvent) {
+      if (event.key === "Escape") setOpen(false);
+    }
+    document.addEventListener("mousedown", closeOnOutsideClick);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("mousedown", closeOnOutsideClick);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [open]);
+
+  function toggleOpen() {
+    if (!open) {
+      setActiveProvider(modelProvider(selected.name));
+      setQuery("");
+    }
+    setOpen(!open);
+  }
+
+  return <div>
+    <p className="mb-2 font-mono text-[9px] uppercase tracking-[0.14em] text-ink-faint">Model</p>
+    <div ref={popoverRef} className="relative">
+      <button type="button" aria-haspopup="listbox" aria-expanded={open} onClick={toggleOpen}
+        className="flex w-full items-center gap-3 rounded-md border border-line-strong bg-panel px-3 py-2.5 text-left text-sm text-ink outline-none transition-colors hover:border-signal focus:border-signal">
+        <ModelBadge name={selected.name} />
+        <span className="min-w-0 flex-1">
+          <span className="block truncate text-xs font-semibold">{selected.name ? modelDisplayName(selected.name) : "No models configured"}</span>
+          <span className="mt-0.5 block truncate text-[10px] text-ink-faint">{selected.name ? modelDescription(selected.name) : "Add a model in TrueForge to continue."}</span>
+        </span>
+        <svg viewBox="0 0 12 12" aria-hidden="true" className={`h-3 w-3 shrink-0 text-ink-faint transition-transform ${open ? "rotate-180" : ""}`}>
+          <path d="m2.5 4.25 3.5 3.5 3.5-3.5" fill="none" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      </button>
+
+      {open && <div className="absolute inset-x-0 top-full z-30 mt-1 overflow-hidden rounded-lg border border-line-strong bg-panel shadow-2xl">
+        <div className="border-b border-line p-3">
+          <label className="relative block">
+            <span className="sr-only">Search models</span>
+            <svg viewBox="0 0 20 20" aria-hidden="true" className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-ink-faint">
+              <circle cx="8.5" cy="8.5" r="5.5" fill="none" stroke="currentColor" strokeWidth="1.4" />
+              <path d="m12.5 12.5 4 4" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+            </svg>
+            <input autoFocus value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search models"
+              className="w-full rounded-md border border-line bg-deck py-2 pl-9 pr-3 text-xs text-ink outline-none placeholder:text-ink-faint focus:border-signal" />
+          </label>
+        </div>
+        <div className="grid min-h-56 max-h-80 grid-cols-[112px_minmax(0,1fr)]">
+          <div className="border-r border-line bg-deck/45 p-2" aria-label="Model companies">
+            {providers.map((provider) => <button key={provider} type="button" onClick={() => setActiveProvider(provider)}
+              className={`flex w-full items-center gap-2 rounded-md px-2 py-2.5 text-left text-xs font-medium transition-colors ${provider === activeProvider ? "bg-panel-hi text-ink" : "text-ink-faint hover:bg-panel-hi/60 hover:text-ink-soft"}`}>
+              <ModelBadge name={provider} compact />
+              <span className="truncate">{provider}</span>
+            </button>)}
+          </div>
+          <div role="listbox" aria-label={`${activeProvider} models`} className="overflow-y-auto p-2">
+            {visibleModels.map((model) => <button key={model.name} type="button" role="option" aria-selected={model.name === value}
+              onClick={() => { onChange(model.name); setOpen(false); }}
+              className={`block w-full rounded-md px-3 py-3 text-left transition-colors ${model.name === value ? "bg-signal/[0.1] text-ink" : "text-ink-soft hover:bg-panel-hi hover:text-ink"}`}>
+              <span className="block text-xs font-semibold">{modelDisplayName(model.name)}</span>
+              <span className="mt-1 block text-[10px] leading-relaxed text-ink-faint">{modelDescription(model.name)}</span>
+            </button>)}
+            {visibleModels.length === 0 && <p className="px-3 py-5 text-xs leading-relaxed text-ink-faint">No {activeProvider} models match your search.</p>}
+          </div>
+        </div>
+      </div>}
+    </div>
+  </div>;
+}
+
+function ModelBadge({ name, compact = false }: { name: string; compact?: boolean }) {
+  const provider = modelProvider(name);
+  return <span className={`flex shrink-0 items-center justify-center rounded-md border ${compact ? "h-6 w-6" : "h-8 w-8"} ${provider === "Gemini"
+    ? "border-blue-300/30 bg-blue-400/10 text-blue-200" : provider === "OpenAI" ? "border-emerald-300/30 bg-emerald-400/10 text-emerald-200" : "border-line bg-deck text-ink-soft"}`} aria-hidden="true">
+    {provider === "Gemini" ? <svg viewBox="0 0 24 24" className={`${compact ? "h-4 w-4" : "h-5 w-5"} fill-current`}><path d="M12 2.5c.8 4.8 4.7 8.7 9.5 9.5-4.8.8-8.7 4.7-9.5 9.5-.8-4.8-4.7-8.7-9.5-9.5 4.8-.8 8.7-4.7 9.5-9.5Z" /></svg>
+      : provider === "OpenAI" ? <svg viewBox="0 0 24 24" className={`${compact ? "h-4 w-4" : "h-5 w-5"} fill-none stroke-current`} strokeWidth="1.7"><path d="M12 4.4a4.1 4.1 0 0 1 7.1 3.1 4.1 4.1 0 0 1 1.2 7.6 4.1 4.1 0 0 1-4.6 5.9 4.1 4.1 0 0 1-7.2-3.1 4.1 4.1 0 0 1-1.2-7.6A4.1 4.1 0 0 1 12 4.4Z" /><path d="m12 4.4 3.7 2.2v4.3l-3.7 2.1-3.7-2.1V6.6L12 4.4Zm0 8.6 3.7 2.1v4.3M12 13l-3.7 2.1" /></svg>
+        : <span className="text-[8px] font-bold">AI</span>}
+  </span>;
+}
+
+function modelProvider(name: string): string {
+  const model = name.toLowerCase();
+  if (model.includes("gemini") || model.includes("google")) return "Gemini";
+  if (model.includes("openai") || model.includes("gpt")) return "OpenAI";
+  return "Other";
+}
+
+function modelDisplayName(name: string): string {
+  const short = name.split("/").at(-1)?.toLowerCase() ?? name.toLowerCase();
+  const gpt = short.match(/^gpt-(\d+)-(\d+)(?:-(.+))?$/);
+  if (gpt) return `GPT-${gpt[1]}.${gpt[2]}${gpt[3] ? ` ${titleCaseModelPart(gpt[3])}` : ""}`;
+  const gemini = short.match(/^gemini-(\d+)-(\d+)(?:-(.+))?$/);
+  if (gemini) return `Gemini ${gemini[1]}.${gemini[2]}${gemini[3] ? ` ${titleCaseModelPart(gemini[3])}` : ""}`;
+  return titleCaseModelPart(short);
+}
+
+function titleCaseModelPart(value: string): string {
+  return value.replace(/[-_]+/g, " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function modelDescription(name: string): string {
+  const short = name.split("/").at(-1)?.toLowerCase() ?? name.toLowerCase();
+  const descriptions: Record<string, string> = {
+    "gpt-5-6-sol": "OpenAI model for complex reasoning and coding.",
+    "gpt-5-6-terra": "Balanced OpenAI model for coding and reasoning.",
+    "gpt-5-6-luna": "Fast, efficient OpenAI model for everyday workflows.",
+    "gpt-5-5": "General-purpose OpenAI model for reasoning, writing, and coding.",
+    "gpt-5-4-mini": "Smaller OpenAI model tuned for speed and focused tasks.",
+    "gemini-3-1-pro-preview": "Advanced Gemini model for complex reasoning and demanding work.",
+    "gemini-3-6-flash": "Fast Gemini model for efficient, responsive workflows.",
+  };
+  return descriptions[short] ?? `${modelProvider(name)} model for agent tasks.`;
+}
+
 function AgentLoading() {
   return <div role="status" aria-label="Loading agents" aria-busy="true"
-    className="grid min-h-0 flex-1 animate-pulse grid-cols-1 md:grid-cols-[minmax(0,1fr)_290px]">
+    className="grid min-h-0 flex-1 grid-cols-1 md:grid-cols-[minmax(0,1fr)_290px]">
     <aside className="order-1 max-h-52 overflow-hidden border-b border-line bg-panel/55 p-3 md:order-2 md:max-h-none md:border-b-0 md:border-l">
-      <div className="h-2 w-14 rounded bg-panel-hi" />
+      <div className="h-2 w-14 rounded shimmer" />
       <div className="mt-3 space-y-1.5">
         {Array.from({ length: 5 }, (_, index) => <div key={index} className="rounded-md border border-line/70 bg-panel/45 px-3 py-3">
-          <div className={`h-3 rounded bg-panel-hi ${index % 2 === 0 ? "w-24" : "w-32"}`} />
-          <div className="mt-2 h-2.5 w-4/5 rounded bg-panel-hi/80" />
-          <div className="mt-2 h-2 w-20 rounded bg-panel-hi/70" />
+          <div className={`h-3 rounded shimmer ${index % 2 === 0 ? "w-24" : "w-32"}`} />
+          <div className="mt-2 h-2.5 w-4/5 rounded shimmer" />
+          <div className="mt-2 h-2 w-20 rounded shimmer" />
         </div>)}
       </div>
     </aside>
@@ -383,20 +518,20 @@ function AgentLoading() {
       <div className="mx-auto max-w-5xl">
         <div className="mb-7 flex items-start justify-between gap-5">
           <div>
-            <div className="h-2 w-24 rounded bg-panel-hi" />
-            <div className="mt-3 h-7 w-56 rounded bg-panel-hi" />
+            <div className="h-2 w-24 rounded shimmer" />
+            <div className="mt-3 h-7 w-56 rounded shimmer" />
           </div>
-          <div className="h-9 w-44 rounded-md border border-line bg-panel/70" />
+          <div className="h-9 w-44 rounded-md border border-line shimmer" />
         </div>
         <div className="mb-7 max-w-2xl">
-          <div className="h-2 w-20 rounded bg-panel-hi" />
-          <div className="mt-2 h-10 w-full rounded-md border border-line-strong bg-panel/70" />
+          <div className="h-2 w-20 rounded shimmer" />
+          <div className="mt-2 h-10 w-full rounded-md border border-line-strong shimmer" />
         </div>
         <div className="space-y-5">
           {["w-48", "w-64", "w-56"].map((width) => <div key={width} className="rounded-lg border border-line bg-deck/55 p-5">
-            <div className={`h-2.5 rounded bg-panel-hi ${width}`} />
-            <div className="mt-2 h-2 w-3/5 rounded bg-panel-hi/70" />
-            <div className="mt-5 h-20 rounded-md border border-line bg-panel/60" />
+            <div className={`h-2.5 rounded shimmer ${width}`} />
+            <div className="mt-2 h-2 w-3/5 rounded shimmer" />
+            <div className="mt-5 h-20 rounded-md border border-line shimmer" />
           </div>)}
         </div>
       </div>
@@ -454,12 +589,20 @@ function ConnectorEditor({ connector, server, required, onToolToggle, onAllTools
   const label = connectorLabel(connector.name);
   const toolsId = `connector-tools-${connector.name.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
   const enabledCount = connector.tools.filter((tool) => isCoreTool(connector.name, tool.name) || enabledTools.includes(tool.name)).length;
-  const visibleTools = connector.tools.filter((tool) => {
+  const hasExternalTools = connector.tools.some((tool) => !isCoreTool(connector.name, tool.name));
+  const orderedTools = [...connector.tools].sort((left, right) => {
+    const leftCore = isCoreTool(connector.name, left.name);
+    const rightCore = isCoreTool(connector.name, right.name);
+    if (leftCore !== rightCore) return Number(rightCore) - Number(leftCore);
+    const leftEnabled = leftCore || enabledTools.includes(left.name);
+    const rightEnabled = rightCore || enabledTools.includes(right.name);
+    return Number(rightEnabled) - Number(leftEnabled);
+  });
+  const visibleTools = orderedTools.filter((tool) => {
     const term = search.trim().toLowerCase();
     return !term || tool.name.toLowerCase().includes(term) || tool.description?.toLowerCase().includes(term);
   });
-  const hasExternalTools = connector.tools.some((tool) => !isCoreTool(connector.name, tool.name));
-  return <div className={`overflow-hidden rounded-md border ${enabledCount > 0 ? "border-line-strong bg-panel/75" : "border-line bg-deck/45"}`}>
+  return <div className={`overflow-hidden rounded-md border ${enabledCount > 0 ? "border-signal/55 bg-signal/[0.045]" : "border-line bg-deck/45"}`}>
     <div className="flex min-h-14 items-stretch">
       <button type="button" onClick={() => setExpanded((current) => !current)} aria-expanded={expanded}
         aria-controls={toolsId}
@@ -473,6 +616,7 @@ function ConnectorEditor({ connector, server, required, onToolToggle, onAllTools
           </span>
         </span>
         {required && <span className="rounded border border-line px-2 py-1 font-mono text-[8px] uppercase tracking-[0.12em] text-ink-faint">Core</span>}
+        {enabledCount > 0 && <span className="rounded border border-signal/35 bg-signal/[0.08] px-2 py-1 font-mono text-[8px] uppercase tracking-[0.12em] text-signal">Enabled</span>}
         <svg viewBox="0 0 12 12" aria-hidden="true"
           className={`h-3 w-3 shrink-0 text-ink-faint transition-transform ${expanded ? "rotate-90" : ""}`}>
           <path d="m4.25 2.25 3.5 3.75-3.5 3.75" fill="none" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round" />
@@ -557,7 +701,8 @@ function normalizeAgent(raw: unknown): AgentProfile {
     updatedAt: typeof value.updatedAt === "string" ? value.updatedAt : null,
     model: stringValue(value.model),
     mcpServers: Array.isArray(value.mcpServers) ? value.mcpServers.map(normalizeServer).filter(Boolean) as McpServerConfig[] : [],
-    sandboxEnabled: value.sandboxEnabled === true, subagentsEnabled: value.subagentsEnabled === true,
+    sandboxEnabled: value.sandboxEnabled === true,
+    subagentsEnabled: value.subagentsEnabled === true,
   };
 }
 
@@ -625,11 +770,18 @@ function withRequiredCoreTools(servers: McpServerConfig[]): McpServerConfig[] {
     requireApprovalForTools: server.requireApprovalForTools ? [...server.requireApprovalForTools] : undefined }))];
 }
 
+function connectorPriority(connector: ConnectorOption, draft: DraftAgent | null): number {
+  if (connector.name === CORE_CONNECTOR) return 0;
+  const server = draft?.mcpServers.find((item) => item.name === connector.name);
+  return server && selectedToolNames(server, connector).length > 0 ? 1 : 2;
+}
+
 function selectedToolNames(server: McpServerConfig, connector: ConnectorOption): string[] {
   const enabled = server.enableTools ?? connector.tools.map((tool) => tool.name);
   const disabled = new Set(server.disableTools ?? []);
   if (disabled.has("@all")) return [];
-  return enabled.filter((name) => !disabled.has(name));
+  const selected = enabled.includes("@all") ? connector.tools.map((tool) => tool.name) : enabled;
+  return selected.filter((name) => !disabled.has(name));
 }
 
 function comparableAgent(agent: AgentProfile | DraftAgent): string {

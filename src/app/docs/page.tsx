@@ -1,6 +1,7 @@
 "use client";
 
 import dynamic from "next/dynamic";
+import Link from "next/link";
 import { useQuery } from "convex/react";
 import { anyApi } from "convex/server";
 import { useEffect, useMemo, useState } from "react";
@@ -10,7 +11,7 @@ const convexApi = anyApi as any;
 
 const MarkdownDocumentEditor = dynamic(
   () => import("@/components/markdown-document-editor").then((module) => module.MarkdownDocumentEditor),
-  { ssr: false, loading: () => <div className="min-h-96 animate-pulse rounded-lg border border-line bg-panel-hi" /> }
+  { ssr: false, loading: () => <div className="min-h-96 rounded-lg border border-line shimmer" role="status" aria-label="Loading editor" aria-busy="true" /> }
 );
 
 interface AgentDocument {
@@ -373,6 +374,20 @@ export default function DocsPage() {
                     </button>
                   );
                 })}
+              </div>
+            ) : documents.length === 0 ? (
+              <div className="mt-4 rounded-lg border border-line bg-panel/40 px-6 py-14 text-center">
+                <p className="font-mono text-[9px] uppercase tracking-[0.18em] text-role-researcher">Your library is ready</p>
+                <h2 className="mt-3 text-xl font-semibold tracking-[-0.03em] text-ink">Start writing docs, or use agents</h2>
+                <p className="mx-auto mt-3 max-w-md text-sm leading-6 text-ink-soft">Create a document yourself, or ask the squad to research and write one for you.</p>
+                <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
+                  <button type="button" onClick={() => void createDocument()} className="rounded-md bg-signal px-3.5 py-2.5 font-mono text-[9px] font-semibold uppercase tracking-[0.14em] text-deck transition-colors hover:brightness-110">
+                    Start writing
+                  </button>
+                  <Link href="/" className="rounded-md border border-line-strong px-3.5 py-2.5 font-mono text-[9px] font-semibold uppercase tracking-[0.14em] text-ink-soft transition-colors hover:border-signal/60 hover:text-ink">
+                    Use agents
+                  </Link>
+                </div>
               </div>
             ) : (
               <div className="mt-4 rounded-lg border border-line bg-panel/40 px-6 py-12 text-center">

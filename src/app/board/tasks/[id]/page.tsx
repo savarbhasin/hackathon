@@ -473,13 +473,14 @@ function TaskLoading() {
   return (
     <main className="h-full min-w-0 overflow-hidden bg-deck">
       <TaskHeader />
-      <div className="mx-auto max-w-[1180px] animate-pulse px-5 py-10 sm:px-8 lg:px-10">
-        <div className="h-3 w-40 rounded bg-panel-hi" />
-        <div className="mt-6 h-10 max-w-3xl rounded bg-panel-hi" />
-        <div className="mt-3 h-4 w-56 rounded bg-panel-hi" />
+      <div className="mx-auto max-w-[1180px] px-5 py-10 sm:px-8 lg:px-10" role="status" aria-label="Loading task" aria-busy="true">
+        <span className="sr-only">Loading task…</span>
+        <div className="h-3 w-40 rounded shimmer" />
+        <div className="mt-6 h-10 max-w-3xl rounded shimmer" />
+        <div className="mt-3 h-4 w-56 rounded shimmer" />
         <div className="mt-10 grid gap-8 lg:grid-cols-[minmax(0,1.6fr)_minmax(280px,0.72fr)]">
-          <div className="h-72 rounded-lg border border-line bg-panel/60" />
-          <div className="h-60 rounded-lg border border-line bg-panel/60" />
+          <div className="h-72 rounded-lg border border-line shimmer" />
+          <div className="h-60 rounded-lg border border-line shimmer" />
         </div>
       </div>
     </main>
@@ -672,6 +673,30 @@ interface TaskChatMessage {
   clientMessageId?: string;
 }
 
+function isTaskMessageError(status?: string): boolean {
+  if (!status) return false;
+  const normalized = status.trim().toLowerCase();
+  return normalized === "error" || normalized === "failed" || normalized.includes("failed");
+}
+
+function TaskChatAssistantMessage({ message, busy }: { message: TaskChatMessage; busy: boolean }) {
+  const failed = isTaskMessageError(message.status);
+  return (
+    <div className="relative max-w-3xl pl-6 before:absolute before:bottom-0 before:left-[3px] before:top-0 before:w-px before:bg-line">
+      <span className={`absolute left-0 top-1.5 h-[7px] w-[7px] rounded-full ${failed ? "bg-error" : (busy || message.status === "queued") && !message.content ? "bg-signal led-live" : "border border-line bg-deck"}`} />
+      <p className={`mb-2 flex items-center gap-2 font-mono text-[8px] uppercase tracking-[0.2em] ${failed ? "text-error" : "text-state-working"}`}>
+        {failed ? "Error" : "Task agent"}
+        {!failed && (busy || message.status === "queued") && !message.content && <span className="tool-activity-live text-ink-faint">Thinking</span>}
+      </p>
+      {failed ? (
+        <div role="alert" className="mt-2 rounded-md border border-error/60 bg-error/10 px-3 py-2.5 text-sm leading-relaxed text-error">
+          {message.content || "The response could not be completed."}
+        </div>
+      ) : message.content ? <ChatMarkdown>{message.content}</ChatMarkdown> : null}
+    </div>
+  );
+}
+
 function TaskChat({ taskId, events, column, hasSession, mode }: { taskId: string; events: TaskEvent[]; column: string; hasSession: boolean; mode?: "durable" | "legacy" }) {
   const [messages, setMessages] = useState<TaskChatMessage[]>(() => chatMessages(events));
   const [input, setInput] = useState("");
@@ -681,8 +706,10 @@ function TaskChat({ taskId, events, column, hasSession, mode }: { taskId: string
 
   const displayedMessages = useMemo(() => {
     const persisted = chatMessages(events);
-    const persistedClientIds = new Set(persisted.map((message) => message.clientMessageId).filter(Boolean));
-    return [...persisted, ...messages.filter((message) => !message.clientMessageId || !persistedClientIds.has(message.clientMessageId))];
+    const persistedClientKeys = new Set(persisted
+      .filter((message) => message.clientMessageId)
+      .map((message) => `${message.role}:${message.clientMessageId}`));
+    return [...persisted, ...messages.filter((message) => !message.clientMessageId || !persistedClientKeys.has(`${message.role}:${message.clientMessageId}`))];
   }, [events, messages]);
 
   useEffect(() => {
@@ -692,13 +719,15 @@ function TaskChat({ taskId, events, column, hasSession, mode }: { taskId: string
 
   async function send() {
     const content = input.trim();
-    if (!content || busy || mode === "durable" || column === "working" || column === "blocked" || column === "approval") return;
+    if (!content || busy || column === "working" || column === "blocked" || column === "approval") return;
     setInput(""); setError(null); setBusy(true);
     const localId = `local-${Date.now()}`;
-    setMessages((current) => [...current, { id: localId, role: "user", content, clientMessageId: localId }, { id: `${localId}-reply`, role: "assistant", content: "", clientMessageId: localId }]);
+    setMessages((current) => [...current, { id: localId, role: "user", content, clientMessageId: localId }, { id: `${localId}-reply`, role: "assistant", content: "", status: "queued", clientMessageId: localId }]);
     try {
       const response = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/chat`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message: content, clientMessageId: localId }) });
-      if (!response.ok || !response.body) throw new Error((await response.json().catch(() => null) as { error?: string } | null)?.error ?? "Chat is unavailable.");
+      if (!response.ok) throw new Error((await response.json().catch(() => null) as { error?: string } | null)?.error ?? "Chat is unavailable.");
+      if (mode === "durable") return;
+      if (!response.body) throw new Error("Chat is unavailable.");
       const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = "";
       for (;;) {
         const { done, value } = await reader.read(); if (done) break;
@@ -714,14 +743,12 @@ function TaskChat({ taskId, events, column, hasSession, mode }: { taskId: string
       }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
-      setMessages((current) => current.map((message) => message.id === `${localId}-reply` ? { ...message, content: "The agent could not answer." } : message));
+      setMessages((current) => current.map((message) => message.id === `${localId}-reply` ? { ...message, status: "failed", content: "The agent could not answer." } : message));
     } finally { setBusy(false); }
   }
 
-  const available = mode !== "durable" && hasSession && column !== "working" && column !== "approval" && column !== "blocked";
-  const unavailableCopy = mode === "durable"
-    ? "Durable task follow-up chat will be available after the task subscription cutover."
-    : !hasSession
+  const available = hasSession && column !== "working" && column !== "approval" && column !== "blocked";
+  const unavailableCopy = !hasSession
       ? "Dispatch the task to start an agent session before chatting."
       : column === "working"
         ? "The agent is still running. Chat opens when this turn finishes."
@@ -741,14 +768,7 @@ function TaskChat({ taskId, events, column, hasSession, mode }: { taskId: string
               </div>
             </div>
           ) : (
-            <div key={message.id} className="relative max-w-3xl pl-6 before:absolute before:bottom-0 before:left-[3px] before:top-0 before:w-px before:bg-line">
-              <span className={`absolute left-0 top-1.5 h-[7px] w-[7px] rounded-full ${busy && !message.content ? "bg-signal led-live" : "border border-line bg-deck"}`} />
-              <p className="mb-2 flex items-center gap-2 font-mono text-[8px] uppercase tracking-[0.2em] text-state-working">
-                Task agent
-                {busy && !message.content && <span className="text-ink-faint">thinking</span>}
-              </p>
-              {message.content ? <ChatMarkdown>{message.content}</ChatMarkdown> : <span className="inline-block h-4 w-28 animate-pulse rounded bg-panel-hi" />}
-            </div>
+            <TaskChatAssistantMessage key={message.id} message={message} busy={busy} />
           )) : (
             <div className="flex min-h-[300px] items-center justify-center text-center">
               <div className="max-w-sm">

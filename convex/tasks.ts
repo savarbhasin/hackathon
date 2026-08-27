@@ -8,7 +8,7 @@ export const get = query({
 });
 
 // Phase 3 task contracts live in missions.ts to keep the legacy spike API stable.
-export { createTask, updateTask, getTaskDispatchContext, admitSpecialist, resumeSpecialist, finalizeSpecialist, resetSpecialistForRetry, markDone, readySuccessors, reconcileSuccessors, appendTaskEvent } from "./missions";
+export { createTask, updateTask, getTaskDispatchContext, admitSpecialist, admitFollowup, resumeSpecialist, finalizeSpecialist, resetSpecialistForRetry, markDone, readySuccessors, reconcileSuccessors, appendTaskEvent } from "./missions";
 
 export const updateStatus = mutation({
   args: { status: v.string() },

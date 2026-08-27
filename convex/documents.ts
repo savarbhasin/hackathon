@@ -56,7 +56,7 @@ const documentInput = { title: v.string(), content: v.string(), authorRole: v.op
 export const create = mutation({
   args: { operationKey: v.optional(v.string()), ...documentInput }, returns: v.any(),
   handler: async (ctx, args) => {
-    if (!args.title.trim() || !args.content.trim()) return { kind: "conflict", reason: "empty_document" };
+    if (!args.title.trim()) return { kind: "conflict", reason: "empty_document" };
     if (args.operationKey) {
       const existing = await ctx.db.query("documents").withIndex("by_operationKey", (q: any) => q.eq("operationKey", args.operationKey)).first();
       if (existing) {
@@ -76,7 +76,7 @@ export const update = mutation({
   args: { documentId, title: v.optional(v.string()), content: v.optional(v.string()), authorRole: v.optional(v.string()), kind: v.optional(v.string()), missionId: v.optional(missionId), taskId: v.optional(taskId) }, returns: v.any(),
   handler: async (ctx, args) => {
     const existing = await ctx.db.get(args.documentId); if (!existing) return { kind: "not_found", entity: "document" };
-    if (args.title !== undefined && !args.title.trim() || args.content !== undefined && !args.content.trim()) return { kind: "conflict", reason: "empty_document" };
+    if (args.title !== undefined && !args.title.trim()) return { kind: "conflict", reason: "empty_document" };
     const normalized = await normalizeDocument(ctx, args, existing); if (normalized.error) return normalized.error;
     const patch: any = { updatedAt: Date.now(), kind: normalized.kind };
     if (args.title !== undefined) patch.title = args.title.trim();
