@@ -1,0 +1,19 @@
+FROM node:24-slim
+
+WORKDIR /app
+ENV NODE_ENV=production
+
+COPY package.json package-lock.json ./
+RUN npm ci --include=dev && npm cache clean --force
+
+COPY tsconfig.json ./
+COPY convex ./convex
+COPY src ./src
+COPY server ./server
+
+RUN groupadd --gid 10001 mcp \
+    && useradd --uid 10001 --gid mcp --shell /usr/sbin/nologin mcp \
+    && chown -R mcp:mcp /app
+
+USER 10001:10001
+CMD ["npm", "run", "mcp:prod"]
