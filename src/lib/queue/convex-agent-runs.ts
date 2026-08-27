@@ -130,6 +130,17 @@ export class ConvexAgentRunStore implements AgentRunStore {
     return await this.client.mutation(api.agentRuns.appendProviderEvent, { ...input, runId: runId(input.runId) });
   }
 
+  async appendProviderEventAndCheckpoint(input: ProviderEventCheckpoint & { providerSequence: number }): Promise<{ inserted: boolean; id: string | null; checkpointed: boolean } | null> {
+    const value = await this.client.mutation(anyApi.agentRuns.appendProviderEventAndCheckpoint, { ...input, runId: runId(input.runId) });
+    if (!value || typeof value !== "object") return null;
+    const row = value as { inserted?: unknown; id?: unknown; checkpointed?: unknown };
+    return {
+      inserted: row.inserted === true,
+      id: typeof row.id === "string" ? row.id : null,
+      checkpointed: row.checkpointed === true,
+    };
+  }
+
   async getRecoveryModelEvents(runIdValue: string, throughSequence: number): Promise<Array<{ sequence: number; type: string; payload: Record<string, unknown> }>> {
     const value = await this.client.query(anyApi.agentRuns.recoveryModelEvents, {
       runId: runId(runIdValue),

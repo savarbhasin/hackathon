@@ -473,12 +473,26 @@ export async function processDurableOrchestratorRun(store: AgentRunStore, run: A
         }
         if (event.threadId === "main" && typeof event.content === "string") fallbackDelta += event.content;
       }
-      await store.appendProviderEvent({ runId: run._id, attempt, workerId: context.workerId, turnId, sequence, providerEventId, providerSequence: providerSequence ?? undefined, type, payload: event });
-      if (providerSequence !== null && !await store.checkpointProviderCursor({ runId: run._id, attempt, workerId: context.workerId, turnId, providerSequence })) {
-        // The run was reclaimed or otherwise lost ownership. Do not let the
-        // throttled timer publish a stale snapshot after this return.
-        projection?.cancel();
-        return;
+      const providerEvent = { runId: run._id, attempt, workerId: context.workerId, turnId, sequence, providerEventId, providerSequence: providerSequence ?? undefined, type, payload: event };
+      if (providerSequence !== null && store.appendProviderEventAndCheckpoint) {
+        // Journal and cursor advancement are one Convex transaction. This
+        // removes a serialized network round-trip per provider event without
+        // weakening the append-before-cursor recovery invariant.
+        const checkpoint = await store.appendProviderEventAndCheckpoint({ ...providerEvent, providerSequence });
+        if (!checkpoint?.checkpointed) {
+          // The run was reclaimed or otherwise lost ownership. Do not let the
+          // throttled timer publish a stale snapshot after this return.
+          projection?.cancel();
+          return;
+        }
+      } else {
+        await store.appendProviderEvent(providerEvent);
+        if (providerSequence !== null && !await store.checkpointProviderCursor({ runId: run._id, attempt, workerId: context.workerId, turnId, providerSequence })) {
+          // The run was reclaimed or otherwise lost ownership. Do not let the
+          // throttled timer publish a stale snapshot after this return.
+          projection?.cancel();
+          return;
+        }
       }
 
       // Recompute from merged SDK deltas after every event. The base

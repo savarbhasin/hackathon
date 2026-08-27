@@ -140,6 +140,7 @@ export interface AgentRunStore {
   }): Promise<boolean>;
   checkpointProviderCursor(input: { runId: string; attempt: number; workerId: string; turnId: string; providerSequence: number }): Promise<boolean>;
   appendProviderEvent(input: ProviderEventCheckpoint): Promise<{ inserted: boolean; id: string }>;
+  appendProviderEventAndCheckpoint?(input: ProviderEventCheckpoint & { providerSequence: number }): Promise<{ inserted: boolean; id: string | null; checkpointed: boolean } | null>;
   getRecoveryModelEvents?(runId: string, throughSequence: number): Promise<Array<{ sequence: number; type: string; payload: Record<string, unknown> }>>;
   waitForUser(input: { runId: string; attempt: number; workerId: string; pendingActions: PendingAction[]; pendingActionSelector?: string }): Promise<boolean>;
   waitForApproval(input: { runId: string; attempt: number; workerId: string; pendingActions: PendingAction[]; pendingActionSelector?: string }): Promise<boolean>;

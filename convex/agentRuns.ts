@@ -285,6 +285,32 @@ export const appendProviderEvent = mutation({
   },
 });
 
+/**
+ * Atomically journal a provider event and advance its cursor. The orchestrator
+ * uses this to avoid two serialized Convex round-trips for every stream chunk;
+ * keeping both writes in one transaction preserves the append-before-cursor
+ * recovery invariant.
+ */
+export const appendProviderEventAndCheckpoint = mutation({
+  args: { ...guardArgs, turnId: v.string(), sequence: v.number(), providerEventId: v.optional(v.string()), providerSequence: v.number(), type: v.string(), payload: v.any() },
+  returns: v.any(),
+  handler: async (ctx, args) => {
+    const run = await guardedRun(ctx, args);
+    if (!run || run.turnId !== args.turnId) return null;
+    if (run.providerSequence !== undefined && args.providerSequence < run.providerSequence) {
+      return { inserted: false, checkpointed: false, id: null };
+    }
+    const duplicate = args.providerEventId
+      ? await ctx.db.query("runEvents").withIndex("by_run_providerEventId", (q: any) => q.eq("runId", args.runId).eq("providerEventId", args.providerEventId)).first()
+      : await ctx.db.query("runEvents").withIndex("by_run_sequence", (q: any) => q.eq("runId", args.runId).eq("sequence", args.sequence)).first();
+    const id = duplicate
+      ? duplicate._id
+      : await ctx.db.insert("runEvents", { runId: args.runId, sequence: args.sequence, providerEventId: args.providerEventId, providerSequence: args.providerSequence, type: args.type, payload: args.payload, createdAt: Date.now() });
+    await ctx.db.patch(args.runId, { providerSequence: args.providerSequence, updatedAt: Date.now() });
+    return { inserted: !duplicate, checkpointed: true, id };
+  },
+});
+
 export const waitForUser = mutation({
   args: { ...guardArgs, pendingActions: v.any(), pendingActionSelector: v.optional(v.string()) },
   returns: v.boolean(),

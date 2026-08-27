@@ -4,7 +4,7 @@ export const MCP_SERVER_NAME = "mission-control";
 
 export const ORCHESTRATOR_MODEL = "fireworks/minimax-m3";
 export const SPECIALIST_MODEL = "openai/gpt-5-6-luna";
-export const TITLE_MODEL = "google-gemini/gemini-3-6-flash";
+export const TITLE_MODEL = "fireworks/minimax-m3";
 
 export const SPECIALIST_RUNTIME_PREAMBLE = `## Mission Control runtime instructions
 
