@@ -1,0 +1,4 @@
+{$TRUEFORGE_DOMAIN} {
+  encode zstd gzip
+  reverse_proxy trueforge:8790
+}
