@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Archivo, Manrope } from "next/font/google";
 import { ConsoleShell } from "@/components/console-header";
+import { ConvexClientProvider } from "@/components/convex-provider";
 import "./globals.css";
 
 const archivo = Archivo({
@@ -28,7 +29,9 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
       className={`${archivo.variable} ${manrope.variable} h-full antialiased`}
     >
       <body className="min-h-full bg-deck font-sans text-ink selection:bg-signal selection:text-deck">
-        <ConsoleShell>{children}</ConsoleShell>
+        <ConvexClientProvider>
+          <ConsoleShell>{children}</ConsoleShell>
+        </ConvexClientProvider>
       </body>
     </html>
   );

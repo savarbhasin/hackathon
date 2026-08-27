@@ -1,9 +1,12 @@
 import type { TrueForgeApi } from "@truefoundry/trueforge-sdk";
 import { TrueForgeError } from "@truefoundry/trueforge-sdk";
-import { db } from "./db";
+import { ConvexHttpClient } from "convex/browser";
+import { api } from "../../convex/_generated/api";
+import { convexUrl } from "./queue/env";
 import {
   MCP_SERVER_NAME,
   ROLES,
+  routingDescription,
   stripSpecialistRuntimeInstructions,
   withSpecialistRuntimeInstructions,
 } from "./fleet";
@@ -11,6 +14,11 @@ import { tf } from "./tf";
 
 const REQUIRED_MISSION_CONTROL_TOOLS = ["mark_done", "create_doc", "update_doc", "get_doc"] as const;
 const DEFAULT_MODEL = ROLES.writer.spec.model.name;
+
+let convexClient: ConvexHttpClient | undefined;
+function convex(): ConvexHttpClient {
+  return convexClient ??= new ConvexHttpClient(convexUrl(), { logger: false });
+}
 
 export interface AgentDefinition {
   id: string;
@@ -105,10 +113,14 @@ export async function agentRosterBlock(): Promise<string> {
 async function presetRosterEntries(): Promise<RosterEntry[]> {
   let disabledSlugs = new Set<string>();
   try {
-    const profiles = await db.agentProfile.findMany({ where: { enabled: false } });
-    disabledSlugs = new Set(profiles.map((profile) => profile.slug));
+    const profiles = await convex().query(api.agentProfiles.list, { limit: 2000 });
+    disabledSlugs = new Set(
+      profiles
+        .filter((profile: AgentProfileMetadata) => !profile.enabled)
+        .map((profile: AgentProfileMetadata) => profile.slug)
+    );
   } catch {
-    // Local metadata unavailable too; advertise nothing rather than guessing.
+    // Convex metadata unavailable too; advertise nothing rather than guessing.
     return [];
   }
   return Object.values(ROLES)
@@ -119,7 +131,7 @@ async function presetRosterEntries(): Promise<RosterEntry[]> {
       description: role.description,
       mcpServers: role.spec.mcpServers ?? [],
       sandboxEnabled: role.spec.config?.sandbox?.enabled ?? false,
-      subagentsEnabled: role.spec.config?.dynamicSubAgents?.enabled ?? true,
+      subagentsEnabled: role.spec.config?.dynamicSubAgents?.enabled ?? false,
     }));
 }
 
@@ -157,9 +169,11 @@ export function agentSlug(value: string): string {
 }
 
 export async function listAgentDefinitions(): Promise<AgentDefinition[]> {
-  const remoteAgents = await listAndSeedAgents();
-  const metadata = await db.agentProfile.findMany();
-  const metadataBySlug = new Map(metadata.map((agent) => [agent.slug, agent]));
+  const { data: remoteAgents } = await tf().agents.list();
+  const metadata = await convex().query(api.agentProfiles.list, { limit: 2000 });
+  const metadataBySlug = new Map(
+    metadata.map((agent: AgentProfileMetadata) => [agent.slug, agent])
+  );
 
   return remoteAgents
     .map((agent) => toDefinition(agent, metadataBySlug.get(agent.name)))
@@ -219,7 +233,7 @@ export async function getAgentCatalog(): Promise<AgentCatalog> {
 
 export async function createAgentDefinition(input: AgentWriteInput): Promise<AgentDefinition> {
   const displayName = requiredText(input.name, "Name", 64);
-  const description = requiredText(input.description, "Description", 240);
+  const description = requiredText(input.description, "Description");
   const slug = agentSlug(input.slug?.trim() || displayName);
   if (!slug) throw new AgentInputError("Name must contain at least one letter or number.");
 
@@ -227,24 +241,15 @@ export async function createAgentDefinition(input: AgentWriteInput): Promise<Age
   validateMissionControlTools(manifest.mcpServers ?? []);
   const { data: remote } = await tf().agents.create({ name: slug, manifest });
   try {
-    const metadata = await db.agentProfile.upsert({
-      where: { slug },
-      create: {
-        slug,
-        name: displayName,
-        description,
-        instructions: "",
-        enabled: input.enabled ?? true,
-        isDefault: false,
-      },
-      update: {
-        name: displayName,
-        description,
-        instructions: "",
-        enabled: input.enabled ?? true,
-      },
+    const metadata = await convex().mutation(api.agentProfiles.upsert, {
+      slug,
+      name: displayName,
+      description,
+      instructions: "",
+      enabled: input.enabled ?? true,
+      isDefault: false,
     });
-    return toDefinition(remote, metadata);
+    return toDefinition(remote, requireProfileMetadata(metadata));
   } catch (error) {
     await tf().agents.delete(remote.id).catch(() => undefined);
     throw error;
@@ -260,37 +265,27 @@ export async function updateAgentDefinition(
     throw new AgentInputError("The TrueForge agent name is immutable. Create a new agent to use another role id.");
   }
 
-  const currentMetadata = await db.agentProfile.findUnique({ where: { slug: remote.name } });
+  const currentMetadata = await convex().query(api.agentProfiles.getBySlug, { slug: remote.name });
   const role = ROLES[remote.name];
-  const manifest = buildManifest(input, remote.manifest, Boolean(role || currentMetadata));
+  const manifest = buildManifest(input, remote.manifest);
   validateMissionControlTools(manifest.mcpServers ?? []);
   const { data: updated } = await tf().agents.update(remote.id, { manifest });
 
   const displayName = optionalText(input.name, 64) ?? currentMetadata?.name ?? role?.label ?? humanize(remote.name);
   const description =
-    optionalText(input.description, 240) ??
+    optionalText(input.description) ??
     currentMetadata?.description ??
     role?.description ??
     "Reusable TrueForge specialist agent.";
-  const metadata = await db.agentProfile.upsert({
-    where: { slug: remote.name },
-    create: {
-      slug: remote.name,
-      name: displayName,
-      description,
-      instructions: "",
-      enabled: input.enabled ?? true,
-      isDefault: Boolean(role),
-    },
-    update: {
-      name: displayName,
-      description,
-      instructions: "",
-      enabled: input.enabled ?? currentMetadata?.enabled ?? true,
-      isDefault: Boolean(role),
-    },
+  const metadata = await convex().mutation(api.agentProfiles.upsert, {
+    slug: remote.name,
+    name: displayName,
+    description,
+    instructions: "",
+    enabled: input.enabled ?? currentMetadata?.enabled ?? true,
+    isDefault: Boolean(role),
   });
-  return toDefinition(updated, metadata);
+  return toDefinition(updated, requireProfileMetadata(metadata));
 }
 
 export function registryError(error: unknown): { status: number; message: string } {
@@ -307,214 +302,11 @@ export function registryError(error: unknown): { status: number; message: string
   };
 }
 
-async function listAndSeedAgents(): Promise<TrueForgeApi.Agent[]> {
-  let { data: agents } = await tf().agents.list();
-  const managedSlugs = new Set(
-    (await db.agentProfile.findMany({ select: { slug: true } })).map((profile) => profile.slug)
-  );
-  const names = new Set(agents.map((agent) => agent.name));
-  const missing = Object.values(ROLES).filter((role) => !names.has(role.id));
-
-  for (const role of missing) {
-    try {
-      const { data: created } = await tf().agents.create({
-        name: role.id,
-        manifest: presetManifest(role),
-      });
-      agents = [...agents, created];
-      names.add(created.name);
-    } catch (error) {
-      // Next and the MCP server can seed at the same time. Only ignore a real race.
-      const refreshed = await tf().agents.list();
-      const createdByPeer = refreshed.data.find((agent) => agent.name === role.id);
-      if (!createdByPeer) throw error;
-      agents = refreshed.data;
-      names.clear();
-      for (const agent of agents) names.add(agent.name);
-    }
-  }
-
-  for (const agent of agents) {
-    const role = ROLES[agent.name];
-    if (!role && !managedSlugs.has(agent.name)) continue;
-
-    const manifest = reconcileManagedManifest(agent.manifest, role);
-    if (manifestsEqual(agent.manifest, manifest)) continue;
-
-    const { data: updated } = await tf().agents.update(agent.id, {
-      manifest,
-    });
-    agents = agents.map((current) => current.id === updated.id ? updated : current);
-  }
-
-  return agents;
-}
-
-function presetManifest(role: (typeof ROLES)[string]): TrueForgeApi.AgentSpec {
-  return {
-    ...role.spec,
-    mcpServers: withRequiredMissionControlTools(role.spec.mcpServers ?? []),
-  };
-}
-
-export function reconcileManagedManifest(
-  current: TrueForgeApi.AgentSpec,
-  role?: (typeof ROLES)[string]
-): TrueForgeApi.AgentSpec {
-  const editableInstructions = stripStoredRuntimeInstructions(
-    current.instructions ?? "",
-    true
-  ).trim();
-  const instructions = withSpecialistRuntimeInstructions(
-    editableInstructions || role?.instructions || "Complete the assigned specialist task within its stated scope."
-  );
-
-  if (!role) {
-    return {
-      ...current,
-      instructions,
-    };
-  }
-
-  return {
-    ...current,
-    // The Agents page owns the selected model. Keep the current value while
-    // reconciliation continues to enforce the role's runtime requirements.
-    model: current.model ?? role.spec.model,
-    instructions,
-    config: mergeRoleConfig(current.config, role.spec.config),
-    mcpServers: mergeRoleMcpServers(current.mcpServers ?? [], withRequiredMissionControlTools(role.spec.mcpServers ?? [])),
-  };
-}
-
-function mergeRoleConfig(
-  current: TrueForgeApi.AgentSpec["config"],
-  required: TrueForgeApi.AgentSpec["config"]
-): TrueForgeApi.AgentSpec["config"] {
-  if (!required) return current;
-
-  const merged = { ...(current ?? {}) } as Record<string, unknown>;
-  for (const [key, value] of Object.entries(required)) {
-    if (value === undefined) continue;
-    const existing = merged[key];
-    merged[key] = isRecord(existing) && isRecord(value)
-      ? { ...existing, ...value }
-      : value;
-  }
-  return merged as TrueForgeApi.AgentSpec["config"];
-}
-
-function mergeRoleMcpServers(
-  current: TrueForgeApi.McpServer[],
-  required: TrueForgeApi.McpServer[]
-): TrueForgeApi.McpServer[] {
-  const requiredByName = new Map(required.map((server) => [server.name, server]));
-  const currentNames = new Set(current.map((server) => server.name));
-  const merged = current.map((server) => {
-    const requiredServer = requiredByName.get(server.name);
-    return requiredServer ? mergeRoleMcpServer(server, requiredServer) : server;
-  });
-
-  for (const server of required) {
-    if (!currentNames.has(server.name)) merged.push(server);
-  }
-  return merged;
-}
-
-function mergeRoleMcpServer(
-  current: TrueForgeApi.McpServer,
-  required: TrueForgeApi.McpServer
-): TrueForgeApi.McpServer {
-  const merged: TrueForgeApi.McpServer = { ...current };
-  const requiredEnabled = required.enableTools ?? [];
-
-  if (required.enableTools) {
-    merged.enableTools = mergeSelectors(current.enableTools, required.enableTools);
-  }
-  if (required.disableTools) {
-    merged.disableTools = mergeSelectors(current.disableTools, required.disableTools);
-  }
-  if (required.preloadTools) {
-    merged.preloadTools = mergeSelectors(current.preloadTools, required.preloadTools);
-  }
-  if (required.requireApprovalForTools) {
-    merged.requireApprovalForTools = mergeSelectors(
-      current.requireApprovalForTools,
-      required.requireApprovalForTools
-    );
-  }
-  if (required.preload !== undefined) merged.preload = required.preload;
-
-  if (requiredEnabled.length > 0 && merged.disableTools) {
-    merged.disableTools = merged.disableTools.filter(
-      (selector) => !conflictsWithRequiredTool(selector, requiredEnabled)
-    );
-  }
-  return merged;
-}
-
-function mergeSelectors(
-  current: TrueForgeApi.McpServer["enableTools"],
-  required: NonNullable<TrueForgeApi.McpServer["enableTools"]>
-): NonNullable<TrueForgeApi.McpServer["enableTools"]> {
-  return [...new Set([...(current ?? []), ...required])];
-}
-
-function conflictsWithRequiredTool(selector: string, required: string[]): boolean {
-  if (selector === "@all" || selector === "@read-only") return true;
-  return required.includes(selector) || required.includes("@all");
-}
-
-function manifestsEqual(
-  left: TrueForgeApi.AgentSpec,
-  right: TrueForgeApi.AgentSpec
-): boolean {
-  return JSON.stringify(normalizeManifest(left)) === JSON.stringify(normalizeManifest(right));
-}
-
-function normalizeManifest(manifest: TrueForgeApi.AgentSpec): unknown {
-  const normalized = { ...manifest } as Record<string, unknown>;
-  if (manifest.mcpServers) {
-    normalized.mcpServers = [...manifest.mcpServers]
-      .map((server) => normalizeMcpServer(server))
-      .sort((left, right) => String(left.name).localeCompare(String(right.name)));
-  }
-  return normalizeValue(normalized);
-}
-
-function normalizeMcpServer(server: TrueForgeApi.McpServer): Record<string, unknown> {
-  const normalized = { ...server } as Record<string, unknown>;
-  for (const key of ["enableTools", "disableTools", "preloadTools", "requireApprovalForTools"] as const) {
-    const values = server[key];
-    if (values) normalized[key] = [...new Set(values)].sort();
-  }
-  return normalized;
-}
-
-function normalizeValue(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map((item) => normalizeValue(item));
-  if (!isRecord(value)) return value;
-  return Object.fromEntries(
-    Object.entries(value)
-      .filter(([, item]) => item !== undefined)
-      .sort(([left], [right]) => left.localeCompare(right))
-      .map(([key, item]) => [key, normalizeValue(item)])
-  );
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
 function buildManifest(
   input: AgentWriteInput,
-  current?: TrueForgeApi.AgentSpec,
-  managedByMissionControl = false
+  current?: TrueForgeApi.AgentSpec
 ): TrueForgeApi.AgentSpec {
-  const currentEditableInstructions = stripStoredRuntimeInstructions(
-    current?.instructions ?? "",
-    managedByMissionControl
-  );
+  const currentEditableInstructions = stripStoredRuntimeInstructions(current?.instructions ?? "");
   const editableInstructions = input.instructions === undefined
     ? currentEditableInstructions.trim()
     : optionalText(input.instructions, 12000) ?? "";
@@ -528,8 +320,7 @@ function buildManifest(
     ? current?.mcpServers ?? defaultMissionControlServer()
     : parseMcpServers(input.mcpServers);
   const sandboxEnabled = input.sandboxEnabled ?? current?.config?.sandbox?.enabled ?? false;
-  const subagentsEnabled =
-    input.subagentsEnabled ?? current?.config?.dynamicSubAgents?.enabled ?? true;
+  const subagentsEnabled = input.subagentsEnabled ?? current?.config?.dynamicSubAgents?.enabled ?? false;
 
   return {
     ...current,
@@ -542,10 +333,9 @@ function buildManifest(
         ...current?.config?.sandbox,
         enabled: sandboxEnabled,
       },
-      dynamicSubAgents: {
-        ...current?.config?.dynamicSubAgents,
-        enabled: subagentsEnabled,
-      },
+      // Dynamic subagents are opt-in per specialist. The runtime prompt still
+      // requires an explicit assignment before creating one.
+      dynamicSubAgents: { enabled: subagentsEnabled },
     },
   };
 }
@@ -607,18 +397,6 @@ function validateMissionControlTools(mcpServers: TrueForgeApi.McpServer[]) {
   }
 }
 
-function withRequiredMissionControlTools(
-  servers: TrueForgeApi.McpServer[]
-): TrueForgeApi.McpServer[] {
-  const existing = servers.find((server) => server.name === MCP_SERVER_NAME);
-  if (!existing) return [...servers, ...defaultMissionControlServer()];
-  const enabled = new Set(existing.enableTools ?? []);
-  for (const tool of REQUIRED_MISSION_CONTROL_TOOLS) enabled.add(tool);
-  return servers.map((server) =>
-    server.name === MCP_SERVER_NAME ? { ...server, enableTools: [...enabled] } : server
-  );
-}
-
 function defaultMissionControlServer(): TrueForgeApi.McpServer[] {
   return [{ name: MCP_SERVER_NAME, enableTools: [...REQUIRED_MISSION_CONTROL_TOOLS] }];
 }
@@ -627,60 +405,59 @@ async function resolveRemoteAgent(id: string): Promise<TrueForgeApi.Agent> {
   return (await tf().agents.get(id)).data;
 }
 
+type AgentProfileMetadata = {
+  slug: string;
+  name: string;
+  description: string;
+  enabled: boolean;
+  updatedAt: number;
+};
+
+function requireProfileMetadata(value: unknown): AgentProfileMetadata {
+  if (!value || typeof value !== "object" || typeof (value as AgentProfileMetadata).name !== "string") {
+    const result = value as { reason?: string } | null;
+    throw new AgentInputError(result?.reason ?? "Could not save the agent profile.");
+  }
+  return value as AgentProfileMetadata;
+}
+
 function toDefinition(
   agent: TrueForgeApi.Agent,
-  metadata?: {
-    name: string;
-    description: string;
-    enabled: boolean;
-    updatedAt: Date;
-  }
+  metadata?: AgentProfileMetadata
 ): AgentDefinition {
   const role = ROLES[agent.name];
-  const managedByMissionControl = Boolean(role || metadata);
+  const embeddedDescription = routingDescription(agent.manifest.instructions ?? "");
   return {
     id: agent.id,
     slug: agent.name,
     name: metadata?.name ?? role?.label ?? humanize(agent.name),
     description:
-      metadata?.description ?? role?.description ?? "Reusable TrueForge specialist agent.",
-    instructions: stripStoredRuntimeInstructions(
-      agent.manifest.instructions ?? "",
-      managedByMissionControl
-    ),
+      metadata?.description || embeddedDescription || role?.description || "Reusable TrueForge specialist agent.",
+    instructions: stripStoredRuntimeInstructions(agent.manifest.instructions ?? ""),
     isDefault: Boolean(role),
     enabled: metadata?.enabled ?? true,
-    updatedAt: metadata?.updatedAt ?? null,
+    updatedAt: metadata?.updatedAt ? new Date(metadata.updatedAt) : null,
     model: agent.manifest.model.name,
     mcpServers: agent.manifest.mcpServers ?? [],
     sandboxEnabled: agent.manifest.config?.sandbox?.enabled ?? false,
-    subagentsEnabled: agent.manifest.config?.dynamicSubAgents?.enabled ?? true,
+    subagentsEnabled: agent.manifest.config?.dynamicSubAgents?.enabled ?? false,
   };
 }
 
-function stripStoredRuntimeInstructions(
-  storedInstructions: string,
-  managedByMissionControl: boolean
-): string {
-  const current = stripSpecialistRuntimeInstructions(storedInstructions);
-  if (current !== storedInstructions || !managedByMissionControl) return current;
-
-  const runtimeMarker = "You are a specialist agent in a fleet managed by Mission Control.\n";
-  if (!storedInstructions.startsWith(runtimeMarker)) return storedInstructions;
-  const boundary = storedInstructions.indexOf("\n\n");
-  return boundary === -1 ? storedInstructions : storedInstructions.slice(boundary + 2);
+function stripStoredRuntimeInstructions(storedInstructions: string): string {
+  return stripSpecialistRuntimeInstructions(storedInstructions);
 }
 
-function requiredText(value: string | undefined, field: string, max: number): string {
+function requiredText(value: string | undefined, field: string, max?: number): string {
   const clean = optionalText(value, max);
   if (!clean) throw new AgentInputError(`${field} is required.`);
   return clean;
 }
 
-function optionalText(value: unknown, max: number): string | undefined {
+function optionalText(value: unknown, max?: number): string | undefined {
   if (typeof value !== "string") return undefined;
   const clean = value.trim();
-  return clean ? clean.slice(0, max) : undefined;
+  return clean ? (max === undefined ? clean : clean.slice(0, max)) : undefined;
 }
 
 function humanize(value: string): string {

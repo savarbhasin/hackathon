@@ -1,10 +1,14 @@
 "use client";
 
 import Link from "next/link";
-import { use, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useQuery } from "convex/react";
+import { anyApi } from "convex/server";
+import { use, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { ChatMarkdown } from "@/components/chat-markdown";
+
+const convexApi = anyApi as any;
 
 interface TaskEvent {
   id: string;
@@ -49,10 +53,14 @@ interface TaskDetail {
   predecessors: Predecessor[];
   documents: TaskDocument[];
   events: TaskEvent[];
+  runId?: string | null;
+  runStatus?: string | null;
+  run?: { id: string; status: string | null } | null;
 }
 
 interface PendingAction {
   type: string;
+  selector?: string;
   calls: Array<{
     id: string;
     threadId?: string | null;
@@ -102,58 +110,178 @@ const STATUS: Record<string, { label: string; description: string; color: string
   },
 };
 
+function composeTaskDetail(coreValue: unknown, activityValue: unknown, documentValue: unknown, runStateValue: unknown): TaskDetail | null | undefined {
+  if (coreValue === undefined || activityValue === undefined || documentValue === undefined || runStateValue === undefined) return undefined;
+  if (!coreValue || typeof coreValue !== "object") return null;
+
+  const core = asRecord(coreValue);
+  if (!core) return null;
+  const runState = asRecord(runStateValue);
+  const activeRun = asRecord(runState?.active);
+  const latestRun = asRecord(runState?.latest);
+  const run = activeRun ?? latestRun;
+  const runStatus = stringValue(run?.status);
+  const rawPending = run?.pendingActions ?? core.pendingActions;
+  const pendingActions = normalizePendingActions(rawPending, stringValue(run?.pendingActionSelector));
+  const mission = asRecord(core.mission);
+  const predecessors = Array.isArray(core.predecessors) ? core.predecessors.flatMap((value) => {
+    const predecessor = asRecord(value);
+    if (!predecessor) return [];
+    return [{
+      id: idValue(predecessor._id ?? predecessor.id),
+      title: stringValue(predecessor.title) ?? "Untitled task",
+      column: stringValue(predecessor.column) ?? "backlog",
+      role: stringValue(predecessor.role) ?? "",
+    }];
+  }) : [];
+  const events = Array.isArray(activityValue) ? activityValue.flatMap(normalizeEvent) : [];
+  const documents = Array.isArray(documentValue) ? documentValue.flatMap(normalizeDocument) : [];
+  const coreColumn = stringValue(core.column) ?? "backlog";
+
+  return {
+    id: idValue(core._id ?? core.id),
+    title: stringValue(core.title ?? core.name) ?? "Untitled task",
+    detail: textValue(core.detail),
+    role: stringValue(core.role) ?? "",
+    agentPrompt: textValue(core.agentPrompt),
+    agentInstructions: textValue(core.agentInstructions ?? core.agentPrompt),
+    column: columnFor(coreColumn, runStatus),
+    sessionId: stringValue(core.sessionId) ?? stringValue(run?.sessionId),
+    dependsOn: JSON.stringify(Array.isArray(core.dependsOn) ? core.dependsOn.map(idValue) : []),
+    handoff: textValue(core.handoff),
+    output: textValue(core.output) ?? textValue(run?.output),
+    error: textValue(core.error) ?? textValue(run?.errorMessage),
+    pendingActions: pendingActions.length > 0 ? JSON.stringify(pendingActions) : null,
+    createdAt: dateText(core.createdAt),
+    updatedAt: dateText(core.updatedAt),
+    mission: {
+      id: idValue(mission?._id ?? mission?.id),
+      title: stringValue(mission?.title) ?? "Unknown mission",
+      goal: stringValue(mission?.goal) ?? "",
+    },
+    predecessors,
+    documents,
+    events,
+    runId: idValue(run?._id ?? run?.id) || null,
+    runStatus,
+    run: run ? { id: idValue(run._id ?? run.id), status: runStatus } : null,
+  };
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+}
+
+function stringValue(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function idValue(value: unknown): string {
+  return typeof value === "string" ? value : value == null ? "" : String(value);
+}
+
+function textValue(value: unknown): string | null {
+  if (value == null) return null;
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  const record = asRecord(value);
+  if (record && typeof record.content === "string") return record.content;
+  if (record && typeof record.text === "string") return record.text;
+  try { return JSON.stringify(value); } catch { return String(value); }
+}
+
+function dateText(value: unknown): string {
+  if (typeof value === "number") return new Date(value).toISOString();
+  if (typeof value === "string") return value;
+  return new Date(0).toISOString();
+}
+
+function columnFor(taskColumn: string, runStatus: string | null): string {
+  switch (runStatus) {
+    case "queued":
+    case "enqueued":
+    case "connecting":
+    case "running": return "working";
+    case "waiting_for_approval": return "approval";
+    case "waiting_for_user":
+    case "failed": return "blocked";
+    case "cancelled": return "backlog";
+    case "completed": return "settled";
+    default: return taskColumn;
+  }
+}
+
+function normalizeEvent(value: unknown): TaskEvent[] {
+  const event = asRecord(value);
+  if (!event) return [];
+  return [{
+    id: idValue(event._id ?? event.id),
+    seq: typeof event.seq === "number" ? event.seq : 0,
+    type: stringValue(event.type) ?? "unknown",
+    payload: payloadText(event.payload),
+    createdAt: dateText(event.createdAt),
+  }];
+}
+
+function normalizeDocument(value: unknown): TaskDocument[] {
+  const document = asRecord(value);
+  if (!document) return [];
+  return [{
+    id: idValue(document._id ?? document.id),
+    title: stringValue(document.title) ?? "Untitled document",
+    updatedAt: dateText(document.updatedAt),
+    authorRole: stringValue(document.authorRole) ?? "unknown",
+    kind: stringValue(document.kind) ?? "artifact",
+  }];
+}
+
+function payloadText(value: unknown): string {
+  if (typeof value === "string") return value;
+  try { return JSON.stringify(value ?? {}); } catch { return "{}"; }
+}
+
+function normalizePendingActions(value: unknown, selector?: string | null): PendingAction[] {
+  let source = value;
+  if (typeof source === "string") {
+    try { source = JSON.parse(source); } catch { return []; }
+  }
+  if (!Array.isArray(source)) return [];
+  return source.flatMap((rawAction) => {
+    const action = asRecord(rawAction);
+    if (!action || typeof action.type !== "string") return [];
+    const actionSelector = stringValue(action.selector) ?? selector ?? undefined;
+    const rawCalls = Array.isArray(action.calls) ? action.calls : Array.isArray(action.toolCalls) ? action.toolCalls : [];
+    const calls = rawCalls.flatMap((rawCall) => {
+      const call = asRecord(rawCall);
+      if (!call || typeof call.id !== "string") return [];
+      const args = typeof call.args === "string"
+        ? call.args
+        : typeof action.question === "string"
+          ? JSON.stringify({ question: action.question })
+          : typeof action.argsPreview === "string" ? action.argsPreview : undefined;
+      return [{
+        id: call.id,
+        threadId: typeof call.threadId === "string" || call.threadId === null ? call.threadId : typeof action.threadId === "string" || action.threadId === null ? action.threadId : undefined,
+        ...(typeof call.name === "string" ? { name: call.name } : typeof action.name === "string" ? { name: action.name } : {}),
+        ...(args ? { args } : {}),
+      }];
+    });
+    return [{ type: action.type, ...(actionSelector ? { selector: actionSelector } : {}), calls }];
+  });
+}
+
 export default function TaskPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
-  const [task, setTask] = useState<TaskDetail | null>(null);
-  const [loading, setLoading] = useState(true);
+  const core = useQuery(convexApi.missions.taskCore, { taskId: id });
+  const activityRows = useQuery(convexApi.missions.taskActivity, { taskId: id, limit: 2000 });
+  const documentRows = useQuery(convexApi.missions.taskDocuments, { taskId: id, limit: 500 });
+  const runState = useQuery(convexApi.agentRuns.taskRunState, { taskId: id });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [answer, setAnswer] = useState("");
 
-  // One task subscription drives both the live activity log and the chat history.
-  useEffect(() => {
-    if (!task?.id) return;
-    const stream = new EventSource(`/api/tasks/${encodeURIComponent(id)}/stream`);
-    stream.onmessage = (event) => {
-      try {
-        const next = JSON.parse(event.data) as TaskDetail & { error?: string };
-        if (next.error) return;
-        setTask(next);
-      } catch { /* ignore a partial event */ }
-    };
-    stream.onerror = () => { /* EventSource reconnects automatically */ };
-    return () => stream.close();
-  }, [id, task?.id]);
-
-  const fetchTask = useCallback(async (): Promise<TaskDetail> => {
-    const response = await fetch(`/api/tasks/${encodeURIComponent(id)}`, { cache: "no-store" });
-    if (!response.ok) {
-      if (response.status === 404) throw new Error("This task does not exist.");
-      throw new Error("Could not load this task.");
-    }
-    return response.json() as Promise<TaskDetail>;
-  }, [id]);
-
-  const loadTask = useCallback(async () => {
-    setTask(await fetchTask());
-  }, [fetchTask]);
-
-  useEffect(() => {
-    let alive = true;
-    void fetchTask()
-      .then((next) => {
-        if (alive) setTask(next);
-      })
-      .catch((cause) => {
-        if (alive) setError(cause instanceof Error ? cause.message : String(cause));
-      })
-      .finally(() => {
-        if (alive) setLoading(false);
-      });
-    return () => {
-      alive = false;
-    };
-  }, [fetchTask]);
+  const task = useMemo(() => composeTaskDetail(core, activityRows, documentRows, runState), [core, activityRows, documentRows, runState]);
+  const loading = core === undefined || activityRows === undefined || documentRows === undefined || runState === undefined;
 
   async function act(body: Record<string, unknown>) {
     if (busy) return;
@@ -170,7 +298,6 @@ export default function TaskPage({ params }: { params: Promise<{ id: string }> }
         reason?: string;
       };
       if (!response.ok) throw new Error(result.error ?? result.reason ?? "The task could not be updated.");
-      await loadTask();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -186,7 +313,7 @@ export default function TaskPage({ params }: { params: Promise<{ id: string }> }
         <TaskHeader />
         <div className="mx-auto flex w-full max-w-xl flex-1 flex-col items-start justify-center px-6 pb-24">
           <p className="font-mono text-[9px] uppercase tracking-[0.2em] text-state-blocked">Task unavailable</p>
-          <h1 className="mt-3 text-2xl font-semibold tracking-[-0.03em] text-ink">{error ?? "Could not load this task."}</h1>
+          <h1 className="mt-3 text-2xl font-semibold tracking-[-0.03em] text-ink">{core === null ? "This task does not exist." : error ?? "Could not load this task."}</h1>
           <div className="mt-6 flex gap-3">
             <button
               type="button"
@@ -205,12 +332,8 @@ export default function TaskPage({ params }: { params: Promise<{ id: string }> }
   }
 
   const pendingActions = parsePendingActions(task.pendingActions);
-  const semanticEvents = task.events.filter((event) => event.type.startsWith("activity."));
-  const activitySource = semanticEvents.length > 0 ? semanticEvents : task.events;
-  const activity = activitySource.flatMap((event) => {
-    const item = semanticEvents.length > 0
-      ? semanticActivityFromEvent(event)
-      : legacyActivityFromEvent(event);
+  const activity = task.events.filter((event) => event.type.startsWith("activity.")).flatMap((event) => {
+    const item = semanticActivityFromEvent(event);
     return item ? [item] : [];
   });
   const status = STATUS[task.column] ?? STATUS.backlog;
@@ -344,13 +467,14 @@ function TaskLoading() {
   return (
     <main className="h-full min-w-0 overflow-hidden bg-deck">
       <TaskHeader />
-      <div className="mx-auto max-w-[1180px] animate-pulse px-5 py-10 sm:px-8 lg:px-10">
-        <div className="h-3 w-40 rounded bg-panel-hi" />
-        <div className="mt-6 h-10 max-w-3xl rounded bg-panel-hi" />
-        <div className="mt-3 h-4 w-56 rounded bg-panel-hi" />
+      <div className="mx-auto max-w-[1180px] px-5 py-10 sm:px-8 lg:px-10" role="status" aria-label="Loading task" aria-busy="true">
+        <span className="sr-only">Loading task…</span>
+        <div className="h-3 w-40 rounded shimmer" />
+        <div className="mt-6 h-10 max-w-3xl rounded shimmer" />
+        <div className="mt-3 h-4 w-56 rounded shimmer" />
         <div className="mt-10 grid gap-8 lg:grid-cols-[minmax(0,1.6fr)_minmax(280px,0.72fr)]">
-          <div className="h-72 rounded-lg border border-line bg-panel/60" />
-          <div className="h-60 rounded-lg border border-line bg-panel/60" />
+          <div className="h-72 rounded-lg border border-line shimmer" />
+          <div className="h-60 rounded-lg border border-line shimmer" />
         </div>
       </div>
     </main>
@@ -383,6 +507,8 @@ function ActionPanel({
 }) {
   const approvals = pendingActions.filter((action) => action.type === "tool.approval_required");
   const questions = pendingActions.filter((action) => action.type === "tool.response_required");
+  const approvalSelector = pauseSelector(approvals);
+  const questionSelector = pauseSelector(questions);
   const needsAuth = pendingActions.some((action) => action.type === "mcp.auth_required");
 
   if (approvals.length > 0) {
@@ -395,16 +521,16 @@ function ActionPanel({
         <div className="mt-5 flex flex-col gap-2 sm:flex-row">
           <button
             type="button"
-            disabled={busy}
-            onClick={() => void onAct({ action: "approve", allow: true })}
+            disabled={busy || !approvalSelector}
+            onClick={() => void onAct({ action: "approve", allow: true, selector: approvalSelector })}
             className="rounded-md bg-ink px-5 py-3 text-xs font-semibold text-deck transition-colors hover:bg-white disabled:opacity-40"
           >
             {busy ? "Applying decision..." : "Approve action"}
           </button>
           <button
             type="button"
-            disabled={busy}
-            onClick={() => void onAct({ action: "approve", allow: false, reason: "Denied from task page" })}
+            disabled={busy || !approvalSelector}
+            onClick={() => void onAct({ action: "deny", allow: false, reason: "Denied from task page", selector: approvalSelector })}
             className="rounded-md border border-state-approval/50 px-5 py-3 text-xs font-semibold text-state-approval transition-colors hover:bg-state-approval/10 disabled:opacity-40"
           >
             Deny
@@ -431,8 +557,8 @@ function ActionPanel({
           onSubmit={(event) => {
             event.preventDefault();
             const content = answer.trim();
-            if (!content) return;
-            void onAct({ action: "answer", content }).then(() => onAnswerChange(""));
+            if (!content || !questionSelector) return;
+            void onAct({ action: "answer", content, selector: questionSelector }).then(() => onAnswerChange(""));
           }}
         >
           <label htmlFor="task-answer" className="font-mono text-[9px] font-semibold uppercase tracking-[0.14em] text-ink-soft">Your answer</label>
@@ -445,7 +571,7 @@ function ActionPanel({
             className="mt-2 w-full resize-y rounded-md border border-line-strong bg-deck/70 px-3 py-3 text-sm leading-6 text-ink outline-none placeholder:text-ink-faint focus:border-signal focus:ring-1 focus:ring-signal/30"
           />
           <button
-            disabled={busy || !answer.trim()}
+            disabled={busy || !answer.trim() || !questionSelector}
             className="mt-3 rounded-md bg-signal px-5 py-3 text-xs font-semibold text-deck transition-colors hover:brightness-110 disabled:opacity-40"
           >
             {busy ? "Sending..." : "Send answer"}
@@ -505,6 +631,15 @@ function ActionPanel({
   return null;
 }
 
+function pauseSelector(actions: PendingAction[]): string | undefined {
+  for (const action of actions) {
+    if (action.selector) return action.selector;
+    const call = action.calls[0];
+    if (call?.id) return call.id;
+  }
+  return undefined;
+}
+
 function PendingCalls({ actions, tone = "default" }: { actions: PendingAction[]; tone?: "default" | "question" }) {
   return (
     <div className="mt-4 space-y-2">
@@ -532,6 +667,30 @@ interface TaskChatMessage {
   clientMessageId?: string;
 }
 
+function isTaskMessageError(status?: string): boolean {
+  if (!status) return false;
+  const normalized = status.trim().toLowerCase();
+  return normalized === "error" || normalized === "failed" || normalized.includes("failed");
+}
+
+function TaskChatAssistantMessage({ message, busy }: { message: TaskChatMessage; busy: boolean }) {
+  const failed = isTaskMessageError(message.status);
+  return (
+    <div className="relative max-w-3xl pl-6 before:absolute before:bottom-0 before:left-[3px] before:top-0 before:w-px before:bg-line">
+      <span className={`absolute left-0 top-1.5 h-[7px] w-[7px] rounded-full ${failed ? "bg-error" : (busy || message.status === "queued") && !message.content ? "bg-signal led-live" : "border border-line bg-deck"}`} />
+      <p className={`mb-2 flex items-center gap-2 font-mono text-[8px] uppercase tracking-[0.2em] ${failed ? "text-error" : "text-state-working"}`}>
+        {failed ? "Error" : "Task agent"}
+        {!failed && (busy || message.status === "queued") && !message.content && <span className="tool-activity-live text-ink-faint">Thinking</span>}
+      </p>
+      {failed ? (
+        <div role="alert" className="mt-2 rounded-md border border-error/60 bg-error/10 px-3 py-2.5 text-sm leading-relaxed text-error">
+          {message.content || "The response could not be completed."}
+        </div>
+      ) : message.content ? <ChatMarkdown>{message.content}</ChatMarkdown> : null}
+    </div>
+  );
+}
+
 function TaskChat({ taskId, events, column, hasSession }: { taskId: string; events: TaskEvent[]; column: string; hasSession: boolean }) {
   const [messages, setMessages] = useState<TaskChatMessage[]>(() => chatMessages(events));
   const [input, setInput] = useState("");
@@ -541,8 +700,10 @@ function TaskChat({ taskId, events, column, hasSession }: { taskId: string; even
 
   const displayedMessages = useMemo(() => {
     const persisted = chatMessages(events);
-    const persistedClientIds = new Set(persisted.map((message) => message.clientMessageId).filter(Boolean));
-    return [...persisted, ...messages.filter((message) => !message.clientMessageId || !persistedClientIds.has(message.clientMessageId))];
+    const persistedClientKeys = new Set(persisted
+      .filter((message) => message.clientMessageId)
+      .map((message) => `${message.role}:${message.clientMessageId}`));
+    return [...persisted, ...messages.filter((message) => !message.clientMessageId || !persistedClientKeys.has(`${message.role}:${message.clientMessageId}`))];
   }, [events, messages]);
 
   useEffect(() => {
@@ -555,35 +716,23 @@ function TaskChat({ taskId, events, column, hasSession }: { taskId: string; even
     if (!content || busy || column === "working" || column === "blocked" || column === "approval") return;
     setInput(""); setError(null); setBusy(true);
     const localId = `local-${Date.now()}`;
-    setMessages((current) => [...current, { id: localId, role: "user", content, clientMessageId: localId }, { id: `${localId}-reply`, role: "assistant", content: "", clientMessageId: localId }]);
+    setMessages((current) => [...current, { id: localId, role: "user", content, clientMessageId: localId }, { id: `${localId}-reply`, role: "assistant", content: "", status: "queued", clientMessageId: localId }]);
     try {
       const response = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/chat`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message: content, clientMessageId: localId }) });
-      if (!response.ok || !response.body) throw new Error((await response.json().catch(() => null) as { error?: string } | null)?.error ?? "Chat is unavailable.");
-      const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = "";
-      for (;;) {
-        const { done, value } = await reader.read(); if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n\n"); buffer = lines.pop() ?? "";
-        for (const line of lines) {
-          if (!line.startsWith("data: ") || line.slice(6).trim() === "[DONE]") continue;
-          const event = JSON.parse(line.slice(6)) as { kind: string; text?: string; content?: string; status?: string };
-          if (event.kind === "delta") setMessages((current) => current.map((message) => message.id === `${localId}-reply` ? { ...message, content: message.content + (event.text ?? "") } : message));
-          if (event.kind === "done") setMessages((current) => current.map((message) => message.id === `${localId}-reply` ? { ...message, content: event.content ?? message.content, status: event.status } : message));
-          if (event.kind === "error") throw new Error(event.text ?? "The chat turn failed.");
-        }
-      }
+      if (!response.ok) throw new Error((await response.json().catch(() => null) as { error?: string } | null)?.error ?? "Chat is unavailable.");
+      return;
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
-      setMessages((current) => current.map((message) => message.id === `${localId}-reply` ? { ...message, content: "The agent could not answer." } : message));
+      setMessages((current) => current.map((message) => message.id === `${localId}-reply` ? { ...message, status: "failed", content: "The agent could not answer." } : message));
     } finally { setBusy(false); }
   }
 
   const available = hasSession && column !== "working" && column !== "approval" && column !== "blocked";
   const unavailableCopy = !hasSession
-    ? "Dispatch the task to start an agent session before chatting."
-    : column === "working"
-      ? "The agent is still running. Chat opens when this turn finishes."
-      : "Resolve the pending action above before continuing this session.";
+      ? "Dispatch the task to start an agent session before chatting."
+      : column === "working"
+        ? "The agent is still running. Chat opens when this turn finishes."
+        : "Resolve the pending action above before continuing this session.";
 
   return (
     <section aria-labelledby="task-chat-heading">
@@ -599,14 +748,7 @@ function TaskChat({ taskId, events, column, hasSession }: { taskId: string; even
               </div>
             </div>
           ) : (
-            <div key={message.id} className="relative max-w-3xl pl-6 before:absolute before:bottom-0 before:left-[3px] before:top-0 before:w-px before:bg-line">
-              <span className={`absolute left-0 top-1.5 h-[7px] w-[7px] rounded-full ${busy && !message.content ? "bg-signal led-live" : "border border-line bg-deck"}`} />
-              <p className="mb-2 flex items-center gap-2 font-mono text-[8px] uppercase tracking-[0.2em] text-state-working">
-                Task agent
-                {busy && !message.content && <span className="text-ink-faint">thinking</span>}
-              </p>
-              {message.content ? <ChatMarkdown>{message.content}</ChatMarkdown> : <span className="inline-block h-4 w-28 animate-pulse rounded bg-panel-hi" />}
-            </div>
+            <TaskChatAssistantMessage key={message.id} message={message} busy={busy} />
           )) : (
             <div className="flex min-h-[300px] items-center justify-center text-center">
               <div className="max-w-sm">
@@ -860,60 +1002,6 @@ function semanticActivityFromEvent(event: TaskEvent): ActivityItem | null {
     detail: details.length > 0 ? details.join("\n") : undefined,
     tone: fallback.tone,
   };
-}
-
-function legacyActivityFromEvent(event: TaskEvent): ActivityItem | null {
-  const payload = parsePayload(event.payload);
-  switch (event.type) {
-    case "turn.created":
-      return { id: event.id, at: event.createdAt, title: "Agent started working", tone: "working" };
-    case "mcp.initialize": {
-      const servers = Array.isArray(payload?.mcpServers)
-        ? payload.mcpServers.flatMap((server) => {
-            if (!server || typeof server !== "object") return [];
-            const name = (server as Record<string, unknown>).name;
-            return typeof name === "string" ? [name] : [];
-          })
-        : [];
-      return {
-        id: event.id,
-        at: event.createdAt,
-        title: "Connected tools",
-        detail: servers.length > 0 ? servers.join(", ") : undefined,
-        tone: "working",
-      };
-    }
-    case "tool.approval_required":
-      return { id: event.id, at: event.createdAt, title: "Paused for approval", tone: "approval" };
-    case "tool.response_required":
-      return { id: event.id, at: event.createdAt, title: "Asked for more information", tone: "blocked" };
-    case "pause.pending":
-      return { id: event.id, at: event.createdAt, title: "Waiting for you", tone: "blocked" };
-    case "specialist.mark_done":
-      return {
-        id: event.id,
-        at: event.createdAt,
-        title: "Agent reported completion",
-        detail: typeof payload?.summary === "string" ? payload.summary : undefined,
-        tone: "settled",
-      };
-    case "tool.response": {
-      const content = typeof payload?.content === "string" ? payload.content.trim() : "";
-      if (!content || content.length > 240 || content.startsWith("{") || content.includes("inputSchema")) return null;
-      if (!/(document (created|updated)|recorded|created issue|issue created|saved)/i.test(content)) return null;
-      return { id: event.id, at: event.createdAt, title: "Tool completed", detail: content, tone: "working" };
-    }
-    case "turn.done": {
-      const state = payload?.state;
-      const status = state && typeof state === "object" ? (state as Record<string, unknown>).status : undefined;
-      if (status === "done") return { id: event.id, at: event.createdAt, title: "Agent finished", tone: "settled" };
-      if (status === "error") return { id: event.id, at: event.createdAt, title: "Agent stopped with an error", tone: "blocked" };
-      if (status === "cancelled") return { id: event.id, at: event.createdAt, title: "Run was cancelled", tone: "blocked" };
-      return null;
-    }
-    default:
-      return null;
-  }
 }
 
 function concise(value: string, max = 480): string {

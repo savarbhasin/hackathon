@@ -2,9 +2,7 @@
 
 A control center for running agent fleets on TrueForge. Instead of chatting with one agent at a time, you hand a mission to an orchestrator that decomposes it into a board of tasks, delegates each task to a specialist agent, and keeps every irreversible action behind a human approval gate.
 
-This repo is the plan for the week — the build happens on branches as each piece lands.
-
-## What it will do
+## What it does
 
 - **Mission intake through chat.** You describe an outcome; the orchestrator decides whether to answer directly or split the work into a dependency graph of specialist tasks.
 - **Specialists that own one job each.** Every task is assigned to an agent configured with its own model, tools, and connector access. No agent wanders outside its assignment.
@@ -13,7 +11,7 @@ This repo is the plan for the week — the build happens on branches as each pie
 - **Documents as handoffs.** Research, briefs, and finished artifacts get saved as versioned Markdown so downstream agents inherit real material, not lossy chat summaries.
 - **Recurring missions.** Cron-driven schedules kick off prompts on an interval — morning digests, periodic research sweeps.
 
-## Planned architecture
+## Architecture
 
 ```
 Browser
@@ -21,14 +19,16 @@ Browser
   ├─ /board       Kanban of tasks with per-task drawer
   ├─ /agents      Specialist registry (model + tool access per role)
   └─ /schedules   Recurring prompts
-        │ SSE
+        │ Convex subscriptions
         ▼
-Next.js  ── Prisma/SQLite ── TrueForge server (sessions, turns, events)
-                    │
-             MCP server exposing board tools to agents
+Next.js  ── Convex ── TrueForge server (sessions, turns, events)
+   │                   │
+   └─ BullMQ/Redis ── worker
+                       │
+                MCP server exposing board tools to agents
 ```
 
-One shared SQLite file between the app and the MCP server keeps the board honest: what you see is exactly what the agents did.
+Convex is the source of truth for the board and run state. BullMQ and Redis deliver work to the worker, which owns the long-lived TrueForge stream.
 
 ## The board
 
@@ -38,16 +38,19 @@ Tasks move through `backlog → working → blocked → approval → settled`. T
 - **blocked** — the agent asked a question; answer resumes the same thread
 - **settled** — done, and any successor whose dependencies just cleared gets dispatched automatically
 
-## Milestones
+## Local development
 
-- [ ] Orchestrator chat streaming into a persisted conversation
-- [ ] Kanban board fed by the same database the agents write to
-- [ ] MCP tool surface: mark_done, create_doc, board queries, dispatch
-- [ ] Specialist registry synced with TrueForge agents
-- [ ] Approval gates on irreversible tool calls
-- [ ] Document handoffs between dependent tasks
-- [ ] Cron schedules for recurring missions
+Copy `.env.example` to `.env.local`, start Redis with `docker compose up redis`, and run these processes:
+
+```bash
+npx convex dev
+npm run dev
+npm run dev:worker
+npm run dev:mcp
+```
+
+The web app uses `NEXT_PUBLIC_CONVEX_URL`. Next.js, the MCP server, and the worker use `CONVEX_URL`. Redis carries BullMQ delivery only. TrueForge owns agent sessions and turns.
 
 ## Stack
 
-Next.js (App Router) · TypeScript · Prisma + SQLite · TrueForge SDK · Model Context Protocol · croner
+Next.js (App Router) · TypeScript · Convex · Redis/BullMQ · TrueForge SDK · Model Context Protocol

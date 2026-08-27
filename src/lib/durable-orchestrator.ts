@@ -1,0 +1,369 @@
+import { isEventDelta, mergeEventDelta, TrueForge } from "@truefoundry/trueforge-sdk";
+import type { TrueForgeApi } from "@truefoundry/trueforge-sdk";
+import { ORCHESTRATOR_INSTRUCTIONS, ORCHESTRATOR_SPEC } from "./fleet";
+import type { AgentRunRecord, AgentRunStore, PendingAction } from "./queue/types";
+import { RecoverableRunError } from "./queue/types";
+import { trueForgeBaseUrl } from "./queue/env";
+import { workerLog } from "./queue/log";
+
+export type DurableOrchestratorInput = {
+  message: string;
+  documentIds?: string[];
+  items?: Array<Record<string, unknown>>;
+};
+
+type RecordValue = Record<string, unknown>;
+type WorkerContext = { workerId: string; signal: AbortSignal };
+
+function record(value: unknown): RecordValue | null {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as RecordValue : null;
+}
+
+export function parseDurableOrchestratorInput(value: unknown): DurableOrchestratorInput {
+  const input = record(value);
+  const message = typeof input?.message === "string" ? input.message : "";
+  const items = Array.isArray(input?.items) && input.items.every((item) => record(item))
+    ? input.items as Array<Record<string, unknown>>
+    : undefined;
+  const documentIds = Array.isArray(input?.documentIds)
+    ? input.documentIds.filter((id): id is string => typeof id === "string" && id.length > 0).slice(0, 8)
+    : [];
+  if (!message.trim() && (!items || items.length === 0)) {
+    throw new Error("Invalid durable orchestrator input: expected a message or turn input items");
+  }
+  return { message, documentIds, items };
+}
+
+async function orchestratorSpec(): Promise<TrueForgeApi.AgentSpec> {
+  const { agentRosterBlock } = await import("./agents");
+  const roster = await agentRosterBlock();
+  return roster ? { ...ORCHESTRATOR_SPEC, instructions: `${ORCHESTRATOR_INSTRUCTIONS}\n\n${roster}` } : ORCHESTRATOR_SPEC;
+}
+
+async function attachedDocumentContext(store: AgentRunStore, ids: string[]): Promise<string> {
+  const unique = [...new Set(ids)].slice(0, 5);
+  if (unique.length === 0) return "";
+  const documents = await Promise.all(unique.map((id) => store.getDocument(id).catch(() => null)));
+  let used = 0;
+  const parts: string[] = [];
+  for (const document of documents) {
+    if (!document) continue;
+    const remaining = 48_000 - used;
+    if (remaining <= 0) break;
+    const content = document.content.slice(0, Math.min(12_000, remaining));
+    used += content.length;
+    parts.push(`Document: ${document.title}\n${content}`);
+  }
+  return parts.length > 0
+    ? `\n\nThe user attached these saved documents as working context. Use them when relevant.\n\n${parts.join("\n\n---\n\n")}`
+    : "";
+}
+
+function turnItems(input: DurableOrchestratorInput, context: string): Array<Record<string, unknown>> {
+  if (input.items && input.items.length > 0) {
+    let addedContext = false;
+    const items = input.items.map((item) => {
+      if (!addedContext && item.type === "user.message" && typeof item.content === "string") {
+        addedContext = true;
+        return { ...item, content: `${item.content}${context}` };
+      }
+      return item;
+    });
+    if (addedContext) return items;
+    return [...items, { type: "user.message", content: `${input.message}${context}` }];
+  }
+  return [{ type: "user.message", content: `${input.message}${context}` }];
+}
+
+function numberCursor(value: string | undefined): number | null {
+  if (!value || !/^\d+$/.test(value)) return null;
+  const number = Number(value);
+  return Number.isSafeInteger(number) ? number : null;
+}
+
+function eventPayload(event: unknown): RecordValue {
+  return record(event) ?? { type: "unknown" };
+}
+
+function toolName(call: RecordValue): string | undefined {
+  const fn = record(call.function);
+  const name = typeof fn?.name === "string" ? fn.name : undefined;
+  if (!name || name !== "call_tool") return name;
+  const args = typeof fn?.arguments === "string" ? fn.arguments : "";
+  try {
+    const parsed = JSON.parse(args) as RecordValue;
+    const nested = typeof parsed.tool_name === "string" ? parsed.tool_name : undefined;
+    return nested ? (typeof parsed.mcp_server === "string" ? `${parsed.mcp_server}.${nested}` : nested) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function callArgs(call: RecordValue): RecordValue | null {
+  const fn = record(call.function);
+  if (typeof fn?.arguments !== "string") return null;
+  try {
+    const value = JSON.parse(fn.arguments);
+    return record(value);
+  } catch {
+    return null;
+  }
+}
+
+function normalizedText(messages: Map<string, RecordValue>, fallback: string): string {
+  const text = [...messages.values()]
+    .filter((message) => message.threadId === undefined || message.threadId === "main")
+    .map((message) => typeof message.content === "string" ? message.content : "")
+    .join("");
+  return text || fallback;
+}
+
+function toolsFromMessages(messages: Map<string, RecordValue>): string[] {
+  const names = new Set<string>();
+  for (const message of messages.values()) {
+    for (const call of (Array.isArray(message.toolCalls) ? message.toolCalls : [])) {
+      const value = record(call);
+      const name = value ? toolName(value) : undefined;
+      if (name) names.add(name);
+    }
+  }
+  return [...names];
+}
+
+function stableSelector(runId: string, actionIndex: number, toolCallId: string, sourceEventId?: string): string {
+  const suffix = sourceEventId ? `${sourceEventId}_${toolCallId}` : toolCallId;
+  return `pause_${runId}_${actionIndex}_${suffix}`.slice(0, 240);
+}
+
+function enrichPendingActions(runId: string, required: unknown[], messages: Map<string, RecordValue>): PendingAction[] {
+  const result: PendingAction[] = [];
+  let index = 0;
+  for (const value of required) {
+    const action = record(value);
+    if (!action || typeof action.type !== "string") continue;
+    if (action.type !== "tool.approval_required" && action.type !== "tool.response_required" && action.type !== "mcp.auth_required") continue;
+    const refs = Array.isArray(action.toolCalls) ? action.toolCalls : [];
+    for (const refValue of refs) {
+      const ref = record(refValue);
+      if (!ref || typeof ref.id !== "string") continue;
+      const sourceEventId = typeof ref.sourceEventId === "string" ? ref.sourceEventId : undefined;
+      const message = sourceEventId ? messages.get(sourceEventId) : [...messages.values()].find((candidate) =>
+        Array.isArray(candidate.toolCalls) && candidate.toolCalls.some((call) => record(call)?.id === ref.id));
+      const call = message && Array.isArray(message.toolCalls)
+        ? message.toolCalls.map(record).find((candidate) => candidate?.id === ref.id)
+        : undefined;
+      const args = call ? callArgs(call) : null;
+      const fn = call ? record(call.function) : null;
+      const argsText = typeof fn?.arguments === "string" ? fn.arguments : undefined;
+      result.push({
+        type: action.type,
+        selector: stableSelector(runId, index++, ref.id, sourceEventId),
+        threadId: typeof action.threadId === "string" || action.threadId === null ? action.threadId : undefined,
+        toolCalls: [{ id: ref.id, ...(sourceEventId ? { sourceEventId } : {}) }],
+        ...(call && toolName(call) ? { name: toolName(call) } : {}),
+        ...(typeof args?.question === "string" ? { question: args.question } : {}),
+        ...(Array.isArray(args?.options) && args.options.every((option) => typeof option === "string") ? { options: args.options as string[] } : {}),
+        ...(argsText ? { argsPreview: argsText.slice(0, 300) } : {}),
+      });
+    }
+  }
+  return result;
+}
+
+function recoverableTerminal(message: string): boolean {
+  const normalized = message.toLowerCase();
+  if (["no credits", "unauthorized", "forbidden", "invalid"].some((part) => normalized.includes(part))) return false;
+  return /\b(408|429|5\d\d)\b/.test(normalized) || /timeout|temporar|unavailable/.test(normalized);
+}
+
+function recoverableError(error: unknown): RecoverableRunError | null {
+  if (error instanceof RecoverableRunError) return error;
+  const value = error as { message?: unknown; code?: unknown; name?: unknown; statusCode?: unknown };
+  const message = typeof value.message === "string" ? value.message : "";
+  const status = typeof value.statusCode === "number" ? value.statusCode : 0;
+  if (value.name === "AbortError" || status === 408 || status === 429 || status >= 500 || /fetch failed|econn|enotfound|network|timeout|temporar|unavailable|disconnect|socket|connection reset|aborted/i.test(message)) {
+    return new RecoverableRunError(typeof value.code === "string" ? value.code : "trueforge_stream", message || "Recoverable TrueForge failure");
+  }
+  return null;
+}
+
+async function requireCheckpoint(ok: boolean, code: string): Promise<void> {
+  if (!ok) throw new RecoverableRunError(code, `Durable checkpoint was rejected: ${code}`);
+}
+
+function completionTokenStatus(metrics: RecordValue | undefined): string {
+  const outputTokens = metrics?.totalOutputTokens;
+  const totalTokens = metrics?.totalTokens;
+  const tokens = typeof outputTokens === "number" && Number.isFinite(outputTokens)
+    ? outputTokens
+    : typeof totalTokens === "number" && Number.isFinite(totalTokens) ? totalTokens : 0;
+  return tokens > 0 ? `${Math.round(tokens).toLocaleString()} tokens` : "";
+}
+
+async function project(
+  store: AgentRunStore,
+  run: AgentRunRecord,
+  content: string,
+  tools: string[],
+  status: string,
+  pauseActions?: PendingAction[],
+): Promise<void> {
+  if (!run.conversationId) return;
+  await store.upsertAssistantMessage({
+    conversationId: run.conversationId,
+    runId: run._id,
+    operationKey: `assistant:${run._id}`,
+    content: content.slice(0, 100_000),
+    tools,
+    status,
+    ...(pauseActions ? { pauseActions } : {}),
+  });
+}
+
+/** Executes an orchestrator run after the generic claim has succeeded. */
+export async function processDurableOrchestratorRun(store: AgentRunStore, run: AgentRunRecord, context: WorkerContext): Promise<void> {
+  const attempt = run.attempt;
+  const client = new TrueForge({ baseUrl: trueForgeBaseUrl(), timeoutInSeconds: 60, maxRetries: 0 });
+  let sessionId = run.sessionId;
+  let turnId = run.turnId;
+  let mergedText = "";
+  let stateStatus = "running";
+  let metrics: RecordValue | undefined;
+  const messages = new Map<string, RecordValue>();
+  let fallbackDelta = "";
+  let tools: string[] = [];
+
+  try {
+    const input = parseDurableOrchestratorInput(run.input);
+    const hasResume = run.resumeInput !== undefined && run.resumeInput !== null;
+    if (!sessionId && run.conversationId) sessionId = await store.getConversationSession(run.conversationId) ?? undefined;
+    if (!sessionId) {
+      const { data: session } = await client.sessions.create({ agent: { spec: await orchestratorSpec() as never } });
+      sessionId = session.id;
+      await requireCheckpoint(await store.checkpointSession({ runId: run._id, attempt, workerId: context.workerId, sessionId }), "checkpoint_session");
+      if (run.conversationId) await requireCheckpoint(await store.checkpointConversationSession({ conversationId: run.conversationId, sessionId }), "checkpoint_conversation_session");
+    } else {
+      let sessionMissing = false;
+      try {
+        await client.sessions.get(sessionId);
+      } catch (error) {
+        const retryable = recoverableError(error);
+        if (retryable) throw retryable;
+        sessionMissing = true;
+      }
+      if (sessionMissing) {
+        const previousSession = sessionId;
+        const { data: session } = await client.sessions.create({ agent: { spec: await orchestratorSpec() as never } });
+        sessionId = session.id;
+        await requireCheckpoint(await store.checkpointSession({ runId: run._id, attempt, workerId: context.workerId, sessionId, expectedSessionId: previousSession }), "checkpoint_recreated_session");
+        if (run.conversationId) await requireCheckpoint(await store.checkpointConversationSession({ conversationId: run.conversationId, sessionId, expectedSessionId: previousSession }), "checkpoint_recreated_conversation_session");
+        if (hasResume) throw new Error("Cannot resume a paused turn after its TrueForge session was lost");
+        turnId = undefined;
+      } else {
+        try {
+          await client.sessions.update(sessionId, { agent: { spec: await orchestratorSpec() as never } });
+        } catch (error) {
+          workerLog("run.orchestrator_spec_refresh_failed", { runId: run._id, message: error instanceof Error ? error.message.slice(0, 200) : "unknown" });
+        }
+        if (run.conversationId) {
+          await requireCheckpoint(await store.checkpointConversationSession({ conversationId: run.conversationId, sessionId }), "checkpoint_existing_conversation_session");
+        }
+      }
+    }
+    if (!sessionId) throw new Error("Orchestrator session was not established");
+
+    if (hasResume) {
+      if (!run.turnId || !run.pendingActions) throw new Error("Resume run is missing paused turn or pending actions");
+      const turns = await client.sessions.listTurns(sessionId, { limit: 25 });
+      const newest = turns.data[0];
+      const ids: string[] = [];
+      for await (const turn of turns) ids.push(turn.id);
+      const oldIndex = ids.indexOf(run.turnId);
+      if (oldIndex > 0 && newest) turnId = newest.id;
+      else {
+        const { data: turn } = await client.sessions.createTurn(sessionId, { input: (Array.isArray(run.resumeInput) ? run.resumeInput : record(run.resumeInput)?.items) as never });
+        turnId = turn.id;
+      }
+      await requireCheckpoint(await store.checkpointSessionTurn({ runId: run._id, attempt, workerId: context.workerId, sessionId, turnId, expectedTurnId: run.turnId }), "checkpoint_resume_turn");
+      await requireCheckpoint(await store.acceptResume({ runId: run._id, attempt, workerId: context.workerId, turnId, pendingAction: run.pendingActions, pendingActionSelector: run.pendingActionSelector }), "accept_resume");
+    } else if (!turnId) {
+      const turns = await client.sessions.listTurns(sessionId, { limit: 25 });
+      const newest = turns.data[0];
+      if (newest && record(newest.state)?.status === "running") turnId = newest.id;
+      else {
+        const contextText = await attachedDocumentContext(store, input.documentIds ?? []);
+        const { data: turn } = await client.sessions.createTurn(sessionId, { input: turnItems(input, contextText) as never, previousTurnId: "none" as never });
+        turnId = turn.id;
+      }
+      await requireCheckpoint(await store.checkpointSessionTurn({ runId: run._id, attempt, workerId: context.workerId, sessionId, turnId }), "checkpoint_new_turn");
+    }
+    if (!turnId) throw new Error("Orchestrator turn was not established");
+
+    const stream = await client.sessions.subscribeToTurn(sessionId, turnId, hasResume ? {} : (run.providerSequence === undefined ? {} : { afterSequenceNumber: run.providerSequence }), { abortSignal: context.signal });
+    let fallbackSequence = (run.providerSequence ?? 0) + 1;
+    for await (const metadata of stream.withMetadata()) {
+      if (context.signal.aborted) throw new RecoverableRunError("worker_shutdown", "Worker shutdown interrupted provider subscription");
+      const event = eventPayload(metadata.data);
+      const type = typeof event.type === "string" ? event.type : "unknown";
+      const providerSequence = numberCursor(metadata.id);
+      const sequence = providerSequence ?? fallbackSequence++;
+      const providerEventId = typeof event.id === "string" && !isEventDelta(metadata.data as never) ? event.id : undefined;
+      if (type === "model.message") {
+        if (typeof event.id === "string") messages.set(event.id, event);
+      } else if (isEventDelta(metadata.data as never)) {
+        if (typeof event.id === "string") {
+          const base = messages.get(event.id);
+          if (base) mergeEventDelta(base as never, metadata.data as never);
+        }
+        if (event.threadId === "main" && typeof event.content === "string") fallbackDelta += event.content;
+      }
+      await store.appendProviderEvent({ runId: run._id, attempt, workerId: context.workerId, turnId, sequence, providerEventId, providerSequence: providerSequence ?? undefined, type, payload: event });
+      if (providerSequence !== null && !await store.checkpointProviderCursor({ runId: run._id, attempt, workerId: context.workerId, turnId, providerSequence })) return;
+      if (type !== "turn.done") continue;
+
+      const state = record(event.state) ?? {};
+      stateStatus = typeof state.status === "string" ? state.status : "error";
+      metrics = record(state.metrics) ?? undefined;
+      tools = toolsFromMessages(messages);
+      mergedText = typeof record(state.output)?.content === "string" ? record(state.output)?.content as string : normalizedText(messages, fallbackDelta);
+      if (stateStatus === "done") {
+        const actions = enrichPendingActions(run._id, Array.isArray(state.requiredActions) ? state.requiredActions : [], messages);
+        if (actions.length > 0) {
+          await project(store, run, mergedText, tools, actions.some((action) => action.type === "tool.approval_required") ? "waiting_for_approval" : "waiting_for_user", actions);
+          const pendingActionSelector = actions.length === 1 ? actions[0].selector : undefined;
+          const paused = actions.some((action) => action.type === "tool.approval_required")
+            ? await store.waitForApproval({ runId: run._id, attempt, workerId: context.workerId, pendingActions: actions, pendingActionSelector })
+            : await store.waitForUser({ runId: run._id, attempt, workerId: context.workerId, pendingActions: actions, pendingActionSelector });
+          if (!paused) return;
+          workerLog("run.orchestrator_paused", { runId: run._id, attempt, turnId, actionCount: actions.length });
+          return;
+        }
+        await project(store, run, mergedText, tools, completionTokenStatus(metrics), []);
+        if (!await store.complete({ runId: run._id, attempt, workerId: context.workerId, turnId, output: { content: mergedText, status: stateStatus, tools, ...(metrics ? { metrics } : {}) } })) return;
+        return;
+      }
+      if (stateStatus === "cancelled") {
+        await project(store, run, mergedText, tools, "cancelled", []);
+        if (!await store.cancel({ runId: run._id, attempt, workerId: context.workerId, turnId })) return;
+        return;
+      }
+      const message = typeof state.message === "string" ? state.message : "TrueForge turn returned an error state";
+      if (recoverableTerminal(message)) throw new RecoverableRunError("trueforge_terminal_transient", message);
+      await project(store, run, mergedText || message, tools, "failed", []);
+      await store.fail({ runId: run._id, attempt, workerId: context.workerId, turnId, errorCode: "trueforge_terminal", errorMessage: message });
+      return;
+    }
+    throw new RecoverableRunError("trueforge_stream_ended", "Provider stream ended without turn.done");
+  } catch (error) {
+    const retryable = recoverableError(error);
+    const message = error instanceof Error ? error.message : "Unknown orchestrator worker failure";
+    if (retryable) {
+      await project(store, run, mergedText || message, tools, "retrying", []);
+      await store.releaseForRetry({ runId: run._id, attempt, workerId: context.workerId, errorCode: retryable.code, errorMessage: retryable.message });
+      throw retryable;
+    }
+    await project(store, run, mergedText || message, tools, "failed", []);
+    await store.fail({ runId: run._id, attempt, workerId: context.workerId, turnId, errorCode: "worker_permanent", errorMessage: message });
+  }
+}
+

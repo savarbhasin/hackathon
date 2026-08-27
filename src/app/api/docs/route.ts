@@ -1,16 +1,19 @@
-import { db } from "@/lib/db";
+import {
+  convexDocumentsApi,
+  convexDocumentsClient,
+  convexMutationError,
+  serializeConvexDocument,
+} from "@/lib/convex-documents";
 
 export const runtime = "nodejs";
 
 export async function GET() {
-  const documents = await db.document.findMany({
-    include: {
-      mission: { select: { id: true, title: true } },
-      task: { select: { id: true, title: true, role: true } },
-    },
-    orderBy: { updatedAt: "desc" },
-  });
-  return Response.json(documents);
+  try {
+    const documents = await convexDocumentsClient().query(convexDocumentsApi.list, { limit: 200 });
+    return Response.json(Array.isArray(documents) ? documents.map(serializeConvexDocument).filter(Boolean) : []);
+  } catch {
+    return Response.json({ error: "Could not load documents." }, { status: 500 });
+  }
 }
 
 export async function POST(req: Request) {
@@ -18,13 +21,20 @@ export async function POST(req: Request) {
     title?: string;
     content?: string;
   };
-  const document = await db.document.create({
-    data: {
+  try {
+    const document = await convexDocumentsClient().mutation(convexDocumentsApi.save, {
+      operationKey: `user-doc:${crypto.randomUUID()}`,
       title: body.title?.slice(0, 160) || "Untitled document",
       content: body.content ?? "",
       authorRole: "user",
       kind: "user",
-    },
-  });
-  return Response.json(document, { status: 201 });
+    });
+    const error = convexMutationError(document);
+    if (error) return error;
+    const serialized = serializeConvexDocument(document);
+    if (!serialized) return Response.json({ error: "Document created but no document id was returned." }, { status: 502 });
+    return Response.json(serialized, { status: 201 });
+  } catch {
+    return Response.json({ error: "Could not create the document." }, { status: 500 });
+  }
 }

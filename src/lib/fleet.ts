@@ -2,39 +2,66 @@ import type { TrueForgeApi } from "@truefoundry/trueforge-sdk";
 
 export const MCP_SERVER_NAME = "mission-control";
 
-export const ORCHESTRATOR_MODEL = "openai/gpt-5-6-luna";
+export const ORCHESTRATOR_MODEL = "google-gemini/gemini-3-6-flash";
 export const SPECIALIST_MODEL = "openai/gpt-5-6-luna";
-export const TITLE_MODEL = SPECIALIST_MODEL;
+export const TITLE_MODEL = "google-gemini/gemini-3-6-flash";
 
-export const SPECIALIST_RUNTIME_PREAMBLE = `You are a specialist agent in a fleet managed by Mission Control.
+export const SPECIALIST_RUNTIME_PREAMBLE = `## Mission Control runtime instructions
 
-Scope and evidence:
+You are a specialist agent in a fleet managed by Mission Control.
+
+### Scope and evidence
 - Treat the mission as context and YOUR ASSIGNMENT as your exact scope. Do not broaden the mission, create board tasks, or take ownership of another specialist's work.
+- Use only the predefined specialist roster. Create or launch subagents only when dynamic subagents are enabled for you and the assignment explicitly requires parallel specialist work.
 - Use every supplied input and predecessor document before asking the user for information. Never invent facts, identifiers, tool results, completed actions, or access you do not have.
 - If instructions conflict, follow the narrower assignment and state the conflict in your completion summary. If a required input is still missing after safe checks, ask one precise question that names the missing item and why work cannot continue without it.
 - A failed or unavailable tool is not a successful result. Try a safe alternative when one exists. Otherwise report the failure plainly and do not claim completion.
 
-Documents and handoffs:
+### Documents and handoffs
 - Call get_doc for every DOC_ID listed in the kickoff before doing dependent work. If a document cannot be read, do not reconstruct or guess its contents.
 - When the kickoff lists downstream successors, create a document with create_doc and kind="handoff" whenever those successors need substantial context, evidence, decisions, or finished material from you. Make it self-contained enough for the next agent to continue without asking the user to repeat information.
 - Use kind="artifact" only for material that should remain available to people but is not needed by a successor. Do not put substantial downstream context only in mark_done.
 - After create_doc, verify the tool response reports the intended kind. Include the returned document ID in your completion summary.
 
-Completion:
+### Completion
 - Do not call mark_done until the requested deliverable exists, required checks are complete, and any approval-gated action has actually succeeded or been explicitly denied.
 - Call mark_done exactly once. Keep its summary to two to four factual sentences describing the completed outcome, important limitations, checks performed, and any document IDs. Do not paste the full deliverable into the summary.
-- If you create subagents, give each a self-contained assignment and tell it not to call mark_done. You remain responsible for checking their work and are the only agent that may finish the Mission Control task.`;
+
+<!-- End Mission Control runtime instructions -->`;
 
 const SPECIALIST_RUNTIME_PREFIX = `${SPECIALIST_RUNTIME_PREAMBLE}\n\n`;
+
+// The runtime section is intentionally marked as a reserved Markdown block.
+// TrueForge stores the full system prompt, while Mission Control's editor must
+// expose only the agent-authored portion. Keep the end marker explicit so a
+// prompt containing a similarly named heading cannot hide arbitrary content.
+const INTERNAL_RUNTIME_BLOCK = /(?:^|\n)## Mission Control runtime instructions[ \t]*\n[\s\S]*?<!--[ \t]*End Mission Control runtime instructions[ \t]*-->[ \t]*(?:\n|$)/gi;
+
+const ROUTING_DESCRIPTION_BLOCK = /(?:^|\n)(?:#{1,6}[ \t]+)?AGENT DESCRIPTION FOR ROUTING[ \t]*\n([\s\S]*?)(?=\n(?:#{1,6}[ \t]+|You are a specialist agent in a fleet managed by Mission Control\.|## Mission Control runtime instructions|ROLE:[ \t]*)|$)/i;
 
 export function withSpecialistRuntimeInstructions(instructions: string): string {
   return `${SPECIALIST_RUNTIME_PREFIX}${stripSpecialistRuntimeInstructions(instructions).trim()}`;
 }
 
+/**
+ * Remove shared Mission Control policy before exposing editable instructions.
+ *
+ * Current manifests use the reserved runtime block above.
+ */
 export function stripSpecialistRuntimeInstructions(instructions: string): string {
-  return instructions.startsWith(SPECIALIST_RUNTIME_PREFIX)
-    ? instructions.slice(SPECIALIST_RUNTIME_PREFIX.length)
-    : instructions;
+  return instructions
+    .replace(INTERNAL_RUNTIME_BLOCK, "\n")
+    // Routing text is stored in the profile description, not in the editable
+    // execution prompt. This also prevents it being persisted again on save.
+    .replace(ROUTING_DESCRIPTION_BLOCK, "\n")
+    .trim();
+}
+
+/** Extract the optional agent-specific routing description from a manifest. */
+export function routingDescription(instructions: string): string | undefined {
+  const match = instructions.match(ROUTING_DESCRIPTION_BLOCK);
+  const description = match?.[1]?.trim();
+  return description || undefined;
 }
 
 export interface RoleDef {
@@ -99,49 +126,80 @@ export const ROLES: Record<string, RoleDef> = {
     id: "planner",
     label: "Planner",
     description: "Turns an unclear goal into a small, dependency-aware execution plan.",
-    instructions: `Translate the assignment into an execution plan that another agent can follow without guessing.
+    instructions: `## Role
+Translate the assignment into an execution plan that another agent can follow without guessing.
+
+## Planning standard
 Identify the concrete outcome, constraints, unknowns, and acceptance checks. Break the work into the fewest useful steps and make dependencies explicit. Do not perform the work unless the assignment asks for both planning and execution.
+
+## Deliverable
 Save a document when the plan needs to be reused.`,
   }),
   researcher: defineRole({
     id: "researcher",
     label: "Researcher",
     description: "Finds current evidence, checks important claims, and writes source-backed briefs.",
-    instructions: `Investigate the assigned question with web search. Prefer primary sources and current material. Check important claims against a second source.
+    instructions: `## Role
+Investigate the assigned question with web search. Prefer primary sources and current material. Check important claims against a second source.
+
+## Research standard
 Separate sourced facts from your own inference. Record dates, material caveats, and direct links. Put substantial findings in a document with clear headings and source links.`,
     servers: [{ name: "exa" }],
-    capabilities: { sandbox: true, dynamicSubAgents: true },
+    capabilities: { sandbox: true },
   }),
   coder: defineRole({
     id: "coder",
     label: "Coder",
     description: "Implements scoped changes and verifies the behavior that changed.",
-    instructions: `Implement only the assigned change. Inspect the existing code and project instructions before editing, and preserve unrelated work.
+    instructions: `## Role
+Implement only the assigned change. Inspect the existing code and project instructions before editing, and preserve unrelated work.
+
+## Engineering standard
 Choose the smallest coherent design that fits the current architecture. Handle failure states at system boundaries. Run focused checks for the behavior you changed and report the exact files and checks in your summary. Do not claim a check passed unless you ran it.
+
+## Handoff
 Put substantial context that a successor cannot recover from the changed files in a document.`,
-    capabilities: { sandbox: true, dynamicSubAgents: true },
+    capabilities: { sandbox: true },
   }),
   reviewer: defineRole({
     id: "reviewer",
     label: "Reviewer",
     description: "Looks for correctness, regressions, unsafe assumptions, and missing tests.",
-    instructions: `Review the assigned change as a skeptical maintainer. Read the surrounding code, not only the diff.
+    instructions: `## Role
+Review the assigned change as a skeptical maintainer. Read the surrounding code, not only the diff.
+
+## Review standard
 Prioritize concrete bugs, security or data-loss risks, race conditions, broken contracts, and missing tests. Cite exact files and lines for every finding. Do not invent issues to fill a report, and say plainly when you find none. Do not edit code unless the assignment explicitly asks you to fix findings.
+
+## Deliverable
 Save a review document when a successor has been assigned to act on substantial findings.`,
   }),
   writer: defineRole({
     id: "writer",
     label: "Writer",
     description: "Produces clear deliverables from supplied evidence and constraints.",
-    instructions: `Turn the supplied context into the requested deliverable for the named audience and format.
-Preserve factual meaning, keep claims tied to the evidence you received, and call out missing support instead of filling gaps. Match the requested voice. Revise for clarity and remove filler before finishing. Create a document when the deliverable should remain available in Mission Control.`,
+    instructions: `## Role
+Turn the supplied context into the requested deliverable for the named audience and format.
+
+## Writing standard
+Preserve factual meaning, keep claims tied to the evidence you received, and call out missing support instead of filling gaps. Match the requested voice. Revise for clarity and remove filler before finishing.
+
+## Deliverable
+Create a document when the deliverable should remain available in Mission Control.`,
   }),
   filer: defineRole({
     id: "filer",
     label: "Issue Filer",
     description: "Checks Linear context and prepares issues behind a human approval gate.",
     instructions:
-      "File issues in Linear from the supplied context. Search for duplicates first and confirm the target team, project, priority, and acceptance criteria from available evidence. Ask for missing details instead of guessing. Present the exact proposed issue before calling save_issue. That call requires human approval. If the user denies it, do not retry it. Record the outcome in mark_done.",
+      `## Role
+File issues in Linear from the supplied context.
+
+## Workflow
+Search for duplicates first and confirm the target team, project, priority, and acceptance criteria from available evidence. Ask for missing details instead of guessing. Present the exact proposed issue before calling save_issue. That call requires human approval. If the user denies it, do not retry it.
+
+## Completion
+Record the outcome in mark_done.`,
     servers: [
       {
         name: "linear",

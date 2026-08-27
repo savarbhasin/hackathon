@@ -1,15 +1,6 @@
-import { randomUUID } from "node:crypto";
-
-export interface PauseAction {
+export interface PersistedPauseAction {
   selector: string;
   type: string;
-  name?: string;
-  question?: string;
-  options?: string[];
-  argsPreview?: string;
-}
-
-export interface PersistedPauseAction extends PauseAction {
   threadId?: string | null;
   toolCallId: string;
 }
@@ -33,7 +24,6 @@ export class ResumeStateError extends Error {
     public readonly code:
       | "invalid_resume_payload"
       | "no_pending_pause"
-      | "malformed_pause_state"
       | "duplicate_pause_selector"
       | "stale_pause_action"
       | "approval_decision_required"
@@ -44,14 +34,6 @@ export class ResumeStateError extends Error {
     super(message);
     this.name = "ResumeStateError";
   }
-}
-
-export function createPauseSelector(): string {
-  return `pause_${randomUUID()}`;
-}
-
-export function legacyPauseSelector(messageId: string, index: number): string {
-  return `legacy_${messageId}_${index}`;
 }
 
 export function parseResumeSelections(value: unknown): ResumeSelection[] {
@@ -89,52 +71,6 @@ export function parseResumeSelections(value: unknown): ResumeSelection[] {
       content: item.content,
     };
   });
-}
-
-export function parsePersistedPauseActions(raw: string, messageId: string): PersistedPauseAction[] {
-  let value: unknown;
-  try {
-    value = JSON.parse(raw);
-  } catch {
-    throw new ResumeStateError("malformed_pause_state", "The saved pause state is unreadable. It was left unchanged.");
-  }
-  if (!Array.isArray(value) || value.length === 0) {
-    throw new ResumeStateError("malformed_pause_state", "The saved pause state is incomplete. It was left unchanged.");
-  }
-
-  const selectors = new Set<string>();
-  return value.map((item, index) => {
-    if (!isRecord(item)) {
-      throw new ResumeStateError("malformed_pause_state", "The saved pause state is incomplete. It was left unchanged.");
-    }
-    const type = typeof item.type === "string" ? item.type : "";
-    const toolCallId = typeof item.toolCallId === "string" ? item.toolCallId : "";
-    const selector = typeof item.selector === "string" && item.selector.trim()
-      ? item.selector.trim()
-      : legacyPauseSelector(messageId, index);
-    if (!type || !toolCallId || selectors.has(selector)) {
-      throw new ResumeStateError("malformed_pause_state", "The saved pause state is incomplete. It was left unchanged.");
-    }
-    selectors.add(selector);
-
-    return {
-      selector,
-      type,
-      toolCallId,
-      threadId: typeof item.threadId === "string" || item.threadId === null ? item.threadId : undefined,
-      name: typeof item.name === "string" ? item.name : undefined,
-      question: typeof item.question === "string" ? item.question : undefined,
-      options: Array.isArray(item.options) && item.options.every((option) => typeof option === "string")
-        ? item.options
-        : undefined,
-      argsPreview: typeof item.argsPreview === "string" ? item.argsPreview : undefined,
-    };
-  });
-}
-
-export function toClientPauseAction(action: PersistedPauseAction): PauseAction {
-  const { threadId: _threadId, toolCallId: _toolCallId, ...clientAction } = action;
-  return clientAction;
 }
 
 export function buildProviderResumeInput(

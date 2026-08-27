@@ -1,12 +1,17 @@
 "use client";
 
 import dynamic from "next/dynamic";
+import Link from "next/link";
+import { useMutation, useQuery } from "convex/react";
+import { anyApi } from "convex/server";
 import { useEffect, useMemo, useState } from "react";
 import { ConfirmDialog } from "@/components/confirm-dialog";
 
+const convexApi = anyApi as any;
+
 const MarkdownDocumentEditor = dynamic(
   () => import("@/components/markdown-document-editor").then((module) => module.MarkdownDocumentEditor),
-  { ssr: false, loading: () => <div className="min-h-96 animate-pulse rounded-lg border border-line bg-panel-hi" /> }
+  { ssr: false, loading: () => <div className="min-h-96 rounded-lg border border-line shimmer" role="status" aria-label="Loading editor" aria-busy="true" /> }
 );
 
 interface AgentDocument {
@@ -29,11 +34,25 @@ interface DocumentDraft {
 type DocumentGroupId = "all" | "mine" | "agents" | "handoffs";
 type DocumentSort = "recent" | "oldest" | "title";
 
+const MAX_DOCUMENT_TITLE_LENGTH = 160;
+
+function normalizedDocumentTitle(value: string): string {
+  return value.slice(0, MAX_DOCUMENT_TITLE_LENGTH).trim() || "Untitled document";
+}
+
 export default function DocsPage() {
-  const [documents, setDocuments] = useState<AgentDocument[]>([]);
+  const documentRows = useQuery(convexApi.documents.list, { limit: 200 }) as unknown;
+  const createDocumentMutation = useMutation(convexApi.documents.create);
+  const updateDocumentMutation = useMutation(convexApi.documents.update);
+  const removeDocumentMutation = useMutation(convexApi.documents.remove);
+  const documents = useMemo(
+    () => Array.isArray(documentRows)
+      ? documentRows.map(documentFromConvex).filter((document): document is AgentDocument => document !== null)
+      : [],
+    [documentRows],
+  );
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [drafts, setDrafts] = useState<Record<string, DocumentDraft>>({});
-  const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<AgentDocument | null>(null);
@@ -42,22 +61,17 @@ export default function DocsPage() {
   const [searchTerm, setSearchTerm] = useState("");
   const [sortBy, setSortBy] = useState<DocumentSort>("recent");
 
+  const loading = documentRows === undefined;
+
   useEffect(() => {
-    void fetch("/api/docs", { cache: "no-store" })
-      .then((response) => {
-        if (!response.ok) throw new Error("Could not load documents.");
-        return response.json() as Promise<AgentDocument[]>;
-      })
-      .then((items) => {
-        setDocuments(items);
-        const requestedId = new URLSearchParams(window.location.search).get("document");
-        const initial = items.find((document) => document.id === requestedId);
-        setSelectedId(initial?.id ?? null);
-        if (initial) setActiveGroup(documentGroupId(initial));
-      })
-      .catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)))
-      .finally(() => setLoading(false));
-  }, []);
+    if (documentRows === undefined) return;
+    const requestedId = new URLSearchParams(window.location.search).get("document");
+    const initial = documents.find((document) => document.id === requestedId);
+    if (initial) {
+      setSelectedId((current) => current ?? initial.id);
+      setActiveGroup(documentGroupId(initial));
+    }
+  }, [documentRows, documents]);
 
   const selected = documents.find((document) => document.id === selectedId) ?? null;
   const draft = selected ? drafts[selected.id] ?? pickDraft(selected) : null;
@@ -146,18 +160,12 @@ export default function DocsPage() {
   async function flushDraft(id: string): Promise<boolean> {
     const currentDraft = drafts[id];
     if (!currentDraft) return true;
-    const title = currentDraft.title.trim() || "Untitled document";
+    const title = normalizedDocumentTitle(currentDraft.title);
     setSaving(true);
     setError(null);
     try {
-      const response = await fetch(`/api/docs/${id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title, content: currentDraft.content }),
-      });
-      if (!response.ok) throw new Error("Could not save the document.");
-      const updated = await response.json() as AgentDocument;
-      setDocuments((current) => current.map((document) => document.id === updated.id ? { ...document, ...updated } : document));
+      const result = await updateDocumentMutation({ documentId: id, title, content: currentDraft.content });
+      if (documentMutationFailed(result)) throw new Error("Could not save the document.");
       setDrafts((current) => {
         const latest = current[id];
         if (!latest || latest.title !== currentDraft.title || latest.content !== currentDraft.content) return current;
@@ -188,32 +196,39 @@ export default function DocsPage() {
 
   async function createDocument() {
     setError(null);
-    const response = await fetch("/api/docs", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ title: "Untitled document", content: "", kind: "user" }),
-    });
-    if (!response.ok) {
-      setError("Could not create the document.");
-      return;
+    try {
+      const document = await createDocumentMutation({
+        operationKey: `user-doc:${crypto.randomUUID()}`,
+        title: "Untitled document",
+        content: "",
+        authorRole: "user",
+        kind: "user",
+      });
+      if (documentMutationFailed(document)) throw new Error("Could not create the document.");
+      const id = documentId(document);
+      if (!id) {
+        setError("Document created but no document id was returned.");
+        return;
+      }
+      setActiveGroup("mine");
+      selectDocument(id);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not create the document.");
     }
-    const document = (await response.json()) as AgentDocument;
-    setDocuments((current) => [document, ...current]);
-    setActiveGroup("mine");
-    selectDocument(document.id);
   }
 
   async function deleteDocument() {
     if (!deleteTarget || deleting) return;
     setDeleting(true);
     setError(null);
-    const response = await fetch(`/api/docs/${deleteTarget.id}`, { method: "DELETE" });
-    if (!response.ok) {
-      setError("Could not delete the document.");
+    try {
+      const result = await removeDocumentMutation({ documentId: deleteTarget.id });
+      if (documentMutationFailed(result)) throw new Error("Could not delete the document.");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not delete the document.");
       setDeleting(false);
       return;
     }
-    setDocuments((current) => current.filter((document) => document.id !== deleteTarget.id));
     setDrafts((current) => {
       const next = { ...current };
       delete next[deleteTarget.id];
@@ -228,23 +243,15 @@ export default function DocsPage() {
 
   useEffect(() => {
     if (!selectedDocumentId || !dirty || draftTitle === undefined || draftContent === undefined) return;
-    const title = draftTitle.trim() || "Untitled document";
+    const title = normalizedDocumentTitle(draftTitle);
     const timer = window.setTimeout(() => {
       setSaving(true);
       setError(null);
-      void fetch(`/api/docs/${selectedDocumentId}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title, content: draftContent }),
-      })
-        .then(async (response) => {
-          if (!response.ok) throw new Error("Could not save the document.");
-          return response.json() as Promise<AgentDocument>;
+      void updateDocumentMutation({ documentId: selectedDocumentId, title, content: draftContent })
+        .then((result) => {
+          if (documentMutationFailed(result)) throw new Error("Could not save the document.");
         })
-        .then((updated) => {
-          setDocuments((current) =>
-            current.map((document) => document.id === updated.id ? { ...document, ...updated } : document)
-          );
+        .then(() => {
           setDrafts((current) => {
             const currentDraft = current[selectedDocumentId];
             if (!currentDraft || currentDraft.title !== draftTitle || currentDraft.content !== draftContent) {
@@ -259,7 +266,7 @@ export default function DocsPage() {
         .finally(() => setSaving(false));
     }, 650);
     return () => window.clearTimeout(timer);
-  }, [dirty, draftContent, draftTitle, selectedDocumentId]);
+  }, [dirty, draftContent, draftTitle, selectedDocumentId, updateDocumentMutation]);
 
   return (
     <main className="flex h-full min-w-0 flex-col bg-deck">
@@ -271,7 +278,7 @@ export default function DocsPage() {
             <button type="button" onClick={() => void returnToLibrary()} disabled={saving} className="flex h-8 shrink-0 items-center gap-2 rounded border border-line px-2.5 font-mono text-[9px] uppercase tracking-[0.12em] text-ink-soft transition-colors hover:border-line-strong hover:text-ink disabled:opacity-40" aria-label="Back to document library">
               <span aria-hidden="true">←</span> Library
             </button>
-            <input value={draft.title} onChange={(event) => updateDraft({ title: event.target.value })} placeholder="Untitled document" className="min-w-0 flex-1 border-0 bg-transparent text-lg font-semibold tracking-[-0.025em] text-ink outline-none placeholder:text-ink-faint" />
+            <input value={draft.title} maxLength={MAX_DOCUMENT_TITLE_LENGTH} onChange={(event) => updateDraft({ title: event.target.value })} placeholder="Untitled document" className="min-w-0 flex-1 border-0 bg-transparent text-lg font-semibold tracking-[-0.025em] text-ink outline-none placeholder:text-ink-faint" />
             <span className="shrink-0 font-mono text-[9px] uppercase tracking-[0.14em] text-ink-faint">
               {saving ? "Saving..." : dirty ? "Unsaved" : "Saved"}
             </span>
@@ -372,6 +379,20 @@ export default function DocsPage() {
                   );
                 })}
               </div>
+            ) : documents.length === 0 ? (
+              <div className="mt-4 rounded-lg border border-line bg-panel/40 px-6 py-14 text-center">
+                <p className="font-mono text-[9px] uppercase tracking-[0.18em] text-role-researcher">Your library is ready</p>
+                <h2 className="mt-3 text-xl font-semibold tracking-[-0.03em] text-ink">Start writing docs, or use agents</h2>
+                <p className="mx-auto mt-3 max-w-md text-sm leading-6 text-ink-soft">Create a document yourself, or ask the squad to research and write one for you.</p>
+                <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
+                  <button type="button" onClick={() => void createDocument()} className="rounded-md bg-signal px-3.5 py-2.5 font-mono text-[9px] font-semibold uppercase tracking-[0.14em] text-deck transition-colors hover:brightness-110">
+                    Start writing
+                  </button>
+                  <Link href="/" className="rounded-md border border-line-strong px-3.5 py-2.5 font-mono text-[9px] font-semibold uppercase tracking-[0.14em] text-ink-soft transition-colors hover:border-signal/60 hover:text-ink">
+                    Use agents
+                  </Link>
+                </div>
+              </div>
             ) : (
               <div className="mt-4 rounded-lg border border-line bg-panel/40 px-6 py-12 text-center">
                 <p className="font-mono text-[9px] uppercase tracking-[0.18em] text-ink-faint">No matching documents</p>
@@ -391,6 +412,51 @@ export default function DocsPage() {
       />
     </main>
   );
+}
+
+function documentMutationFailed(value: unknown): boolean {
+  if (!value || typeof value !== "object") return true;
+  const kind = (value as { kind?: unknown }).kind;
+  return kind === "conflict" || kind === "not_found";
+}
+
+function documentId(value: unknown): string | null {
+  if (!value || typeof value !== "object") return null;
+  const row = value as { _id?: unknown; id?: unknown };
+  if (typeof row._id === "string") return row._id;
+  return typeof row.id === "string" ? row.id : null;
+}
+
+function documentFromConvex(value: unknown): AgentDocument | null {
+  if (!value || typeof value !== "object") return null;
+  const row = value as {
+    _id?: string;
+    title?: string;
+    content?: string;
+    authorRole?: string;
+    kind?: string;
+    createdAt?: number;
+    updatedAt?: number;
+    mission?: { _id?: string; title?: string } | null;
+    task?: { _id?: string; title?: string; role?: string } | null;
+  };
+  if (!row._id || typeof row.title !== "string" || typeof row.content !== "string") return null;
+  const timestamp = (value: number | undefined) => new Date(typeof value === "number" ? value : Date.now()).toISOString();
+  return {
+    id: String(row._id),
+    title: row.title,
+    content: row.content,
+    authorRole: row.authorRole ?? "unknown",
+    kind: row.kind ?? "artifact",
+    createdAt: timestamp(row.createdAt),
+    updatedAt: timestamp(row.updatedAt),
+    mission: row.mission?._id && typeof row.mission.title === "string"
+      ? { id: String(row.mission._id), title: row.mission.title }
+      : null,
+    task: row.task?._id && typeof row.task.title === "string"
+      ? { id: String(row.task._id), title: row.task.title, role: row.task.role ?? "unknown" }
+      : null,
+  };
 }
 
 function pickDraft(document: AgentDocument): DocumentDraft {

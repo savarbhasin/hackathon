@@ -6,29 +6,36 @@ A Next.js control center where an **Orchestrator** agent decomposes missions int
 
 ```
 Browser
-  ├─ /            Orchestrator chat (SSE stream from POST /api/chat)
-  └─ /board       Kanban (SSE from GET /api/stream, 1s DB diff poll)
-        │ fetch
+  ├─ /            Orchestrator chat
+  ├─ /board       Kanban
+  └─ /schedules   Recurring work
+        │ Convex subscriptions
         ▼
-Next.js (port 3000)                      TrueForge server (port 8790)
-  ├─ src/lib/engine.ts     dispatch/pump/watcher    ▲ SDK (@truefoundry/trueforge-sdk)
-  ├─ src/lib/orchestrator  chat turns               │ sessions/turns/events
-  └─ Prisma → SQLite                               │ MCP tools
-                                                    │
-MCP server (port 3100, `server/mcp.ts`, tsx watch) ─┘ registered as connector "mission-control"
+Convex ◀──────── Next.js (port 3000)
+  ▲                  │ admit runs
+  │                  ▼
+  │              Redis/BullMQ
+  │                  │
+  │                  ▼
+  └──────────── Worker ───────────▶ TrueForge server (port 8790)
+  ▲                                    │
+  └──────── MCP server (port 3100) ◀───┘
   tools: mark_done, list_board, get_task, create_mission, create_task,
          dispatch_task, dispatch_ready, create/list/cancel_schedule
 ```
 
-- **One SQLite file shared by two processes**: `mission-control/prisma/dev.db`. The board can never drift from what agents did — all state changes flow through it.
+- **Convex is the application source of truth**: the board and run state are read and written through Convex, while Redis/BullMQ delivers work to the worker.
 - TrueForge has its own separate SQLite (`~/Library/Application Support/trueforge/db/`) — never touch it; go through the SDK/API.
-- Orchestrator session id is persisted in the `Setting` table (`orchestrator_session_id`) so conversation history survives restarts.
+- The worker owns TrueForge turns and persists session IDs, turn IDs, events, pause actions, and provider cursors in Convex.
 
 ## Running
 
 ```bash
 npm run dev        # Next.js on :3000
 npm run dev:mcp    # MCP server on :3100 (tsx watch)
+npm run dev:worker # BullMQ worker and schedule reconciler
+npx convex dev     # Convex functions and generated bindings
+docker compose up redis
 ```
 
 Prereqs: TrueForge running (`npx @truefoundry/trueforge` → :8790), model provider configured in its Settings, connectors `exa` + `linear` + `mission-control` registered.
@@ -37,32 +44,31 @@ Prereqs: TrueForge running (`npx @truefoundry/trueforge` → :8790), model provi
 
 ```
 trueforge-mc/
+├── convex/                    # Schema, queries, mutations, run state
 ├── server/mcp.ts              # Express + @modelcontextprotocol/sdk, stateless StreamableHTTP at /mcp
-├── prisma/schema.prisma       # Mission, Task, TaskEvent, Schedule, Setting
+├── worker/agent-runs.ts       # BullMQ worker and schedule reconciliation
 └── src/
     ├── app/
     │   ├── page.tsx           # Orchestrator chat home
     │   ├── board/page.tsx     # Kanban + card drawer (approve/deny/answer/dispatch)
     │   └── api/
-    │       ├── chat/route.ts        # POST {message} → SSE of orchestrator turn
-    │       ├── stream/route.ts      # SSE full-board JSON on change
-    │       └── tasks/[id]/route.ts  # GET task+events; POST {action: dispatch|approve|answer}
+    │       ├── chat/route.ts        # Admit an orchestrator run and enqueue it
+    │       └── tasks/[id]/route.ts  # POST {action: dispatch|retry|approve|deny|answer}
     ├── lib/
-    │   ├── db.ts              # Prisma singleton
     │   ├── tf.ts              # TrueForge SDK client singleton
     │   ├── fleet.ts           # Roles (researcher/writer/filer) + ORCHESTRATOR_SPEC
-    │   ├── engine.ts          # dispatchTask, event pump, sweep() auto-chain, resolvePause
-    │   └── orchestrator.ts    # ensureOrchestratorSession, runOrchestratorTurn
+    │   ├── durable-task-engine.ts  # Convex task admission, pause resolution, successor dispatch
+    │   └── queue/             # BullMQ producer, worker processor, schedule projection
     └── ...
 ```
 
 ## Data model
 
 - **Mission**: title, goal, status.
-- **Task**: role, column, sessionId, turnId, lastSeq, `dependsOn` (JSON array of task ids), `handoff` (explicit context from `mark_done`), `output` (fallback), `pendingActions` (**structured JSON of paused calls — source of truth for approve/answer UI**), error.
-- **TaskEvent**: per-task event log (type + truncated payload) for the drawer.
-- **Schedule**: name, cronExpr, prompt (croner jobs booted by MCP server).
-- **Setting**: key/value (orchestrator session id).
+- **Task**: missionId, role, column, sessionId, turnId, lastSeq, position, claimCount, `dependsOn`, `handoff`, `output`, `pendingActions`, and error.
+- **TaskEvent**: ordered per-task activity and chat records.
+- **AgentRun**: one orchestrator, specialist, follow-up, or scheduled execution with provider checkpoints and pause state.
+- **Schedule**: validated schedule config in Convex plus BullMQ scheduler identity, revision, hash, and sync state.
 
 ## Kanban columns = harness state
 
@@ -75,16 +81,15 @@ trueforge-mc/
 
 1. **TrueForge SDK returns camelCase** (`requiredActions`, `sourceEventId`, `threadId`) while docs/OpenAPI show snake_case. Always read camelCase from SDK events.
 2. **Deltas must be merged.** `model.message` base events arrive EMPTY; tool-call args and text arrive via `.delta` fragments sharing the same `id`. Use `isEventDelta` / `mergeEventDelta` from the SDK before reading toolCalls — otherwise approval pauses show no name/args.
-3. **Never parse TaskEvent payloads for logic** — they're truncated to 4000 chars and cut mid-JSON. Logic uses `Task.pendingActions`; events are display-only.
+3. **Never parse TaskEvent payloads for state transitions**. Logic uses `Task.pendingActions` and `AgentRun`; events are activity and chat records.
 4. **Node ≥ 22.14 required.** Homebrew node was shadowed by `/usr/local/bin/node`; fixed with PATH prepend in ~/.zshrc.
-5. **Prisma pinned to v6** (v7 removed schema datasource url). After schema change: `npx prisma migrate dev --name X` **then `npx prisma generate`**, then RESTART next dev or you get "Unknown argument" 500s (stale client).
-6. **croner v10 API**: `new Cron(expr).schedule(fn)` — no callback in constructor, no `.start()`.
-7. **Next 16**: route handler `params` are Promises (await them). Standard Web Request/Response handlers.
-8. **tsx watch restarts the MCP process** when engine files change; TrueForge may then run an orchestrator turn with zero tool defs (`usage.tool_definitions: 0`). Symptom: agent answers but doesn't call tools / says board is empty. Fix: just retry the turn after MCP is healthy again.
-9. **Linear `save_issue` requires `team`** when creating. Filer role therefore enables discovery tools (`list_teams`, `get_team`, `get_workspace`, …). Gate config: `require_approval_for_tools: ["save_issue"]`.
-10. **Specialist completion signal**: agents call MCP `mark_done(task_id, summary, handoff?)`. Kickoff message embeds `TASK_ID:` so they can. If they skip it, fallback = final turn output.
-11. Dispatch guard: only backlog tasks with `sessionId == null`; claim via `updateMany` race check. Cancelled turns return cards to backlog (redispatch-safe).
-12. Secrets live ONLY in `mission-control/.env.local` (gitignored): `DATABASE_URL`, `TRUEFORGE_BASE_URL=http://localhost:8790`, `OPENROUTER_API_KEY`. Never commit keys; never paste real keys into repo files.
+5. **MCP does not own schedules**. It validates cron expressions and writes Convex. The worker reconciles BullMQ Job Schedulers.
+6. **Next 16**: route handler `params` are Promises (await them). Standard Web Request/Response handlers.
+7. **tsx watch restarts the MCP process** when MCP files change; TrueForge may then run a turn with zero tool definitions. Retry after `/health` succeeds.
+8. **Linear `save_issue` requires `team`** when creating. Filer role therefore enables discovery tools (`list_teams`, `get_team`, `get_workspace`, …). Gate config: `require_approval_for_tools: ["save_issue"]`.
+9. **Specialist completion signal**: agents call MCP `mark_done(task_id, summary, handoff?)`. Kickoff messages embed `TASK_ID:`.
+10. Dispatch guard: Convex admits only backlog tasks without active run ownership. The Convex mutation is the race boundary.
+11. Secrets live only in `.env.local`. Never commit keys or print connection credentials.
 
 ## Verified end-to-end (Aug 22)
 

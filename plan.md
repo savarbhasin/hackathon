@@ -27,7 +27,7 @@ This separation is deliberate. Convex is excellent at reactive application state
 
 - Redis will not contain the canonical copy of product data.
 - Convex actions will not hold long TrueForge streams.
-- We will not keep the current SQLite database active as a second source of truth after cutover.
+- Convex is the sole application data store; Redis is only the BullMQ delivery layer.
 - We will not claim exactly-once execution. BullMQ delivery is at least once, so run handling and external actions must be idempotent.
 - We will not split the product into many small services. The first production version needs one repository and three deployable Node.js processes.
 - Multi-user accounts, workspaces, memberships, and tenant isolation are later product work.
@@ -108,7 +108,7 @@ Hosted dependencies:
 
 ## Convex data model
 
-The initial Convex schema should cover the current Prisma models and add explicit run state.
+The initial Convex schema should cover the application records and add explicit run state.
 
 ### `agentRuns`
 
@@ -274,11 +274,11 @@ BullMQ will mark a job stalled when its worker stops renewing the lock. Another 
 4. If TrueForge cannot resume an abandoned turn, reconcile its current state before deciding whether to create another turn.
 5. Never repeat an irreversible external action without an idempotency key or confirmed provider state.
 
-This recovery behavior is a go or no-go requirement. It must be tested against the running TrueForge server before migration begins.
+This recovery behavior is a go or no-go requirement. Test it against the running TrueForge server before production releases.
 
 ## Realtime frontend
 
-Replace server polling with scoped Convex queries:
+The frontend uses scoped Convex queries:
 
 - Board page subscribes to missions, tasks, and run status.
 - Conversation page subscribes to messages and the active run for one conversation.
@@ -286,7 +286,7 @@ Replace server polling with scoped Convex queries:
 - Task page subscribes to one task, its normalized activity, documents, and pending action.
 - Schedules page subscribes to schedule configuration and latest delivery state.
 
-Remove `/api/stream` after every board consumer uses Convex. Do not keep it as a fallback that continues polling unnoticed.
+The old `/api/stream` polling endpoint has been removed.
 
 Use one shared `ConvexReactClient` across Next.js page navigation. Switching conversations changes subscriptions and never aborts an agent run.
 
@@ -300,7 +300,7 @@ Convex stores the user-facing schedule record. BullMQ delivers scheduled runs.
 4. `lastRunAt` changes only after the run reaches a real terminal or waiting state chosen by the product contract.
 5. A reconciler compares enabled Convex schedules with BullMQ schedulers and repairs drift.
 
-The existing in-memory Cron map in the MCP process will be removed after this path is proven.
+The MCP process validates cron expressions only. BullMQ owns schedule delivery.
 
 ## Idempotency rules
 
@@ -362,7 +362,7 @@ Local Redis must use the same no-eviction policy expected in production. Develop
 
 ### Phase 0: prove the risky assumptions
 
-Build isolated spikes before migrating product data.
+Build isolated spikes before trusting the runtime in production.
 
 1. Convex realtime spike
    - Write a task status mutation.
@@ -384,7 +384,7 @@ Build isolated spikes before migrating product data.
    - Restart Redis, Convex connectivity, MCP, and TrueForge independently.
    - Confirm every run ends as completed, waiting, retrying, or visibly failed. No run may remain falsely active.
 
-Go or no-go condition: do not begin the full database migration until the recovery spike proves how TrueForge behaves after its subscriber disappears.
+Go or no-go condition: do not ship the worker until the recovery spike proves how TrueForge behaves after its subscriber disappears.
 
 ### Phase 1: infrastructure and contracts
 
@@ -394,11 +394,10 @@ Go or no-go condition: do not begin the full database migration until the recove
 - Add environment validation for web, worker, and MCP processes.
 - Define run status transitions in one shared module.
 - Add enqueue reconciliation and queue event monitoring.
-- Add feature flags so the existing path remains usable during development.
 
 ### Phase 2: background orchestrator conversations
 
-- Migrate conversations and messages to Convex.
+- Store conversations and messages in Convex.
 - Create runs through the durable enqueue path.
 - Move TrueForge orchestrator streaming into the worker.
 - Persist streamed output and pause actions in Convex.
@@ -407,38 +406,34 @@ Go or no-go condition: do not begin the full database migration until the recove
 
 ### Phase 3: specialist task engine
 
-- Migrate missions, tasks, task events, documents, and agent profiles.
-- Replace detached `runPump` calls with BullMQ jobs.
+- Store missions, tasks, task events, documents, and agent profiles in Convex.
+- Keep provider turns in BullMQ workers, never detached from web requests.
 - Preserve dependency checks, handoff documents, approvals, questions, and successor dispatch.
 - Make successor dispatch idempotent.
 - Move retry and cancellation into the shared run engine.
 
 ### Phase 4: realtime UI cutover
 
-- Replace board EventSource usage with Convex queries.
-- Replace conversation history fetches with scoped Convex queries.
+- Feed the board with Convex queries.
+- Feed conversation history with scoped Convex queries.
 - Replace task detail polling or refetch behavior with subscriptions.
-- Remove `/api/stream` and its database polling code.
+- Keep `/api/stream` and database polling code absent.
 - Verify subscription scope so token writes do not rerender unrelated pages.
 
 ### Phase 5: schedules
 
-- Migrate schedule records to Convex.
+- Store schedule records in Convex.
 - Synchronize enabled schedules to BullMQ Job Schedulers.
 - Create scheduled agent runs through the same run contract.
-- Remove Cron ownership from the MCP process.
+- Keep Cron ownership out of the MCP process.
 - Add schedule drift reconciliation and visible failure state.
 
-### Phase 6: data migration and cutover
+### Phase 6: production cutover
 
-- Export the SQLite database into a versioned migration artifact.
-- Transform IDs and JSON fields with deterministic scripts.
-- Import into a non-production Convex deployment.
-- Compare row counts, relations, message ordering, task dependencies, pending actions, and document links.
-- Run the full product against migrated data.
-- Take a final SQLite backup.
-- Pause writes briefly, import the final delta, switch traffic, and make SQLite read-only.
-- Remove Prisma only after the Convex path passes production smoke tests.
+- Run the full product against the production Convex deployment.
+- Verify row relations, message ordering, task dependencies, pending actions, and document links.
+- Verify worker recovery, pause/resume, schedule delivery, and external-action approval gates.
+- Switch traffic after the production smoke tests pass.
 
 ### Phase 7: production hardening
 
@@ -530,12 +525,9 @@ Multi-user authentication and tenant isolation are intentionally deferred. They 
 ## Rollout and rollback
 
 - Develop on a dedicated branch.
-- Keep the current execution path behind a feature flag during phases 1 through 3.
 - Enable the new path in a test deployment first.
 - Do not run the same user request through both execution paths.
-- Keep a final SQLite backup and migration report at cutover.
-- Roll back application traffic before accepting new writes if the Convex cutover fails.
-- Do not attempt to merge divergent SQLite and Convex writes after an extended dual-write period.
+- Roll back application traffic before accepting new writes if the Convex deployment fails.
 
 ## Decisions still required
 
@@ -563,8 +555,7 @@ The architecture is ready for production rollout when all of these are true:
 - Human pauses survive browser, web, worker, and MCP restarts.
 - Schedules produce at most one logical run for each intended fire time.
 - Queue, worker, Convex, TrueForge, and MCP failures are visible in logs and monitoring.
-- SQLite and Prisma are no longer active production dependencies after validated cutover.
 
 ## First implementation checkpoint
 
-Stop after Phase 0 and review the evidence. The most important result is the TrueForge recovery test. If a replacement worker cannot resume an abandoned turn, the design needs an explicit provider-session recovery policy before the database migration begins.
+Review the recovery evidence before production releases. If a replacement worker cannot resume an abandoned turn, add an explicit provider-session recovery policy before shipping the worker.
