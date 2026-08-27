@@ -71,9 +71,15 @@ export const list = query({
   args: { limit: v.optional(v.number()), includeDeleted: v.optional(v.boolean()), includeDisabled: v.optional(v.boolean()) },
   returns: v.any(),
   handler: async (ctx, args) => {
-    const rows = await ctx.db.query("schedules").order("desc").take(cap(args.limit));
-    return rows.filter((schedule: any) => (args.includeDeleted || schedule.deletedAt === undefined)
-      && (args.includeDisabled || schedule.enabled));
+    // Apply visibility filters before the requested limit. Taking first would
+    // let disabled/deleted rows consume the page and hide visible schedules.
+    return await ctx.db.query("schedules")
+      .order("desc")
+      .filter((q: any) => q.and(
+        args.includeDeleted ? true : q.eq(q.field("deletedAt"), undefined),
+        args.includeDisabled ? true : q.eq(q.field("enabled"), true),
+      ))
+      .take(cap(args.limit));
   },
 });
 
@@ -83,20 +89,24 @@ export const reconciliationSnapshot = query({
   args: { limit: v.optional(v.number()) },
   returns: v.any(),
   handler: async (ctx, args) => {
-    const rows = await ctx.db.query("schedules").order("asc").take(cap(args.limit));
-    const schedules: any[] = [];
-    const tombstones: any[] = [];
-    for (const row of rows) {
-      const schedule = row;
-      if (schedule.deletedAt !== undefined || !schedule.enabled) tombstones.push({
-        _id: schedule._id,
-        schedulerId: schedule.schedulerId,
-        configRevision: schedule.configRevision,
-        deletedAt: schedule.deletedAt ?? null,
-        enabled: schedule.enabled,
-      });
-      else schedules.push(schedule);
-    }
+    const limit = cap(args.limit);
+    // Keep the cap independent for desired rows and tombstones. Otherwise a
+    // large active set could starve an explicit deletion marker forever.
+    const schedules = await ctx.db.query("schedules")
+      .withIndex("by_enabled", (q: any) => q.eq("enabled", true))
+      .order("asc")
+      .take(limit);
+    const disabled = await ctx.db.query("schedules")
+      .withIndex("by_enabled", (q: any) => q.eq("enabled", false))
+      .order("asc")
+      .take(limit);
+    const tombstones = disabled.map((schedule: any) => ({
+      _id: schedule._id,
+      schedulerId: schedule.schedulerId,
+      configRevision: schedule.configRevision,
+      deletedAt: schedule.deletedAt ?? null,
+      enabled: schedule.enabled,
+    }));
     return { schedules, tombstones };
   },
 });
@@ -142,13 +152,20 @@ export const create = mutation({
 
 export const update = mutation({
   args: {
-    scheduleId: v.id("schedules"), name: v.optional(v.string()), cronExpr: v.optional(v.string()), timezone: v.optional(v.string()),
+    scheduleId: v.id("schedules"),
+    configRevision: v.number(),
+    name: v.optional(v.string()), cronExpr: v.optional(v.string()), timezone: v.optional(v.string()),
     prompt: v.optional(v.string()), enabled: v.optional(v.boolean()),
   },
   returns: v.any(),
   handler: async (ctx, args) => {
     const schedule = await ctx.db.get(args.scheduleId);
     if (!schedule || schedule.deletedAt !== undefined) return { outcome: "not_found" };
+    // This check and patch execute in one Convex mutation transaction. The
+    // caller's revision therefore cannot pass a separate read-then-write race.
+    if (schedule.configRevision !== args.configRevision) {
+      return { outcome: "stale", configRevision: schedule.configRevision, schedule };
+    }
     const now = Date.now();
     await ctx.db.patch(args.scheduleId, configPatch(schedule, args, now));
     return { outcome: "updated", schedule: await ctx.db.get(args.scheduleId) };

@@ -153,23 +153,14 @@ export class BullMqScheduleService {
         }
       }
 
-      // Only touch identities owned by this application. The listing is
-      // deliberately bounded to keep a malformed/oversized Redis set from
-      // blocking the worker's reconciliation loop.
-      let schedulers: Array<{ key: string }>;
-      try {
-        schedulers = await this.queue.getJobSchedulers(0, SCHEDULE_RECONCILIATION_LIMIT - 1, false);
-      } catch (error) {
-        workerLog("schedule.list_failed", { ...safeError(error) });
-        return;
-      }
-      for (const scheduler of schedulers) {
-        const schedulerId = scheduler.key;
-        if (schedulerId.startsWith(SCHEDULE_SCHEDULER_PREFIX) && !desired.has(schedulerId)) {
-          await this.removeScheduler(schedulerId);
-        }
-      }
-      workerLog("schedule.reconciled", { enabled: desired.size, listed: schedulers.length });
+      // Do not infer deletion from absence in the bounded desired-state
+      // snapshot. A valid schedule beyond the snapshot cap must keep its
+      // scheduler. Deletions are explicit tombstones and are removed above,
+      // with the ownership-prefix check retained there.
+      workerLog("schedule.reconciled", {
+        enabled: desired.size,
+        tombstones: snapshot.tombstones.length,
+      });
     } finally {
       this.reconciling = false;
     }

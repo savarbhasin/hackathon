@@ -47,11 +47,6 @@ export async function PATCH(req: Request, ctx: Params) {
   if (!fields.ok) return Response.json({ error: "invalid_request", fields: fields.fields }, { status: 400 });
 
   try {
-    const current = await getDurableSchedule(id);
-    if (!current || current.deletedAt !== undefined) return Response.json({ error: "not_found" }, { status: 404 });
-    if (body?.configRevision !== undefined && body.configRevision !== current.configRevision) {
-      return Response.json({ error: "conflict", reason: "stale_revision", configRevision: current.configRevision }, { status: 409 });
-    }
     const result = await updateDurableSchedule({ scheduleId: id, ...fields.value });
     return mutationResponse(result, "updated");
   } catch (error) {
@@ -89,16 +84,18 @@ function requestKey(req: Request, bodyValue: unknown): string {
   return value && value.length <= 256 ? value : randomUUID();
 }
 
-function validatePatch(body: SchedulePatch | null): { ok: true; value: { name?: string; cronExpr?: string; timezone?: string; prompt?: string; enabled?: boolean } } | { ok: false; fields: string[] } {
-  const value: { name?: string; cronExpr?: string; timezone?: string; prompt?: string; enabled?: boolean } = {};
+function validatePatch(body: SchedulePatch | null): { ok: true; value: { configRevision: number; name?: string; cronExpr?: string; timezone?: string; prompt?: string; enabled?: boolean } } | { ok: false; fields: string[] } {
+  const value: { configRevision: number; name?: string; cronExpr?: string; timezone?: string; prompt?: string; enabled?: boolean } = {
+    configRevision: typeof body?.configRevision === "number" ? body.configRevision : NaN,
+  };
   const fields: string[] = [];
   if (body?.name !== undefined) { if (typeof body.name !== "string" || !(value.name = body.name.trim()) || value.name.length > 120) fields.push("name"); }
   if (body?.cronExpr !== undefined) { if (typeof body.cronExpr !== "string" || !(value.cronExpr = body.cronExpr.trim()) || value.cronExpr.length > 200 || !validCronExpression(value.cronExpr)) fields.push("cronExpr"); }
   if (body?.timezone !== undefined) { if (typeof body.timezone !== "string" || !(value.timezone = body.timezone.trim()) || value.timezone.length > 100 || !validTimezone(value.timezone)) fields.push("timezone"); }
   if (body?.prompt !== undefined) { if (typeof body.prompt !== "string" || !(value.prompt = body.prompt.trim()) || value.prompt.length > 4_000) fields.push("prompt"); }
   if (body?.enabled !== undefined) { if (typeof body.enabled !== "boolean") fields.push("enabled"); else value.enabled = body.enabled; }
-  if (body?.configRevision !== undefined && (typeof body.configRevision !== "number" || !Number.isSafeInteger(body.configRevision))) fields.push("configRevision");
-  if (fields.length || Object.keys(value).length === 0) return { ok: false, fields: fields.length ? fields : ["name", "prompt"] };
+  if (typeof body?.configRevision !== "number" || !Number.isSafeInteger(body.configRevision) || body.configRevision < 1) fields.push("configRevision");
+  if (fields.length || Object.keys(value).length === 1) return { ok: false, fields: fields.length ? fields : ["name", "prompt"] };
   return { ok: true, value };
 }
 
@@ -112,9 +109,17 @@ function validTimezone(timezone: string): boolean {
   try { new Intl.DateTimeFormat("en-US", { timeZone: timezone }).format(); return true; } catch { return false; }
 }
 
-function mutationResponse(result: { outcome?: string; schedule?: DurableSchedule }, fallback: string): Response {
+function mutationResponse(result: { outcome?: string; configRevision?: number; schedule?: DurableSchedule }, fallback: string): Response {
   if (result.outcome === "not_found") return Response.json({ error: "not_found" }, { status: 404 });
-  if (result.outcome === "conflict" || result.outcome === "stale") return Response.json({ error: "conflict", reason: result.outcome === "stale" ? "stale_revision" : undefined }, { status: 409 });
+  if (result.outcome === "conflict" || result.outcome === "stale") {
+    const configRevision = result.configRevision ?? result.schedule?.configRevision;
+    return Response.json({
+      error: "conflict",
+      reason: result.outcome === "stale" ? "stale_revision" : undefined,
+      ...(configRevision !== undefined ? { configRevision } : {}),
+      ...(result.schedule ? { schedule: durableResponse(result.schedule) } : {}),
+    }, { status: 409 });
+  }
   if (result.outcome === "invalid_state") return Response.json({ error: "invalid_state" }, { status: 422 });
   const schedule = result.schedule;
   return Response.json({ outcome: result.outcome ?? fallback, ...(schedule ? { schedule: durableResponse(schedule), configRevision: schedule.configRevision, syncState: schedule.syncState } : {}) });

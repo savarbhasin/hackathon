@@ -51,14 +51,16 @@ export async function createDurableSchedule(input: {
 
 export async function updateDurableSchedule(input: {
   scheduleId: string;
+  configRevision: number;
   name?: string;
   cronExpr?: string;
   timezone?: string;
   prompt?: string;
   enabled?: boolean;
-}): Promise<{ outcome?: string; schedule?: DurableSchedule }> {
+}): Promise<{ outcome?: string; configRevision?: number; schedule?: DurableSchedule }> {
   return await convex().mutation(ref("update"), {
     scheduleId: id(input.scheduleId),
+    configRevision: input.configRevision,
     ...(input.name !== undefined ? { name: input.name } : {}),
     ...(input.cronExpr !== undefined ? { cronExpr: input.cronExpr } : {}),
     ...(input.timezone !== undefined ? { timezone: input.timezone } : {}),
