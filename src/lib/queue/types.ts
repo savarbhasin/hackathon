@@ -102,6 +102,15 @@ export type AdmissionResult<T = unknown> =
   | { kind: "selector_mismatch"; conversationId?: string; runId?: string; selector?: string }
   | { kind: "invalid_state"; conversationId?: string; runId?: string; reason?: string };
 
+export type AssistantDeltaStream = {
+  /** Append one provider text fragment to the official Convex Agent stream. */
+  addText(delta: string): Promise<void>;
+  /** Flush remaining deltas and mark the component stream finished. */
+  finish(): Promise<void>;
+  /** Abort the component stream without changing the durable run lifecycle. */
+  fail(reason: string): Promise<void>;
+};
+
 export type ProviderEventCheckpoint = {
   runId: string;
   attempt: number;
@@ -164,6 +173,12 @@ export interface AgentRunStore {
   releaseForRetry(input: { runId: string; attempt: number; workerId: string; errorCode: string; errorMessage: string }): Promise<boolean>;
   getDocument(documentId: string): Promise<{ title: string; content: string } | null>;
   getConversationSession(conversationId: string): Promise<string | null>;
+  createAssistantDeltaStream(input: {
+    conversationId: string;
+    runId: string;
+    attempt: number;
+    workerId: string;
+  }): Promise<AssistantDeltaStream>;
   /** Existing assistant projection, used to resume a stream without replacing
    * previously persisted content when the worker is retried mid-turn. */
   getAssistantMessage?(conversationId: string, operationKey: string): Promise<{ content: string; tools: string[] } | null>;

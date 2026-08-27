@@ -1,3 +1,5 @@
+import { DeltaStreamer, compressUIMessageChunks } from "@convex-dev/agent";
+import type { UIMessageChunk } from "ai";
 import { ConvexHttpClient } from "convex/browser";
 import { anyApi } from "convex/server";
 import { api } from "../../../convex/_generated/api";
@@ -6,6 +8,7 @@ import type {
   AgentRunKind,
   AgentRunRecord,
   AgentRunStore,
+  AssistantDeltaStream,
   PendingAction,
   ProviderEventCheckpoint,
   ScheduleReconciliationSnapshot,
@@ -213,6 +216,87 @@ export class ConvexAgentRunStore implements AgentRunStore {
     return typeof (conversation as { sessionId?: unknown }).sessionId === "string"
       ? (conversation as { sessionId: string }).sessionId
       : null;
+  }
+
+  async createAssistantDeltaStream(input: {
+    conversationId: string;
+    runId: string;
+    attempt: number;
+    workerId: string;
+  }): Promise<AssistantDeltaStream> {
+    const threadId = await this.client.mutation(anyApi.agentStreaming.ensureConversationThread, {
+      conversationId: runId(input.conversationId),
+    }) as string;
+    const bridgeRefs = {
+      create: {},
+      addDelta: {},
+      finish: {},
+      abort: {},
+    };
+    const bridgeComponent = { streams: bridgeRefs };
+    const bridgeContext = {
+      runMutation: async (reference: unknown, args: unknown) => {
+        const payload = args && typeof args === "object" ? args as Record<string, unknown> : {};
+        const guardedPayload = {
+          ...payload,
+          expectedAttempt: input.attempt,
+          expectedWorkerId: input.workerId,
+        };
+        if (reference === bridgeRefs.create) return await this.client.mutation(anyApi.agentStreaming.create, guardedPayload);
+        if (reference === bridgeRefs.addDelta) return await this.client.mutation(anyApi.agentStreaming.addDelta, guardedPayload);
+        if (reference === bridgeRefs.finish) return await this.client.mutation(anyApi.agentStreaming.finish, guardedPayload);
+        if (reference === bridgeRefs.abort) return await this.client.mutation(anyApi.agentStreaming.abort, guardedPayload);
+        throw new Error("Unknown Convex Agent stream bridge operation");
+      },
+    };
+    const streamer = new DeltaStreamer<UIMessageChunk>(
+      bridgeComponent as never,
+      bridgeContext as never,
+      {
+        throttleMs: 100,
+        onAsyncAbort: async () => undefined,
+        abortSignal: undefined,
+        compress: compressUIMessageChunks,
+      },
+      {
+        threadId,
+        userId: input.runId,
+        agentName: input.runId,
+        order: Date.now(),
+        stepOrder: input.attempt,
+        format: "UIMessageChunk",
+        provider: "trueforge",
+      },
+    );
+    // Create the component record immediately so other devices see a durable
+    // streaming row before the first provider text fragment arrives.
+    await streamer.getOrCreateStreamId();
+    const textPartId = `assistant:${input.runId}:${input.attempt}`;
+    let started = false;
+    let ended = false;
+    return {
+      async addText(delta: string): Promise<void> {
+        if (!delta || ended) return;
+        const chunks: UIMessageChunk[] = [];
+        if (!started) {
+          chunks.push({ type: "text-start", id: textPartId });
+          started = true;
+        }
+        chunks.push({ type: "text-delta", id: textPartId, delta });
+        await streamer.addParts(chunks);
+      },
+      async finish(): Promise<void> {
+        if (ended) return;
+        ended = true;
+        if (started) await streamer.addParts([{ type: "text-end", id: textPartId }]);
+        await streamer.finish();
+      },
+      async fail(reason: string): Promise<void> {
+        if (ended) return;
+        ended = true;
+        await streamer.fail(reason.slice(0, 500));
+      },
+    };
   }
 
   async getAssistantMessage(conversationId: string, operationKey: string): Promise<{ content: string; tools: string[] } | null> {

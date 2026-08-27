@@ -146,6 +146,7 @@ export const conversationState = query({
       _creationTime: conversation._creationTime,
       title: conversation.title,
       sessionId: conversation.sessionId,
+      agentThreadId: conversation.agentThreadId,
       createdAt: conversation.createdAt,
       updatedAt: conversation.updatedAt,
       summaryUpdatedAt: conversation.summaryUpdatedAt,

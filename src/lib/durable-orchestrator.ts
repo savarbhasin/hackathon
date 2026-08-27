@@ -1,7 +1,7 @@
 import { isEventDelta, mergeEventDelta, TrueForge } from "@truefoundry/trueforge-sdk";
 import type { TrueForgeApi } from "@truefoundry/trueforge-sdk";
 import { ORCHESTRATOR_INSTRUCTIONS, ORCHESTRATOR_SPEC } from "./fleet";
-import type { AgentRunRecord, AgentRunStore, PendingAction } from "./queue/types";
+import type { AgentRunRecord, AgentRunStore, AssistantDeltaStream, PendingAction } from "./queue/types";
 import { RecoverableRunError } from "./queue/types";
 import { trueForgeBaseUrl } from "./queue/env";
 import { workerLog } from "./queue/log";
@@ -245,95 +245,6 @@ async function project(
   });
 }
 
-type AssistantProjection = {
-  content: string;
-  tools: string[];
-  status: string;
-  pauseActions?: PendingAction[];
-};
-
-/**
- * Coalesces provider events into bounded Convex writes. The worker still
- * awaits every provider-event checkpoint, but assistant text is projected at
- * most once per interval so a token-heavy stream cannot turn Convex into a
- * write-per-token queue. `flush` is deliberately retry-safe: a failed write
- * remains pending and is attempted once more before the error is surfaced.
- */
-export function createThrottledAssistantProjection(
-  store: AgentRunStore,
-  run: AgentRunRecord,
-  intervalMs = 200,
-  ownership?: ProjectionOwnership,
-) {
-  let pending: AssistantProjection | undefined;
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  let chain = Promise.resolve();
-  let lastError: unknown;
-  let lastWritten: AssistantProjection | undefined;
-
-  const same = (a: AssistantProjection | undefined, b: AssistantProjection): boolean =>
-    !!a && a.content === b.content && a.status === b.status
-      && a.tools.length === b.tools.length && a.tools.every((tool, index) => tool === b.tools[index])
-      && JSON.stringify(a.pauseActions ?? null) === JSON.stringify(b.pauseActions ?? null);
-
-  const writePending = (): void => {
-    const next = pending;
-    pending = undefined;
-    if (!next) return;
-    chain = chain.then(async () => {
-      try {
-        await project(store, run, next.content, next.tools, next.status, next.pauseActions, ownership);
-        lastWritten = next;
-        lastError = undefined;
-      } catch (error) {
-        // Keep the exact snapshot. A retry may reconnect after this write and
-        // must not lose the latest text merely because Convex was unavailable.
-        pending = pending ?? next;
-        lastError = error;
-      }
-    });
-  };
-
-  const schedule = (): void => {
-    if (timer !== undefined) return;
-    timer = setTimeout(() => {
-      timer = undefined;
-      writePending();
-    }, Math.max(150, Math.min(250, intervalMs)));
-  };
-
-  return {
-    update(next: AssistantProjection): void {
-      if (same(lastWritten, next) || same(pending, next)) return;
-      pending = next;
-      schedule();
-    },
-    async flush(next?: AssistantProjection): Promise<void> {
-      if (next && !same(lastWritten, next)) pending = next;
-      if (timer !== undefined) {
-        clearTimeout(timer);
-        timer = undefined;
-      }
-      writePending();
-      await chain;
-      // A failed first attempt leaves pending populated. Do one bounded retry
-      // here; the outer worker error path decides whether to retry the run.
-      if (pending) {
-        writePending();
-        await chain;
-      }
-      if (lastError) throw lastError;
-    },
-    cancel(): void {
-      if (timer !== undefined) {
-        clearTimeout(timer);
-        timer = undefined;
-      }
-      pending = undefined;
-    },
-  };
-}
-
 /**
  * Merges either a cumulative or fragmentary provider text candidate against a
  * stable persisted prefix. A retry can begin with only a suffix (and some
@@ -369,7 +280,7 @@ export async function processDurableOrchestratorRun(store: AgentRunStore, run: A
   let projectionBaseline = "";
   let streamDelta = "";
   let projectedText = "";
-  let projection: ReturnType<typeof createThrottledAssistantProjection> | undefined;
+  let deltaStream: AssistantDeltaStream | undefined;
 
   try {
     const input = parseDurableOrchestratorInput(run.input);
@@ -449,11 +360,17 @@ export async function processDurableOrchestratorRun(store: AgentRunStore, run: A
     if (run.providerSequence !== undefined && !hasResume) {
       await hydratePersistedMessages(store, run._id, run.providerSequence, messages);
     }
-    projection = createThrottledAssistantProjection(store, run, 200, { attempt, workerId: context.workerId });
-    // Materialize an assistant row promptly, even when the model's first
-    // events contain no text. This makes the Convex subscription authoritative
-    // instead of leaving the frontend dependent on its local placeholder.
-    projection.update({ content: projectedText, tools, status: "running" });
+    if (run.conversationId) {
+      deltaStream = await store.createAssistantDeltaStream({
+        conversationId: run.conversationId,
+        runId: run._id,
+        attempt,
+        workerId: context.workerId,
+      });
+      // A retry starts a fresh official component stream. Seed it with the
+      // previously durable prefix so the replacement stream is self-contained.
+      if (projectedText) await deltaStream.addText(projectedText);
+    }
 
     const stream = await client.sessions.subscribeToTurn(sessionId, turnId, hasResume ? {} : (run.providerSequence === undefined ? {} : { afterSequenceNumber: run.providerSequence }), { abortSignal: context.signal });
     let fallbackSequence = (run.providerSequence ?? 0) + 1;
@@ -473,38 +390,32 @@ export async function processDurableOrchestratorRun(store: AgentRunStore, run: A
         }
         if (event.threadId === "main" && typeof event.content === "string") fallbackDelta += event.content;
       }
-      const providerEvent = { runId: run._id, attempt, workerId: context.workerId, turnId, sequence, providerEventId, providerSequence: providerSequence ?? undefined, type, payload: event };
-      if (providerSequence !== null && store.appendProviderEventAndCheckpoint) {
-        // Journal and cursor advancement are one Convex transaction. This
-        // removes a serialized network round-trip per provider event without
-        // weakening the append-before-cursor recovery invariant.
-        const checkpoint = await store.appendProviderEventAndCheckpoint({ ...providerEvent, providerSequence });
-        if (!checkpoint?.checkpointed) {
-          // The run was reclaimed or otherwise lost ownership. Do not let the
-          // throttled timer publish a stale snapshot after this return.
-          projection?.cancel();
-          return;
-        }
-      } else {
-        await store.appendProviderEvent(providerEvent);
-        if (providerSequence !== null && !await store.checkpointProviderCursor({ runId: run._id, attempt, workerId: context.workerId, turnId, providerSequence })) {
-          // The run was reclaimed or otherwise lost ownership. Do not let the
-          // throttled timer publish a stale snapshot after this return.
-          projection?.cancel();
-          return;
-        }
-      }
-
-      // Recompute from merged SDK deltas after every event. The base
-      // model.message is commonly empty, so normalizedText falls back to the
-      // accumulated delta text when a retry starts mid-stream.
+      // Publish through Convex Agent's official delta component before the
+      // worker's event journal round-trip. The guarded bridge rejects stale
+      // ownership while the provider journal remains recovery authority.
+      const previousProjectedText = projectedText;
       const candidateText = normalizedText(messages, fallbackDelta);
       streamDelta = mergeStreamingCandidate(projectionBaseline, streamDelta, candidateText);
       projectedText = `${projectionBaseline}${streamDelta}`;
       const streamedTools = toolsFromMessages(messages);
       tools = [...new Set([...tools, ...streamedTools])];
-      if (projection && type !== "turn.done") {
-        projection.update({ content: projectedText, tools, status: "running" });
+      if (type !== "turn.done" && projectedText.startsWith(previousProjectedText)) {
+        await deltaStream?.addText(projectedText.slice(previousProjectedText.length));
+      }
+
+      const providerEvent = { runId: run._id, attempt, workerId: context.workerId, turnId, sequence, providerEventId, providerSequence: providerSequence ?? undefined, type, payload: event };
+      if (providerSequence !== null && store.appendProviderEventAndCheckpoint) {
+        const checkpoint = await store.appendProviderEventAndCheckpoint({ ...providerEvent, providerSequence });
+        if (!checkpoint?.checkpointed) {
+          await deltaStream?.fail("run ownership lost").catch(() => undefined);
+          return;
+        }
+      } else {
+        await store.appendProviderEvent(providerEvent);
+        if (providerSequence !== null && !await store.checkpointProviderCursor({ runId: run._id, attempt, workerId: context.workerId, turnId, providerSequence })) {
+          await deltaStream?.fail("run ownership lost").catch(() => undefined);
+          return;
+        }
       }
       if (type !== "turn.done") continue;
 
@@ -513,36 +424,45 @@ export async function processDurableOrchestratorRun(store: AgentRunStore, run: A
       metrics = record(state.metrics) ?? undefined;
       tools = [...new Set([...tools, ...toolsFromMessages(messages)])];
       const outputContent = typeof record(state.output)?.content === "string" ? record(state.output)?.content as string : "";
+      const beforeTerminalText = projectedText;
       streamDelta = mergeStreamingCandidate(projectionBaseline, streamDelta, outputContent || normalizedText(messages, fallbackDelta));
       mergedText = `${projectionBaseline}${streamDelta}`;
       projectedText = mergedText;
+      if (mergedText.startsWith(beforeTerminalText)) {
+        await deltaStream?.addText(mergedText.slice(beforeTerminalText.length));
+      }
       if (stateStatus === "done") {
         const actions = enrichPendingActions(run._id, Array.isArray(state.requiredActions) ? state.requiredActions : [], messages);
         if (actions.length > 0) {
           const waitingStatus = actions.some((action) => action.type === "tool.approval_required") ? "waiting_for_approval" : "waiting_for_user";
-          await projection?.flush({ content: mergedText, tools, status: waitingStatus, pauseActions: actions });
+          await project(store, run, mergedText, tools, waitingStatus, actions, { attempt, workerId: context.workerId });
           const pendingActionSelector = actions.length === 1 ? actions[0].selector : undefined;
           const paused = actions.some((action) => action.type === "tool.approval_required")
             ? await store.waitForApproval({ runId: run._id, attempt, workerId: context.workerId, pendingActions: actions, pendingActionSelector })
             : await store.waitForUser({ runId: run._id, attempt, workerId: context.workerId, pendingActions: actions, pendingActionSelector });
           if (!paused) return;
+          await deltaStream?.finish();
           workerLog("run.orchestrator_paused", { runId: run._id, attempt, turnId, actionCount: actions.length });
           return;
         }
-        await projection?.flush({ content: mergedText, tools, status: completionTokenStatus(metrics), pauseActions: [] });
+        await project(store, run, mergedText, tools, completionTokenStatus(metrics), [], { attempt, workerId: context.workerId });
         if (!await store.complete({ runId: run._id, attempt, workerId: context.workerId, turnId, output: { content: mergedText, status: stateStatus, tools, ...(metrics ? { metrics } : {}) } })) return;
+        await deltaStream?.finish();
         return;
       }
       if (stateStatus === "cancelled") {
-        await projection?.flush({ content: mergedText, tools, status: "cancelled", pauseActions: [] });
+        await project(store, run, mergedText, tools, "cancelled", [], { attempt, workerId: context.workerId });
         if (!await store.cancel({ runId: run._id, attempt, workerId: context.workerId, turnId })) return;
+        await deltaStream?.finish();
         return;
       }
       const message = typeof state.message === "string" ? state.message : "TrueForge turn returned an error state";
       if (recoverableTerminal(message)) throw new RecoverableRunError("trueforge_terminal_transient", message);
       mergedText = mergedText || message;
-      await projection?.flush({ content: mergedText, tools, status: "failed", pauseActions: [] });
-      await store.fail({ runId: run._id, attempt, workerId: context.workerId, turnId, errorCode: "trueforge_terminal", errorMessage: message });
+      await project(store, run, mergedText, tools, "failed", [], { attempt, workerId: context.workerId });
+      if (await store.fail({ runId: run._id, attempt, workerId: context.workerId, turnId, errorCode: "trueforge_terminal", errorMessage: message })) {
+        await deltaStream?.finish();
+      }
       return;
     }
     throw new RecoverableRunError("trueforge_stream_ended", "Provider stream ended without turn.done");
@@ -568,8 +488,9 @@ export async function processDurableOrchestratorRun(store: AgentRunStore, run: A
       });
       // Without the authoritative lifecycle snapshot, neither a retrying
       // projection nor a guarded transition is safe after an ambiguous
-      // terminal mutation. Cancel delayed writes and let redelivery reconcile.
-      projection?.cancel();
+      // terminal mutation. Abort this attempt's component stream and let
+      // redelivery reconcile from the provider journal.
+      await deltaStream?.fail("lifecycle state unavailable").catch(() => undefined);
       throw readFailure;
     }
 
@@ -578,11 +499,8 @@ export async function processDurableOrchestratorRun(store: AgentRunStore, run: A
     if (!settledStatus) {
       const projectionStatus = retryable ? "retrying" : "failed";
       try {
-        if (projection) {
-          await projection.flush({ content: mergedText || message, tools, status: projectionStatus, pauseActions: [] });
-        } else {
-          await project(store, run, mergedText || message, tools, projectionStatus, [], { attempt, workerId: context.workerId });
-        }
+        await deltaStream?.fail(retryable ? retryable.message : message).catch(() => undefined);
+        await project(store, run, mergedText || message, tools, projectionStatus, [], { attempt, workerId: context.workerId });
       } catch (flushFailure) {
         projectionError = flushFailure;
         workerLog("run.assistant_projection_failed", {

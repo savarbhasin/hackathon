@@ -25,6 +25,7 @@ Convex ◀──────── Next.js (port 3000)
 ```
 
 - **Convex is the application source of truth**: the board and run state are read and written through Convex, while Redis/BullMQ delivers work to the worker.
+- Live orchestrator text uses the official `@convex-dev/agent` delta streaming component (`DeltaStreamer` → `syncStreams` / `useStreamingUIMessages`). TrueForge still owns generation and `chatMessages` remains the final durable record.
 - TrueForge has its own separate SQLite (`~/Library/Application Support/trueforge/db/`) — never touch it; go through the SDK/API.
 - The worker owns TrueForge turns and persists session IDs, turn IDs, events, pause actions, and provider cursors in Convex.
 
