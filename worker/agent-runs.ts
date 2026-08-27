@@ -1,7 +1,7 @@
 import { Worker } from "bullmq";
 import { createAgentRunsQueueEvents } from "../src/lib/queue/agent-runs";
 import { ConvexAgentRunStore } from "../src/lib/queue/convex-agent-runs";
-import { durableSchedulesActive, BullMqScheduleService } from "../src/lib/queue/schedules";
+import { BullMqScheduleService } from "../src/lib/queue/schedules";
 import { requireWorkerEnvironment } from "../src/lib/queue/env";
 import { workerLog, safeError } from "../src/lib/queue/log";
 import { createRedisConnection } from "../src/lib/queue/redis";
@@ -15,10 +15,8 @@ if (!Number.isSafeInteger(concurrency) || concurrency < 1) throw new Error("WORK
 async function main(): Promise<void> {
   requireWorkerEnvironment();
   const store = new ConvexAgentRunStore();
-  // Schedule reconciliation is worker-only and remains completely inert unless
-  // both durable feature flags are enabled.
-  const scheduleService = durableSchedulesActive() ? new BullMqScheduleService(undefined, store) : undefined;
-  if (scheduleService) await scheduleService.start();
+  const scheduleService = new BullMqScheduleService(undefined, store);
+  await scheduleService.start();
 
   let shuttingDown = false;
   const controllers = new Set<AbortController>();
@@ -27,9 +25,6 @@ async function main(): Promise<void> {
     async (job) => {
       if (shuttingDown) throw new Error("Worker is shutting down");
       if (job.name === SCHEDULE_FIRE_JOB_NAME) {
-        // Existing scheduler jobs are harmless when either gate is off; leave
-        // them inert rather than handing ownership back to the legacy path.
-        if (!scheduleService) return;
         // This awaits both Convex admission and run enqueue. No prompt enters
         // the BullMQ payload or a detached background promise.
         await scheduleService.deliverFire(job);
@@ -49,7 +44,7 @@ async function main(): Promise<void> {
   );
   const queueEvents = createAgentRunsQueueEvents();
 
-  worker.on("ready", () => workerLog("worker.ready", { workerId, concurrency, durableSchedules: Boolean(scheduleService) }));
+  worker.on("ready", () => workerLog("worker.ready", { workerId, concurrency }));
   worker.on("active", (job) => workerLog("job.active", {
     workerId,
     jobId: job.id ?? null,
@@ -81,7 +76,7 @@ async function main(): Promise<void> {
     for (const controller of controllers) controller.abort();
     await worker.close(); // Stops new claims and waits for active jobs to checkpoint/release.
     await queueEvents.close();
-    if (scheduleService) await scheduleService.close();
+    await scheduleService.close();
     workerLog("worker.shutdown_complete", { workerId, signal });
   }
 

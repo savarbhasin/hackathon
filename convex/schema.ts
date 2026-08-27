@@ -4,8 +4,6 @@ import { v } from "convex/values";
 const timestamps = { createdAt: v.number(), updatedAt: v.number() };
 
 export default defineSchema({
-  // Product data mirrors the Prisma models while retaining the Phase 1 fields
-  // used by the durable worker. Optional operation keys make retries safe.
   missions: defineTable({
     externalId: v.optional(v.string()),
     title: v.string(),
@@ -19,27 +17,23 @@ export default defineSchema({
 
   tasks: defineTable({
     externalId: v.optional(v.string()),
-    missionId: v.optional(v.id("missions")),
+    missionId: v.id("missions"),
     title: v.string(),
-    // Legacy Phase 0/1 names are kept for compatibility with the realtime spike.
-    name: v.optional(v.string()),
-    description: v.optional(v.string()),
-    detail: v.optional(v.string()),
+    detail: v.string(),
     role: v.string(),
     agentPrompt: v.optional(v.string()),
     column: v.string(),
-    status: v.optional(v.string()),
     dependsOn: v.array(v.id("tasks")),
     sessionId: v.optional(v.string()),
     turnId: v.optional(v.string()),
-    lastSeq: v.optional(v.number()),
+    lastSeq: v.number(),
     handoff: v.optional(v.any()),
     output: v.optional(v.any()),
     error: v.optional(v.string()),
     pendingActions: v.optional(v.any()),
-    position: v.optional(v.number()),
+    position: v.number(),
     claimedBy: v.optional(v.string()),
-    claimCount: v.optional(v.number()),
+    claimCount: v.number(),
     operationKey: v.optional(v.string()),
     // Latest specialist run admitted for this task. It is retained after
     // completion so mark_done/finalization retries can prove ownership.
@@ -88,11 +82,9 @@ export default defineSchema({
     // A session is normally seeded by the web enqueue path. It is optional
     // during creation so the worker can establish one durably on first run.
     sessionId: v.optional(v.string()),
-    // Summary ordering is intentionally separate from updatedAt: assistant
-    // token/message writes may update their own row without moving a sidebar
-    // item. Older rows may omit these fields and are handled by query fallbacks.
-    summaryUpdatedAt: v.optional(v.number()),
-    messageCount: v.optional(v.number()),
+    // Assistant token writes do not move the conversation in the sidebar.
+    summaryUpdatedAt: v.number(),
+    messageCount: v.number(),
     ...timestamps,
   })
     .index("by_operationKey", ["operationKey"])
@@ -133,22 +125,20 @@ export default defineSchema({
     .index("by_enabled", ["enabled"])
     .index("by_updatedAt", ["updatedAt"]),
 
-  // Schedule configuration is durable in Convex; BullMQ scheduler records are
-  // only a reconciled delivery projection. Most of the fields are optional so
-  // rows written by the Phase 1 spike remain readable without a backfill.
+  // BullMQ scheduler records are a delivery projection of this configuration.
   schedules: defineTable({
     name: v.string(),
     cronExpr: v.string(),
-    timezone: v.optional(v.string()),
+    timezone: v.string(),
     prompt: v.string(),
     enabled: v.boolean(),
     deletedAt: v.optional(v.number()),
-    schedulerId: v.optional(v.string()),
+    schedulerId: v.string(),
     // Caller-owned admission key for idempotent create requests.
     operationKey: v.optional(v.string()),
-    configRevision: v.optional(v.number()),
-    configHash: v.optional(v.string()),
-    syncState: v.optional(v.string()),
+    configRevision: v.number(),
+    configHash: v.string(),
+    syncState: v.string(),
     syncError: v.optional(v.string()),
     syncedAt: v.optional(v.number()),
     lastRunAt: v.optional(v.number()),

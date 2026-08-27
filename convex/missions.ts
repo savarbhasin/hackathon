@@ -62,7 +62,7 @@ function validateDeps(tasks: any[], targetId: any, mission: any, deps: any[]): {
 
 async function nextPosition(ctx: any, mission: any, requested?: number, excluding?: any): Promise<number> {
   const tasks = await missionTasks(ctx, mission);
-  const positions = tasks.filter((t: any) => t._id !== excluding).map((t: any) => Number(t.position ?? 0));
+  const positions = tasks.filter((t: any) => t._id !== excluding).map((t: any) => Number(t.position));
   if (requested === undefined) return positions.length ? Math.max(...positions) + 1 : 0;
   return Math.max(0, Math.floor(requested));
 }
@@ -75,7 +75,7 @@ async function insertTaskEvent(ctx: any, id: any, type: string, payload: unknown
   const task = await ctx.db.get(id);
   if (!task) return { event: null, inserted: false };
   const latest = await ctx.db.query("taskEvents").withIndex("by_task", (q: any) => q.eq("taskId", id)).order("desc").first();
-  const seq = Math.max(task.lastSeq ?? 0, latest?.seq ?? 0) + 1;
+  const seq = Math.max(task.lastSeq, latest?.seq ?? 0) + 1;
   const event = await ctx.db.insert("taskEvents", { taskId: id, seq, type, payload, ...(operationKey ? { operationKey } : {}), createdAt: Date.now() });
   await ctx.db.patch(id, { lastSeq: seq, updatedAt: Date.now() });
   return { event: await ctx.db.get(event), inserted: true };
@@ -85,7 +85,7 @@ async function taskDispatchContext(ctx: any, task: any) {
   const mission = await ctx.db.get(task.missionId);
   if (!mission) return null;
   const all = await missionTasks(ctx, task.missionId);
-  const byId = new Map(all.map((item: any) => [String(item._id), item]));
+  const byId = new Map<string, any>(all.map((item: any) => [String(item._id), item]));
   const predecessors = [];
   for (const dependencyId of task.dependsOn ?? []) {
     const predecessor = byId.get(String(dependencyId));
@@ -104,8 +104,8 @@ async function taskDispatchContext(ctx: any, task: any) {
   }
   const successors = all
     .filter((candidate: any) => candidate._id !== task._id && (candidate.dependsOn ?? []).some((id: any) => String(id) === String(task._id)))
-    .sort((a: any, b: any) => Number(a.position ?? 0) - Number(b.position ?? 0))
-    .map((candidate: any) => ({ id: candidate._id, title: candidate.title, role: candidate.role, column: candidate.column, position: candidate.position ?? 0 }));
+    .sort((a: any, b: any) => Number(a.position) - Number(b.position))
+    .map((candidate: any) => ({ id: candidate._id, title: candidate.title, role: candidate.role, column: candidate.column, position: candidate.position }));
   return {
     mission: { id: mission._id, title: mission.title, goal: mission.goal, status: mission.status },
     task: { ...task },
@@ -117,7 +117,7 @@ async function taskDispatchContext(ctx: any, task: any) {
 async function readySuccessor(ctx: any, candidate: any): Promise<boolean> {
   if (candidate.column !== "backlog") return false;
   const all = await missionTasks(ctx, candidate.missionId);
-  const byId = new Map(all.map((task: any) => [String(task._id), task]));
+  const byId = new Map<string, any>(all.map((task: any) => [String(task._id), task]));
   return (candidate.dependsOn ?? []).every((id: any) => byId.get(String(id))?.column === "settled");
 }
 
@@ -159,7 +159,7 @@ async function admitSpecialistInternal(ctx: any, args: any, enforceReady = false
     output: undefined,
     error: undefined,
     claimedBy: args.owner,
-    claimCount: (task.claimCount ?? 0) + 1,
+    claimCount: task.claimCount + 1,
     specialistRunId: created,
     activeRunId: created,
     updatedAt: now,
@@ -324,13 +324,10 @@ export const taskCore = query({
       _creationTime: task._creationTime,
       missionId: task.missionId,
       title: task.title,
-      name: task.name,
       detail: task.detail,
-      description: task.description,
       role: task.role,
       agentPrompt: task.agentPrompt,
       column: task.column,
-      status: task.status,
       dependsOn: task.dependsOn ?? [],
       sessionId: task.sessionId,
       turnId: task.turnId,
@@ -421,7 +418,7 @@ export const checkpointSpecialist = mutation({
 });
 
 export const createTask = mutation({
-  args: { missionId, title: v.string(), detail: v.optional(v.string()), description: v.optional(v.string()), role: v.string(), agentPrompt: v.optional(v.string()), column: v.optional(v.string()), dependsOn: v.optional(v.array(taskId)), position: v.optional(v.number()), operationKey: v.optional(v.string()) }, returns: v.any(),
+  args: { missionId, title: v.string(), detail: v.string(), role: v.string(), agentPrompt: v.optional(v.string()), column: v.optional(v.string()), dependsOn: v.optional(v.array(taskId)), position: v.optional(v.number()), operationKey: v.optional(v.string()) }, returns: v.any(),
   handler: async (ctx, args) => {
     const mission = await ctx.db.get(args.missionId);
     if (!mission) return result("not_found", { entity: "mission" });
@@ -437,15 +434,15 @@ export const createTask = mutation({
     const validation = validateDeps(allTasks, "__new_task__", args.missionId, deps);
     if (validation) return validation;
     const position = await nextPosition(ctx, args.missionId, args.position);
-    for (const peer of tasks.filter((task: any) => Number(task.position ?? 0) >= position)) await ctx.db.patch(peer._id, { position: Number(peer.position ?? 0) + 1, updatedAt: Date.now() });
+    for (const peer of tasks.filter((task: any) => Number(task.position) >= position)) await ctx.db.patch(peer._id, { position: Number(peer.position) + 1, updatedAt: Date.now() });
     const now = Date.now();
-    const id = await ctx.db.insert("tasks", { missionId: args.missionId, title: args.title.trim(), name: args.title.trim(), detail: args.detail, description: args.description, role: args.role.trim(), agentPrompt: args.agentPrompt, column: args.column ?? "backlog", dependsOn: deps, lastSeq: 0, position, claimCount: 0, ...(args.operationKey ? { operationKey: args.operationKey, externalId: args.operationKey } : {}), createdAt: now, updatedAt: now });
+    const id = await ctx.db.insert("tasks", { missionId: args.missionId, title: args.title.trim(), detail: args.detail, role: args.role.trim(), agentPrompt: args.agentPrompt, column: args.column ?? "backlog", dependsOn: deps, lastSeq: 0, position, claimCount: 0, ...(args.operationKey ? { operationKey: args.operationKey, externalId: args.operationKey } : {}), createdAt: now, updatedAt: now });
     return await ctx.db.get(id);
   },
 });
 
 export const updateTask = mutation({
-  args: { taskId, title: v.optional(v.string()), detail: v.optional(v.string()), description: v.optional(v.string()), role: v.optional(v.string()), agentPrompt: v.optional(v.string()), dependsOn: v.optional(v.array(taskId)), position: v.optional(v.number()), column: v.optional(v.string()), sessionId: v.optional(v.string()), turnId: v.optional(v.string()), handoff: v.optional(v.any()), output: v.optional(v.any()), error: v.optional(v.string()), pendingActions: v.optional(v.any()) }, returns: v.any(),
+  args: { taskId, title: v.optional(v.string()), detail: v.optional(v.string()), role: v.optional(v.string()), agentPrompt: v.optional(v.string()), dependsOn: v.optional(v.array(taskId)), position: v.optional(v.number()), column: v.optional(v.string()), sessionId: v.optional(v.string()), turnId: v.optional(v.string()), handoff: v.optional(v.any()), output: v.optional(v.any()), error: v.optional(v.string()), pendingActions: v.optional(v.any()) }, returns: v.any(),
   handler: async (ctx, args) => {
     const task = await ctx.db.get(args.taskId);
     if (!task) return result("not_found", { entity: "task" });
@@ -457,15 +454,15 @@ export const updateTask = mutation({
     }
     if (args.column !== undefined && !TASK_COLUMNS.has(args.column)) return result("conflict", { reason: "invalid_column" });
     if (args.position !== undefined) {
-      const old = Number(task.position ?? 0); const next = Math.max(0, Math.floor(args.position));
+      const old = Number(task.position); const next = Math.max(0, Math.floor(args.position));
       if (old !== next) {
-        for (const peer of tasks.filter((item: any) => item._id !== task._id && (old < next ? Number(item.position ?? 0) > old && Number(item.position ?? 0) <= next : Number(item.position ?? 0) >= next && Number(item.position ?? 0) < old))) {
-          await ctx.db.patch(peer._id, { position: Number(peer.position ?? 0) + (old < next ? -1 : 1), updatedAt: Date.now() });
+        for (const peer of tasks.filter((item: any) => item._id !== task._id && (old < next ? Number(item.position) > old && Number(item.position) <= next : Number(item.position) >= next && Number(item.position) < old))) {
+          await ctx.db.patch(peer._id, { position: Number(peer.position) + (old < next ? -1 : 1), updatedAt: Date.now() });
         }
       }
     }
     const patch: any = { updatedAt: Date.now() };
-    for (const key of ["title", "detail", "description", "role", "agentPrompt", "dependsOn", "position", "column", "sessionId", "turnId", "handoff", "output", "error", "pendingActions"] as const) if (args[key] !== undefined) patch[key] = key === "title" || key === "role" ? String(args[key]).trim() : args[key];
+    for (const key of ["title", "detail", "role", "agentPrompt", "dependsOn", "position", "column", "sessionId", "turnId", "handoff", "output", "error", "pendingActions"] as const) if (args[key] !== undefined) patch[key] = key === "title" || key === "role" ? String(args[key]).trim() : args[key];
     await ctx.db.patch(args.taskId, patch);
     return await ctx.db.get(args.taskId);
   },
@@ -481,7 +478,7 @@ export const appendTaskEvent = mutation({
       if (duplicate) return result("idempotent", { event: duplicate });
     }
     const latest = await ctx.db.query("taskEvents").withIndex("by_task", (q: any) => q.eq("taskId", args.taskId)).order("desc").first();
-    const current = Math.max(task.lastSeq ?? 0, latest?.seq ?? 0);
+    const current = Math.max(task.lastSeq, latest?.seq ?? 0);
     if (args.expectedSeq !== undefined && current !== args.expectedSeq) return result("conflict", { reason: "sequence_mismatch", expectedSeq: args.expectedSeq, actualSeq: current });
     const event = await insertTaskEvent(ctx, args.taskId, args.type, args.payload, args.operationKey);
     return event.inserted ? result("created", { event: event.event }) : result("idempotent", { event: event.event });
@@ -624,7 +621,7 @@ export const readySuccessors = query({
     const completed = await ctx.db.get(args.taskId); if (!completed) return result("not_found");
     if (completed.column !== "settled") return result("dependency_blocked", { reason: "predecessor_not_settled" });
     const all = await missionTasks(ctx, completed.missionId);
-    const candidates = all.filter((task: any) => task._id !== completed._id && (task.dependsOn ?? []).some((id: any) => String(id) === String(completed._id))).sort((a: any, b: any) => Number(a.position ?? 0) - Number(b.position ?? 0));
+    const candidates = all.filter((task: any) => task._id !== completed._id && task.dependsOn.some((id: any) => String(id) === String(completed._id))).sort((a: any, b: any) => Number(a.position) - Number(b.position));
     const ready = []; for (const candidate of candidates) if (await readySuccessor(ctx, candidate)) ready.push(await taskDispatchContext(ctx, candidate));
     return ready;
   },
@@ -678,7 +675,7 @@ export const resetSpecialistForRetry = mutation({
 
     const now = Date.now();
     // Undefined fields are explicit deletes in Convex patches. Output and
-    // handoff intentionally remain available as retry context per legacy policy.
+    // Handoff and output remain available as retry context.
     await ctx.db.patch(args.taskId, {
       column: "backlog",
       sessionId: undefined,
@@ -698,20 +695,6 @@ export const resetSpecialistForRetry = mutation({
     return result("ok", { idempotent: false, task: await ctx.db.get(args.taskId), run, event: event.event });
   },
 });
-
-// Compatibility names used by the worker migration while contracts settle.
-export const getDispatchContext = getTaskDispatchContext;
-export const resetTaskForRetry = resetSpecialistForRetry;
-export const retryResetSpecialist = resetSpecialistForRetry;
-export const admitTask = admitSpecialist;
-export const admitSpecialistTask = admitSpecialist;
-export const resumeTask = resumeSpecialist;
-export const resumeTaskAdmission = resumeSpecialist;
-export const finalizeTask = finalizeSpecialist;
-export const finalizeTaskRun = finalizeSpecialist;
-export const markDoneTask = markDone;
-export const listReadySuccessors = readySuccessors;
-export const getReadySuccessors = readySuccessors;
 
 export const deleteMission = mutation({
   args: { missionId }, returns: v.boolean(),
@@ -742,7 +725,7 @@ export const claimTask = mutation({
   handler: async (ctx, args) => {
     const task = await ctx.db.get(args.taskId); if (!task) return result("not_found");
     if (task.column !== (args.expectedColumn ?? "backlog") || task.sessionId !== undefined || task.specialistRunId !== undefined || task.activeRunId !== undefined) return result("conflict", { reason: "task_not_admissible" });
-    await ctx.db.patch(args.taskId, { column: "working", claimedBy: args.owner, claimCount: (task.claimCount ?? 0) + 1, updatedAt: Date.now() }); return result("created", { task: await ctx.db.get(args.taskId) });
+    await ctx.db.patch(args.taskId, { column: "working", claimedBy: args.owner, claimCount: task.claimCount + 1, updatedAt: Date.now() }); return result("created", { task: await ctx.db.get(args.taskId) });
   },
 });
 

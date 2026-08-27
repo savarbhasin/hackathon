@@ -20,10 +20,6 @@ function id(value: unknown): string {
   return String(value ?? "");
 }
 
-function date(value: unknown): string | null {
-  return typeof value === "number" ? new Date(value).toISOString() : value == null ? null : String(value);
-}
-
 function hash(value: unknown): string {
   const input = typeof value === "string" ? value : JSON.stringify(value ?? null);
   let result = 2166136261;
@@ -34,33 +30,6 @@ function hash(value: unknown): string {
   return (result >>> 0).toString(16);
 }
 
-function legacyTask(task: any): any {
-  if (!task) return task;
-  return {
-    ...task,
-    id: id(task),
-    missionId: task.missionId == null ? task.missionId : id(task.missionId),
-    dependsOn: JSON.stringify(Array.isArray(task.dependsOn) ? task.dependsOn.map(id) : []),
-    pendingActions: task.pendingActions == null ? null : JSON.stringify(task.pendingActions),
-    createdAt: date(task.createdAt),
-    updatedAt: date(task.updatedAt),
-  };
-}
-
-function legacyDocument(document: any, mission?: any, task?: any): any {
-  if (!document) return document;
-  return {
-    ...document,
-    id: id(document),
-    missionId: document.missionId == null ? document.missionId : id(document.missionId),
-    taskId: document.taskId == null ? document.taskId : id(document.taskId),
-    createdAt: date(document.createdAt),
-    updatedAt: date(document.updatedAt),
-    mission: mission ? { title: mission.title } : null,
-    task: task ? { title: task.title, role: task.role } : null,
-  };
-}
-
 export async function durableBoard(): Promise<any[]> {
   return await durableGetBoard();
 }
@@ -68,14 +37,12 @@ export async function durableBoard(): Promise<any[]> {
 export async function durableTask(taskId: string): Promise<any | null> {
   const task = await convex().query(convexApi.missions.getTask, { taskId });
   if (!task) return null;
-  const normalized = legacyTask(task);
   if (Array.isArray(task.events)) {
-    normalized.events = [...task.events]
+    task.events = [...task.events]
       .sort((a: any, b: any) => Number(b.seq ?? 0) - Number(a.seq ?? 0))
       .slice(0, 20);
   }
-  if (Array.isArray(task.documents)) normalized.documents = task.documents.map((document: any) => legacyDocument(document));
-  return normalized;
+  return task;
 }
 
 export async function durableCreateMission(title: string, goal: string): Promise<any> {
@@ -190,7 +157,11 @@ export async function durableListDocs(): Promise<any[]> {
   ]);
   const missionById = new Map(missions.filter(Boolean).map((mission: any) => [id(mission), mission]));
   const taskById = new Map(tasks.filter(Boolean).map((task: any) => [id(task), task]));
-  return docs.map((document: any) => legacyDocument(document, missionById.get(id(document.missionId)), taskById.get(id(document.taskId))));
+  return docs.map((document: any) => ({
+    ...document,
+    mission: missionById.has(id(document.missionId)) ? { title: missionById.get(id(document.missionId))?.title } : null,
+    task: taskById.has(id(document.taskId)) ? { title: taskById.get(id(document.taskId))?.title, role: taskById.get(id(document.taskId))?.role } : null,
+  }));
 }
 
 export async function durableGetDoc(docId: string): Promise<any | null> {
@@ -200,35 +171,10 @@ export async function durableGetDoc(docId: string): Promise<any | null> {
     document.missionId ? convex().query(convexApi.missions.getMission, { missionId: id(document.missionId) }) : null,
     document.taskId ? convex().query(convexApi.missions.getTask, { taskId: id(document.taskId) }) : null,
   ]);
-  return legacyDocument(document, mission, task);
-}
-
-function legacySchedule(schedule: any): any {
-  if (!schedule) return schedule;
   return {
-    id: id(schedule),
-    name: schedule.name,
-    cronExpr: schedule.cronExpr,
-    timezone: schedule.timezone ?? "UTC",
-    // The existing MCP list_schedules contract includes prompt. Keep it in
-    // the response, but never log it from the durable bridge.
-    prompt: schedule.prompt,
-    enabled: schedule.enabled,
-    deletedAt: date(schedule.deletedAt),
-    schedulerId: schedule.schedulerId,
-    configRevision: schedule.configRevision,
-    configHash: schedule.configHash,
-    syncState: schedule.syncState,
-    syncError: schedule.syncError,
-    syncedAt: date(schedule.syncedAt),
-    lastRunAt: date(schedule.lastRunAt),
-    lastRunId: schedule.lastRunId == null ? schedule.lastRunId : id(schedule.lastRunId),
-    lastRunStatus: schedule.lastRunStatus,
-    lastIntendedFireAt: date(schedule.lastIntendedFireAt),
-    lastFailureAt: date(schedule.lastFailureAt),
-    lastFailureMessage: schedule.lastFailureMessage,
-    createdAt: date(schedule.createdAt),
-    updatedAt: date(schedule.updatedAt),
+    ...document,
+    mission: mission ? { title: mission.title } : null,
+    task: task ? { title: task.title, role: task.role } : null,
   };
 }
 
@@ -266,8 +212,7 @@ export async function durableListSchedules(): Promise<any[]> {
     includeDeleted: true,
     includeDisabled: true,
   });
-  if (!Array.isArray(schedules)) return [];
-  return schedules.map(legacySchedule);
+  return Array.isArray(schedules) ? schedules : [];
 }
 
 export async function durableCancelSchedule(scheduleId: string): Promise<any> {

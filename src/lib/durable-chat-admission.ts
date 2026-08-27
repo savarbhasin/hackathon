@@ -10,11 +10,7 @@ import {
   type ResumeSelection,
 } from "./orchestrator-pause";
 
-// The conversations module was added after the checked-in generated API. Keep
-// this boundary intentionally dynamic until the next Convex codegen pass.
 const convexFunctions = api as unknown as Record<string, Record<string, any>>;
-const conversations = convexFunctions.conversations;
-const agentRuns = convexFunctions.agentRuns;
 
 const activeStatuses = new Set([
   "queued",
@@ -48,9 +44,9 @@ export type DurableAdmissionResponse = {
 };
 
 function functionRef(moduleName: string, name: string): any {
-  const module = convexFunctions[moduleName];
-  if (!module?.[name]) throw new Error(`Convex function unavailable: ${moduleName}.${name}`);
-  return module[name];
+  const moduleFunctions = convexFunctions[moduleName];
+  if (!moduleFunctions?.[name]) throw new Error(`Convex function unavailable: ${moduleName}.${name}`);
+  return moduleFunctions[name];
 }
 
 function asId(value: unknown): string | undefined {
@@ -75,7 +71,7 @@ function titleFor(message: string): string {
   return line.length <= 72 ? line : `${line.slice(0, 69)}...`;
 }
 
-function keyFrom(value: unknown, header: string | null): string {
+function keyFrom(value: unknown, header: string | null | undefined): string {
   const candidate = typeof value === "string" ? value.trim() : "";
   const supplied = candidate || (header?.trim() ?? "");
   return supplied && supplied.length <= 256 ? supplied : randomUUID();
@@ -187,16 +183,15 @@ function persistedActions(run: Record<string, unknown>, selectedSelector?: strin
       if (!toolCallId) continue;
       const sourceEventId = stringValue(call?.sourceEventId);
       // Rich per-action selectors are authoritative. The run-level selector is
-      // only a selector for an unlabelled single action/call; otherwise retain
-      // the legacy call identifiers so one UI selector cannot select siblings.
-      const legacySelector = explicitSelector && (
+      // only valid for an unlabelled single action or call.
+      const callSelector = explicitSelector && (
         explicitSelector === toolCallId ||
         explicitSelector === sourceEventId ||
         (pending.length === 1 && calls.length === 1)
       )
         ? explicitSelector
         : toolCallId;
-      const selector = actionSelector ?? legacySelector;
+      const selector = actionSelector ?? callSelector;
       if (selectedSelector && selector !== selectedSelector) continue;
       result.push({ selector, type: action.type, toolCallId, threadId });
     }
@@ -321,6 +316,6 @@ export async function getDurableConversation(id: string): Promise<Record<string,
 export async function deleteDurableConversation(id: string): Promise<{ kind: "deleted" | "missing" | "active"; run?: Record<string, unknown> | null }> {
   const active = await convex().query(functionRef("agentRuns", "activeForConversation"), { conversationId: id as never }) as Record<string, unknown> | null;
   if (activeStatuses.has(String(active?.status))) return { kind: "active", run: active };
-  const deleted = await convex().mutation(functionRef("conversations", "deleteConversation"), { conversationId: id as never });
+  const deleted = await convex().mutation(functionRef("conversations", "remove"), { conversationId: id as never });
   return deleted ? { kind: "deleted" } : { kind: "missing" };
 }

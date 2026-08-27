@@ -40,28 +40,18 @@ function isSummaryTransition(message: any, nextStatus?: string): boolean {
     && nextStatus !== message.status;
 }
 
-async function messageCount(ctx: any, conversation: any): Promise<number> {
-  if (typeof conversation?.messageCount === "number") return conversation.messageCount;
-  const messages = await ctx.db
-    .query("chatMessages")
-    .withIndex("by_conversation", (q: any) => q.eq("conversationId", conversation._id))
-    .collect();
-  return messages.length;
-}
-
 async function bumpMessageCount(ctx: any, id: any): Promise<void> {
   const conversation = await ctx.db.get(id);
   if (!conversation) return;
-  await ctx.db.patch(id, { messageCount: (await messageCount(ctx, conversation)) + 1 });
+  await ctx.db.patch(id, { messageCount: conversation.messageCount + 1 });
 }
 
 async function touchConversationSummary(ctx: any, id: any, now: number, increment = false): Promise<void> {
   const conversation = await ctx.db.get(id);
   if (!conversation) return;
-  const count = increment ? (await messageCount(ctx, conversation)) + 1 : await messageCount(ctx, conversation);
   await ctx.db.patch(id, {
     summaryUpdatedAt: now,
-    messageCount: count,
+    messageCount: conversation.messageCount + (increment ? 1 : 0),
     updatedAt: now,
   });
 }
@@ -128,8 +118,8 @@ export const listSummaries = query({
         title: conversation.title,
         createdAt: conversation.createdAt,
         updatedAt: conversation.updatedAt,
-        summaryUpdatedAt: conversation.summaryUpdatedAt ?? conversation.updatedAt,
-        messageCount: conversation.messageCount ?? 0,
+        summaryUpdatedAt: conversation.summaryUpdatedAt,
+        messageCount: conversation.messageCount,
         latestRun: latest ? { _id: latest._id, status: latest.status } : null,
         activeRun: active ? { _id: active._id, status: active.status } : null,
       });
@@ -158,8 +148,8 @@ export const conversationState = query({
       sessionId: conversation.sessionId,
       createdAt: conversation.createdAt,
       updatedAt: conversation.updatedAt,
-      summaryUpdatedAt: conversation.summaryUpdatedAt ?? conversation.updatedAt,
-      messageCount: conversation.messageCount ?? 0,
+      summaryUpdatedAt: conversation.summaryUpdatedAt,
+      messageCount: conversation.messageCount,
     };
   },
 });
@@ -286,12 +276,14 @@ export const admitStart = mutation({
       await ctx.db.patch(conversation._id, { sessionId: args.sessionId });
       conversation = await ctx.db.get(conversation._id);
     }
-    const runs = await conversationRuns(ctx, conversation._id);
+    if (!conversation) return { kind: "invalid_state", reason: "conversation_update_failed" };
+    const conversationId = conversation._id;
+    const runs = await conversationRuns(ctx, conversationId);
     const busyRun = runs.find((run: any) => run.kind === "orchestrator" && activeRunStatuses.has(run.status));
     if (busyRun) {
       return {
         kind: "busy",
-        conversationId: conversation._id,
+        conversationId,
         runId: busyRun._id,
         status: busyRun.status,
       };
@@ -301,7 +293,7 @@ export const admitStart = mutation({
       externalId: args.externalId,
       kind: "orchestrator",
       status: "queued",
-      conversationId: conversation._id,
+      conversationId,
       input: args.input,
       ...(args.sessionId ? { sessionId: args.sessionId } : {}),
       attempt: 0,
@@ -311,7 +303,7 @@ export const admitStart = mutation({
     const messageOperationKey = args.messageOperationKey ?? args.userMessageOperationKey ?? `start:${args.externalId}`;
     const existingMessage = await ctx.db
       .query("chatMessages")
-      .withIndex("by_conversation_operationKey", (q: any) => q.eq("conversationId", conversation._id).eq("operationKey", messageOperationKey))
+      .withIndex("by_conversation_operationKey", (q: any) => q.eq("conversationId", conversationId).eq("operationKey", messageOperationKey))
       .first();
     let message;
     let insertedMessage = false;
@@ -320,7 +312,7 @@ export const admitStart = mutation({
       message = await ctx.db.get(existingMessage._id);
     } else {
       const messageId = await ctx.db.insert("chatMessages", {
-        conversationId: conversation._id,
+        conversationId,
         operationKey: messageOperationKey,
         role: "user",
         content: args.message,
@@ -335,17 +327,12 @@ export const admitStart = mutation({
     }
     // User admission is a sidebar-visible activity. Do not use this path for
     // assistant token writes; those are handled by upsertMessage below.
-    await touchConversationSummary(ctx, conversation._id, now, insertedMessage);
-    conversation = await ctx.db.get(conversation._id);
+    await touchConversationSummary(ctx, conversationId, now, insertedMessage);
+    conversation = await ctx.db.get(conversationId);
     const run = await ctx.db.get(runId);
     return { kind: "accepted", conversation, message, run };
   },
 });
-
-// Short aliases keep the mutation discoverable for API callers during cutover.
-export const start = admitStart;
-export const startConversation = admitStart;
-export const admitConversationStart = admitStart;
 
 /**
  * Atomically consumes one pending selector for the sole waiting orchestrator
@@ -421,10 +408,6 @@ export const admitResume = mutation({
   },
 });
 
-export const resume = admitResume;
-export const resumeConversation = admitResume;
-export const admitConversationResume = admitResume;
-
 export const update = mutation({
   args: {
     conversationId,
@@ -494,9 +477,6 @@ export const remove = mutation({
   },
 });
 
-// Explicit browser-facing name; `remove` remains for callers that use CRUD verbs.
-export const deleteConversation = remove;
-
 export const listMessages = query({
   args: { conversationId, limit: v.optional(v.number()) },
   returns: v.any(),
@@ -507,10 +487,6 @@ export const listMessages = query({
       .order("asc")
       .take(cap(args.limit, 500, 2000)),
 });
-
-// Explicit selected-conversation name for browser consumers.
-export const conversationMessages = listMessages;
-export const sidebarSummaries = listSummaries;
 
 const messageFields = {
   role: v.string(),

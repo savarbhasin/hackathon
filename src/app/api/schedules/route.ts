@@ -1,7 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { db } from "@/lib/db";
 import { Cron } from "croner";
-import { durableSchedulesActive } from "@/lib/queue/schedules";
 import {
   createDurableSchedule,
   listDurableSchedules,
@@ -25,21 +23,12 @@ export async function GET(req: Request) {
   const limit = boundedLimit(url.searchParams.get("limit"));
   const includeDisabled = url.searchParams.get("includeDisabled") !== "false";
   const includeDeleted = url.searchParams.get("includeDeleted") === "true";
-  if (durableSchedulesActive()) {
-    try {
-      const schedules = await listDurableSchedules({ limit, includeDisabled, includeDeleted });
-      return Response.json(schedules.map((schedule) => durableResponse(schedule as DurableSchedule)));
-    } catch {
-      return Response.json({ error: "durable_unavailable" }, { status: 503 });
-    }
+  try {
+    const schedules = await listDurableSchedules({ limit, includeDisabled, includeDeleted });
+    return Response.json(schedules.map((schedule) => durableResponse(schedule as DurableSchedule)));
+  } catch {
+    return Response.json({ error: "durable_unavailable" }, { status: 503 });
   }
-
-  const schedules = await db.schedule.findMany({ orderBy: { createdAt: "desc" }, take: limit });
-  return Response.json(schedules.map((schedule) => ({
-    ...schedule,
-    nextRuns: schedule.enabled ? nextRuns(schedule.cronExpr) : [],
-    calendarRuns: schedule.enabled && url.searchParams.has("month") ? runsInMonth(schedule.cronExpr, requestedMonth(url.searchParams.get("month"))) : [],
-  })));
 }
 
 export async function POST(req: Request) {
@@ -48,27 +37,17 @@ export async function POST(req: Request) {
   if (!input.ok) return Response.json({ error: "invalid_request", fields: input.fields }, { status: 400 });
 
   const operationKey = requestKey(req, body?.requestId);
-  if (durableSchedulesActive()) {
-    try {
-      const schedule = await createDurableSchedule({ ...input.value, operationKey });
-      // A deduped operation key may point at a tombstone. Never present that
-      // result as a newly-created enabled schedule.
-      if (schedule.deletedAt !== undefined) {
-        return Response.json({ error: "conflict", reason: "operation_key_references_deleted_schedule", schedule: durableResponse(schedule) }, { status: 409 });
-      }
-      return Response.json({ schedule: durableResponse(schedule), configRevision: schedule.configRevision ?? 1, syncState: schedule.syncState ?? "pending" }, { status: 201 });
-    } catch (error) {
-      return durableError(error);
+  try {
+    const schedule = await createDurableSchedule({ ...input.value, operationKey });
+    // A deduped operation key may point at a tombstone. Never present that
+    // result as a newly-created enabled schedule.
+    if (schedule.deletedAt !== undefined) {
+      return Response.json({ error: "conflict", reason: "operation_key_references_deleted_schedule", schedule: durableResponse(schedule) }, { status: 409 });
     }
+    return Response.json({ schedule: durableResponse(schedule), configRevision: schedule.configRevision, syncState: schedule.syncState }, { status: 201 });
+  } catch (error) {
+    return durableError(error);
   }
-
-  const schedule = await db.schedule.create({ data: {
-    name: input.value.name,
-    cronExpr: input.value.cronExpr,
-    prompt: input.value.prompt,
-    enabled: input.value.enabled,
-  } });
-  return Response.json(schedule, { status: 201 });
 }
 
 function boundedLimit(value: string | null): number {
@@ -95,7 +74,7 @@ function validateScheduleInput(body: ScheduleInput | null, options: { requireCro
   if (!prompt || prompt.length > 4_000) fields.push("prompt");
   if (body?.enabled !== undefined && typeof body.enabled !== "boolean") fields.push("enabled");
   if (fields.length) return { ok: false, fields };
-  return { ok: true, value: { name, cronExpr, timezone, prompt, enabled: body?.enabled ?? true } };
+  return { ok: true, value: { name, cronExpr, timezone, prompt, enabled: typeof body?.enabled === "boolean" ? body.enabled : true } };
 }
 
 function durableResponse(schedule: DurableSchedule): Record<string, unknown> {
@@ -115,31 +94,4 @@ function validCronExpression(cronExpr: string): boolean {
 
 function validTimezone(timezone: string): boolean {
   try { new Intl.DateTimeFormat("en-US", { timeZone: timezone }).format(); return true; } catch { return false; }
-}
-
-function nextRuns(cronExpr: string): string[] {
-  try { return new Cron(cronExpr).nextRuns(4).map((run) => run.toISOString()); } catch { return []; }
-}
-
-function requestedMonth(value: string | null): Date | null {
-  if (!value || !/^\d{4}-(0[1-9]|1[0-2])$/.test(value)) return null;
-  const [year, month] = value.split("-").map(Number);
-  return new Date(year, month - 1, 1);
-}
-
-function runsInMonth(cronExpr: string, month: Date | null): string[] {
-  if (!month) return [];
-  try {
-    const cron = new Cron(cronExpr);
-    const end = new Date(month.getFullYear(), month.getMonth() + 1, 1);
-    let cursor = new Date(month.getTime() - 1_000);
-    const runs: string[] = [];
-    for (let count = 0; count < 1_000; count += 1) {
-      const next = cron.nextRun(cursor);
-      if (!next || next >= end) break;
-      runs.push(next.toISOString());
-      cursor = next;
-    }
-    return runs;
-  } catch { return []; }
 }

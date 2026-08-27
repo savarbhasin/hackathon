@@ -1,7 +1,5 @@
-import { durableRunsEnabled } from "@/lib/queue/env";
 import { admitDurableResume, admitDurableStart } from "@/lib/durable-chat-admission";
-import { resumeOrchestratorTurn, runOrchestratorTurn } from "@/lib/orchestrator";
-import { parseResumeSelections, ResumeStateError, type ResumeSelection } from "@/lib/orchestrator-pause";
+import { ResumeStateError } from "@/lib/orchestrator-pause";
 
 export const runtime = "nodejs";
 export const maxDuration = 800;
@@ -16,85 +14,8 @@ interface ChatBody {
   operationKey?: unknown;
 }
 
-type LegacyChatBody = {
-  message?: string;
-  conversationId?: string;
-  documentIds?: unknown;
-  answers?: unknown;
-};
-
 export async function POST(req: Request) {
   const body = (await req.json().catch(() => null)) as ChatBody | null;
-  if (durableRunsEnabled()) return durableChatPost(req, body);
-  const legacyBody = body as LegacyChatBody | null;
-  const isResume = legacyBody?.answers !== undefined;
-  let selections: ResumeSelection[] | undefined;
-
-  if (isResume) {
-    if (!legacyBody?.conversationId || typeof legacyBody.conversationId !== "string") {
-      return Response.json({ error: "conversation_id_required", message: "A conversation is required to resume a paused action." }, { status: 400 });
-    }
-    try {
-      selections = parseResumeSelections(legacyBody.answers);
-    } catch (error) {
-      return Response.json(resumeErrorBody(error), { status: 400 });
-    }
-  } else if (!legacyBody?.message?.trim()) {
-    return Response.json({ error: "message_required", message: "Enter a message before sending." }, { status: 400 });
-  }
-
-  const abortController = new AbortController();
-  const abort = () => abortController.abort(req.signal.reason);
-  if (req.signal.aborted) abort();
-  else req.signal.addEventListener("abort", abort, { once: true });
-
-  const turn = selections
-    ? resumeOrchestratorTurn(legacyBody!.conversationId!, selections, abortController.signal)
-    : runOrchestratorTurn(
-      legacyBody!.message!.trim(),
-      legacyBody?.conversationId,
-      Array.isArray(legacyBody?.documentIds) ? legacyBody.documentIds.filter((id): id is string => typeof id === "string") : [],
-      abortController.signal
-    );
-
-  const encoder = new TextEncoder();
-  const stream = new ReadableStream<Uint8Array>({
-    async start(controller) {
-      const send = (obj: unknown) => {
-        if (!abortController.signal.aborted) {
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify(obj)}\n\n`));
-        }
-      };
-      try {
-        for await (const event of turn) send(event);
-      } catch (error) {
-        if (!abortController.signal.aborted) {
-          send({ kind: "error", ...resumeErrorBody(error) });
-          send({ kind: "done", text: errorMessage(error), name: "error" });
-        }
-      } finally {
-        req.signal.removeEventListener("abort", abort);
-        if (!abortController.signal.aborted) {
-          controller.enqueue(encoder.encode("data: [DONE]\n\n"));
-          controller.close();
-        }
-      }
-    },
-    cancel() {
-      abortController.abort("client_disconnected");
-    },
-  });
-
-  return new Response(stream, {
-    headers: {
-      "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache, no-transform",
-      Connection: "keep-alive",
-    },
-  });
-}
-
-async function durableChatPost(req: Request, body: ChatBody | null): Promise<Response> {
   const headerKey = req.headers.get("idempotency-key");
   if (!body || typeof body !== "object") {
     return Response.json({ error: "invalid_request", code: "invalid_request" }, { status: 400 });
@@ -179,13 +100,4 @@ function durableAdmissionResponse(result: {
     return Response.json({ ...body, error: result.kind, code: result.kind }, { status });
   }
   return Response.json({ ...body, error: result.kind, code: result.kind }, { status: 400 });
-}
-
-function resumeErrorBody(error: unknown): { code: string; text: string } {
-  if (error instanceof ResumeStateError) return { code: error.code, text: error.message };
-  return { code: "turn_failed", text: "The turn could not be completed. Try again." };
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof ResumeStateError ? error.message : "The turn could not be completed. Try again.";
 }

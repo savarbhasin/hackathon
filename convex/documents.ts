@@ -91,7 +91,6 @@ export const update = mutation({
 });
 
 export const remove = mutation({ args: { documentId }, returns: v.any(), handler: async (ctx, args) => { if (!(await ctx.db.get(args.documentId))) return { kind: "not_found" }; await ctx.db.delete(args.documentId); return { kind: "deleted" }; } });
-export const deleteDocument = remove;
 
 export const save = mutation({
   args: { operationKey: v.string(), ...documentInput }, returns: v.any(),

@@ -10,9 +10,9 @@ function convex(): ConvexHttpClient {
 }
 
 function functionRef(moduleName: string, name: string): any {
-  const module = convexFunctions[moduleName];
-  if (!module?.[name]) throw new Error(`Convex function unavailable: ${moduleName}.${name}`);
-  return module[name];
+  const moduleFunctions = convexFunctions[moduleName];
+  if (!moduleFunctions?.[name]) throw new Error(`Convex function unavailable: ${moduleName}.${name}`);
+  return moduleFunctions[name];
 }
 
 function id(value: unknown): string {
@@ -110,7 +110,7 @@ function columnFor(taskColumn: unknown, runStatus: unknown): string {
   }
 }
 
-/** Read one Convex task and adapt it to the legacy task-detail view contract. */
+/** Read one Convex task for the task detail view. */
 export async function getDurableTaskDetail(taskId: string): Promise<Record<string, unknown> | null> {
   const [rawTask, context, activeRun, latestRun] = await Promise.all([
     convex().query(functionRef("missions", "getTask"), { taskId: taskId as never, eventLimit: 2000, documentLimit: 500 }),
@@ -155,8 +155,8 @@ export async function getDurableTaskDetail(taskId: string): Promise<Record<strin
 
   return {
     id: id(task),
-    title: String(task.title ?? task.name ?? "Untitled task"),
-    detail: nullableString(task.detail ?? task.description),
+    title: String(task.title ?? "Untitled task"),
+    detail: nullableString(task.detail),
     role: String(task.role ?? ""),
     agentPrompt: nullableString(task.agentPrompt),
     agentInstructions: nullableString(task.agentPrompt),
@@ -174,7 +174,6 @@ export async function getDurableTaskDetail(taskId: string): Promise<Record<strin
     predecessors,
     documents,
     events,
-    mode: "durable",
     runId: run ? id(run) : null,
     runStatus: typeof runStatus === "string" ? runStatus : null,
     run: normalizeRun(run),
@@ -186,7 +185,6 @@ export type DurableTaskActionResult = { ok: boolean; reason?: string };
 export function durableTaskActionResponse(taskId: string, action: string, result: DurableTaskActionResult, detail: Record<string, unknown> | null) {
   const run = detail?.run && typeof detail.run === "object" ? detail.run as Record<string, unknown> : null;
   return {
-    mode: "durable",
     action,
     ok: result.ok,
     taskId,
@@ -199,4 +197,3 @@ export function durableTaskActionResponse(taskId: string, action: string, result
     run: run ?? null,
   };
 }
-EOF

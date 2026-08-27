@@ -18,7 +18,7 @@ Three deployable processes:
 - **worker**: BullMQ consumer, TrueForge stream owner, run recovery
 - **mcp**: Mission Control MCP tools used by TrueForge (existing, untouched)
 
-Legacy Prisma/SQLite execution path remains the default behind `DURABLE_RUNS_ENABLED` feature flag.
+The durable Convex/BullMQ execution path is the supported execution path.
 
 ## What was built
 
@@ -48,11 +48,11 @@ Legacy Prisma/SQLite execution path remains the default behind `DURABLE_RUNS_ENA
 | File | Role |
 |---|---|
 | `types.ts` | Shared types: 9-state FSM, `AgentRunStore` interface (15 methods), `RecoverableRunError` |
-| `env.ts` | Validates `REDIS_URL`, `CONVEX_URL`, `TRUEFORGE_BASE_URL`, `DURABLE_RUNS_ENABLED` |
+| `env.ts` | Validates `REDIS_URL`, `CONVEX_URL`, `TRUEFORGE_BASE_URL` |
 | `redis.ts` | IORedis factory: `maxRetriesPerRequest: null` for workers/events, `1` for producers |
 | `agent-runs.ts` | Queue + QueueEvents creation, `enqueueAgentRun` (stable `jobId = runId`), `replaceCompletedDeliveryForResume` |
 | `convex-agent-runs.ts` | Server-side `AgentRunStore` implementation calling Convex via `ConvexHttpClient` |
-| `producer.ts` | Feature-gated `createAndEnqueueDurableRun`, `queueResumeAndEnqueue`, `enqueueAcceptedResume` |
+| `producer.ts` | Durable `createAndEnqueueDurableRun`, `queueResumeAndEnqueue`, `enqueueAcceptedResume` |
 | `run-worker.ts` | Core `processAgentRun()`: claim → session → turn → subscribe → persist events → classify result |
 | `log.ts` | Structured JSON logger (`agent-runs-worker` service) |
 
@@ -66,7 +66,7 @@ Legacy Prisma/SQLite execution path remains the default behind `DURABLE_RUNS_ENA
 ### 4. CLI tool (`worker/enqueue-agent-run.ts`)
 
 ```bash
-DURABLE_RUNS_ENABLED=true npm run enqueue:run -- \
+npm run enqueue:run -- \
   --external-id <key> \
   --kind specialist \
   --agent researcher \
@@ -87,7 +87,6 @@ Prints only IDs and queue status. No prompts, no credentials.
 |---|---|
 | `docs/worker/durable-agent-runs.md` | Design doc, contract, commands, drill procedures |
 | `docs/redis-preflight.md` | Redis setup, preflight checks, BullMQ connection notes |
-| `docs/migration-touchpoint-inventory.md` | Full codebase audit of every Prisma model, engine function, MCP tool, frontend surface |
 | `docs/trueforge-sdk-recovery-research.md` | 8-question SDK research: resumption, cursors, deltas, cancellation, pauses, terminal states |
 | `docs/convex-realtime-spike.md` | Convex realtime spike procedure |
 | `docs/spikes/trueforge-recovery.md` | TrueForge detach/recovery probe documentation |
@@ -127,7 +126,6 @@ Prints only IDs and queue status. No prompts, no credentials.
 
 | Variable | Required | Description |
 |---|---|---|
-| `DURABLE_RUNS_ENABLED` | Yes | Feature flag — `true` to use durable path, absent/false for legacy |
 | `REDIS_URL` | Yes | Upstash TCP `rediss://` or local `redis://127.0.0.1:6390` |
 | `CONVEX_URL` | Yes | Convex cloud URL (`https://<deployment>.convex.cloud`) |
 | `NEXT_PUBLIC_CONVEX_URL` | Yes | Same as `CONVEX_URL` (used by frontend Convex provider) |

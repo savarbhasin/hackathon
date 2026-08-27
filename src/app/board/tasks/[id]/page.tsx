@@ -53,7 +53,6 @@ interface TaskDetail {
   predecessors: Predecessor[];
   documents: TaskDocument[];
   events: TaskEvent[];
-  mode?: "durable" | "legacy";
   runId?: string | null;
   runStatus?: string | null;
   run?: { id: string; status: string | null } | null;
@@ -142,7 +141,7 @@ function composeTaskDetail(coreValue: unknown, activityValue: unknown, documentV
   return {
     id: idValue(core._id ?? core.id),
     title: stringValue(core.title ?? core.name) ?? "Untitled task",
-    detail: textValue(core.detail ?? core.description),
+    detail: textValue(core.detail),
     role: stringValue(core.role) ?? "",
     agentPrompt: textValue(core.agentPrompt),
     agentInstructions: textValue(core.agentInstructions ?? core.agentPrompt),
@@ -163,7 +162,6 @@ function composeTaskDetail(coreValue: unknown, activityValue: unknown, documentV
     predecessors,
     documents,
     events,
-    mode: "durable",
     runId: idValue(run?._id ?? run?.id) || null,
     runStatus,
     run: run ? { id: idValue(run._id ?? run.id), status: runStatus } : null,
@@ -334,12 +332,8 @@ export default function TaskPage({ params }: { params: Promise<{ id: string }> }
   }
 
   const pendingActions = parsePendingActions(task.pendingActions);
-  const semanticEvents = task.events.filter((event) => event.type.startsWith("activity."));
-  const activitySource = semanticEvents.length > 0 ? semanticEvents : task.events;
-  const activity = activitySource.flatMap((event) => {
-    const item = semanticEvents.length > 0
-      ? semanticActivityFromEvent(event)
-      : legacyActivityFromEvent(event);
+  const activity = task.events.filter((event) => event.type.startsWith("activity.")).flatMap((event) => {
+    const item = semanticActivityFromEvent(event);
     return item ? [item] : [];
   });
   const status = STATUS[task.column] ?? STATUS.backlog;
@@ -415,7 +409,7 @@ export default function TaskPage({ params }: { params: Promise<{ id: string }> }
 
             <DocumentsSection documents={task.documents} />
             <ActivitySection items={activity} />
-            <TaskChat taskId={id} events={task.events} column={task.column} hasSession={Boolean(task.sessionId)} mode={task.mode} />
+            <TaskChat taskId={id} events={task.events} column={task.column} hasSession={Boolean(task.sessionId)} />
           </div>
 
           <aside className="min-w-0 space-y-5 lg:sticky lg:top-6">
@@ -697,7 +691,7 @@ function TaskChatAssistantMessage({ message, busy }: { message: TaskChatMessage;
   );
 }
 
-function TaskChat({ taskId, events, column, hasSession, mode }: { taskId: string; events: TaskEvent[]; column: string; hasSession: boolean; mode?: "durable" | "legacy" }) {
+function TaskChat({ taskId, events, column, hasSession }: { taskId: string; events: TaskEvent[]; column: string; hasSession: boolean }) {
   const [messages, setMessages] = useState<TaskChatMessage[]>(() => chatMessages(events));
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
@@ -726,21 +720,7 @@ function TaskChat({ taskId, events, column, hasSession, mode }: { taskId: string
     try {
       const response = await fetch(`/api/tasks/${encodeURIComponent(taskId)}/chat`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message: content, clientMessageId: localId }) });
       if (!response.ok) throw new Error((await response.json().catch(() => null) as { error?: string } | null)?.error ?? "Chat is unavailable.");
-      if (mode === "durable") return;
-      if (!response.body) throw new Error("Chat is unavailable.");
-      const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = "";
-      for (;;) {
-        const { done, value } = await reader.read(); if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n\n"); buffer = lines.pop() ?? "";
-        for (const line of lines) {
-          if (!line.startsWith("data: ") || line.slice(6).trim() === "[DONE]") continue;
-          const event = JSON.parse(line.slice(6)) as { kind: string; text?: string; content?: string; status?: string };
-          if (event.kind === "delta") setMessages((current) => current.map((message) => message.id === `${localId}-reply` ? { ...message, content: message.content + (event.text ?? "") } : message));
-          if (event.kind === "done") setMessages((current) => current.map((message) => message.id === `${localId}-reply` ? { ...message, content: event.content ?? message.content, status: event.status } : message));
-          if (event.kind === "error") throw new Error(event.text ?? "The chat turn failed.");
-        }
-      }
+      return;
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
       setMessages((current) => current.map((message) => message.id === `${localId}-reply` ? { ...message, status: "failed", content: "The agent could not answer." } : message));
@@ -1022,60 +1002,6 @@ function semanticActivityFromEvent(event: TaskEvent): ActivityItem | null {
     detail: details.length > 0 ? details.join("\n") : undefined,
     tone: fallback.tone,
   };
-}
-
-function legacyActivityFromEvent(event: TaskEvent): ActivityItem | null {
-  const payload = parsePayload(event.payload);
-  switch (event.type) {
-    case "turn.created":
-      return { id: event.id, at: event.createdAt, title: "Agent started working", tone: "working" };
-    case "mcp.initialize": {
-      const servers = Array.isArray(payload?.mcpServers)
-        ? payload.mcpServers.flatMap((server) => {
-            if (!server || typeof server !== "object") return [];
-            const name = (server as Record<string, unknown>).name;
-            return typeof name === "string" ? [name] : [];
-          })
-        : [];
-      return {
-        id: event.id,
-        at: event.createdAt,
-        title: "Connected tools",
-        detail: servers.length > 0 ? servers.join(", ") : undefined,
-        tone: "working",
-      };
-    }
-    case "tool.approval_required":
-      return { id: event.id, at: event.createdAt, title: "Paused for approval", tone: "approval" };
-    case "tool.response_required":
-      return { id: event.id, at: event.createdAt, title: "Asked for more information", tone: "blocked" };
-    case "pause.pending":
-      return { id: event.id, at: event.createdAt, title: "Waiting for you", tone: "blocked" };
-    case "specialist.mark_done":
-      return {
-        id: event.id,
-        at: event.createdAt,
-        title: "Agent reported completion",
-        detail: typeof payload?.summary === "string" ? payload.summary : undefined,
-        tone: "settled",
-      };
-    case "tool.response": {
-      const content = typeof payload?.content === "string" ? payload.content.trim() : "";
-      if (!content || content.length > 240 || content.startsWith("{") || content.includes("inputSchema")) return null;
-      if (!/(document (created|updated)|recorded|created issue|issue created|saved)/i.test(content)) return null;
-      return { id: event.id, at: event.createdAt, title: "Tool completed", detail: content, tone: "working" };
-    }
-    case "turn.done": {
-      const state = payload?.state;
-      const status = state && typeof state === "object" ? (state as Record<string, unknown>).status : undefined;
-      if (status === "done") return { id: event.id, at: event.createdAt, title: "Agent finished", tone: "settled" };
-      if (status === "error") return { id: event.id, at: event.createdAt, title: "Agent stopped with an error", tone: "blocked" };
-      if (status === "cancelled") return { id: event.id, at: event.createdAt, title: "Run was cancelled", tone: "blocked" };
-      return null;
-    }
-    default:
-      return null;
-  }
 }
 
 function concise(value: string, max = 480): string {

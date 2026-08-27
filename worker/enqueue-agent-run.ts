@@ -21,7 +21,7 @@ async function main(): Promise<void> {
     input: { agentName, items: [{ type: "user.message", content: message }] },
   });
   // Deliberately print IDs/status only; prompts and connection settings are never logged.
-  console.log(JSON.stringify({ enabled: result.enabled, runId: result.run?._id ?? null, queue: result.queue }, null, 2));
+  console.log(JSON.stringify({ runId: result.run._id, queue: result.queue }, null, 2));
 }
 
 main().catch((error) => {

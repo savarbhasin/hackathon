@@ -97,11 +97,12 @@ export class ConvexAgentRunStore implements AgentRunStore {
     sessionId?: string;
     turnId?: string;
   }): Promise<AgentRunRecord> {
+    const { conversationId, taskId, scheduleId, ...run } = input;
     return (await this.client.mutation(api.agentRuns.create, {
-      ...input,
-      ...(input.conversationId ? { conversationId: runId(input.conversationId) } : {}),
-      ...(input.taskId ? { taskId: runId(input.taskId) } : {}),
-      ...(input.scheduleId ? { scheduleId: runId(input.scheduleId) } : {}),
+      ...run,
+      ...(conversationId ? { conversationId: runId(conversationId) } : {}),
+      ...(taskId ? { taskId: runId(taskId) } : {}),
+      ...(scheduleId ? { scheduleId: runId(scheduleId) } : {}),
     })) as AgentRunRecord;
   }
 

@@ -10,7 +10,6 @@ const anyApi = api as unknown as Record<string, any>;
 
 interface Schedule {
   id: string;
-  _id?: string;
   name: string;
   cronExpr: string;
   timezone: string;
@@ -179,17 +178,23 @@ function normalizeSchedules(raw: unknown): Schedule[] {
   return raw.flatMap((value) => {
     if (!value || typeof value !== "object") return [];
     const row = value as Record<string, unknown>;
-    const id = typeof row._id === "string" ? row._id : typeof row.id === "string" ? row.id : "";
-    if (!id || typeof row.name !== "string" || typeof row.cronExpr !== "string" || typeof row.prompt !== "string") return [];
+    if (typeof row._id !== "string"
+      || typeof row.name !== "string"
+      || typeof row.cronExpr !== "string"
+      || typeof row.timezone !== "string"
+      || typeof row.prompt !== "string"
+      || typeof row.enabled !== "boolean"
+      || typeof row.configRevision !== "number"
+      || typeof row.syncState !== "string"
+      || typeof row.createdAt !== "number") return [];
     const schedule: Schedule = {
-      id, _id: typeof row._id === "string" ? row._id : undefined, name: row.name, cronExpr: row.cronExpr,
-      timezone: typeof row.timezone === "string" ? row.timezone : "UTC", prompt: row.prompt,
-      enabled: row.enabled !== false, configRevision: typeof row.configRevision === "number" ? row.configRevision : 1,
-      syncState: typeof row.syncState === "string" ? row.syncState : "pending", syncError: typeof row.syncError === "string" ? row.syncError : null,
+      id: row._id, name: row.name, cronExpr: row.cronExpr, timezone: row.timezone, prompt: row.prompt,
+      enabled: row.enabled, configRevision: row.configRevision, syncState: row.syncState,
+      syncError: typeof row.syncError === "string" ? row.syncError : null,
       lastRunStatus: typeof row.lastRunStatus === "string" ? row.lastRunStatus : null,
       lastRunAt: typeof row.lastRunAt === "number" ? row.lastRunAt : null, lastFailureAt: typeof row.lastFailureAt === "number" ? row.lastFailureAt : null,
       lastFailureMessage: typeof row.lastFailureMessage === "string" ? row.lastFailureMessage : null,
-      createdAt: typeof row.createdAt === "number" ? row.createdAt : Date.now(), nextRuns: [], calendarRuns: [],
+      createdAt: row.createdAt, nextRuns: [], calendarRuns: [],
     };
     if (schedule.enabled) {
       try { schedule.nextRuns = new Cron(schedule.cronExpr).nextRuns(4).map((run) => run.toISOString()); } catch { schedule.nextRuns = []; }

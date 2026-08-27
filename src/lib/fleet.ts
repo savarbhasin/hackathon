@@ -37,13 +37,7 @@ const SPECIALIST_RUNTIME_PREFIX = `${SPECIALIST_RUNTIME_PREAMBLE}\n\n`;
 // prompt containing a similarly named heading cannot hide arbitrary content.
 const INTERNAL_RUNTIME_BLOCK = /(?:^|\n)## Mission Control runtime instructions[ \t]*\n[\s\S]*?<!--[ \t]*End Mission Control runtime instructions[ \t]*-->[ \t]*(?:\n|$)/gi;
 
-// Older manifests used an unheaded shared preamble. These prompts predate the
-// delimiter above, so retain a narrowly-scoped compatibility parser for them.
-const LEGACY_RUNTIME_BLOCK = /(?:^|\n)You are a specialist agent in a fleet managed by Mission Control\.[ \t]*\n+[ \t]*Scope and evidence:[ \t]*\n[\s\S]*?\n[ \t]*Completion:[ \t]*\n(?:[ \t]*-[^\n]*(?:\n|$))+/gi;
-const LEGACY_FLEET_CONTRACT_BLOCK = /(?:^|\n)(?:You are a specialist agent in a fleet managed by Mission Control\.[ \t]*\n+)?FLEET CONTRACT[ \t]*\n[\s\S]*?(?=\nROLE:[ \t]*[^\n]+(?:\n|$))/gi;
-
 const ROUTING_DESCRIPTION_BLOCK = /(?:^|\n)(?:#{1,6}[ \t]+)?AGENT DESCRIPTION FOR ROUTING[ \t]*\n([\s\S]*?)(?=\n(?:#{1,6}[ \t]+|You are a specialist agent in a fleet managed by Mission Control\.|## Mission Control runtime instructions|ROLE:[ \t]*)|$)/i;
-const LEGACY_SECTION_HEADINGS = /^(ROLE:[^\n]+|CAPABILITY AND BOUNDARY|OPERATING PROCEDURE|ANALYSIS METHOD|QUALITY RULES|SAFETY AND OUTPUT|ENGINEERING SAFETY|DELIVERY STANDARD|FINANCIAL SAFETY)$/gim;
 
 export function withSpecialistRuntimeInstructions(instructions: string): string {
   return `${SPECIALIST_RUNTIME_PREFIX}${stripSpecialistRuntimeInstructions(instructions).trim()}`;
@@ -52,22 +46,14 @@ export function withSpecialistRuntimeInstructions(instructions: string): string 
 /**
  * Remove shared Mission Control policy before exposing editable instructions.
  *
- * This parser is deliberately tolerant of old persisted manifests: prompts
- * created before the reserved heading may contain a legacy preamble and a
- * duplicated fleet contract around the role-specific instructions.
+ * Current manifests use the reserved runtime block above.
  */
 export function stripSpecialistRuntimeInstructions(instructions: string): string {
   return instructions
     .replace(INTERNAL_RUNTIME_BLOCK, "\n")
-    .replace(LEGACY_RUNTIME_BLOCK, "\n")
-    .replace(LEGACY_FLEET_CONTRACT_BLOCK, "\n")
     // Routing text is stored in the profile description, not in the editable
     // execution prompt. This also prevents it being persisted again on save.
     .replace(ROUTING_DESCRIPTION_BLOCK, "\n")
-    // Normalize headings from prompts created before system instructions were
-    // explicitly authored as Markdown. The replacement is intentionally
-    // limited to known section labels so ordinary agent text is untouched.
-    .replace(LEGACY_SECTION_HEADINGS, "## $1")
     .trim();
 }
 

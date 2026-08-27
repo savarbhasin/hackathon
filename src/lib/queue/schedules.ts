@@ -2,7 +2,6 @@ import type { Job, Queue } from "bullmq";
 import { agentRunJobOptions, createAgentRunsQueue } from "./agent-runs";
 import { enqueueAdmittedRun } from "./producer";
 import { ConvexAgentRunStore, ConvexScheduleStore } from "./convex-agent-runs";
-import { durableRunsEnabled, durableSchedulesEnabled } from "./env";
 import { workerLog, safeError } from "./log";
 import type { AgentRunJobData, ScheduleFireJobData } from "./types";
 import { SCHEDULE_FIRE_JOB_NAME } from "./types";
@@ -52,7 +51,7 @@ function isScheduleFireData(data: AgentRunJobData): data is ScheduleFireJobData 
 
 /**
  * Owns the BullMQ Job Scheduler projection and schedule.fire admission path.
- * It is only constructed by the worker when both durable feature flags are on.
+ * The worker constructs this service as the sole schedule owner.
  */
 export class BullMqScheduleService {
   readonly queue: Queue<AgentRunJobData>;
@@ -71,7 +70,7 @@ export class BullMqScheduleService {
   }
 
   async start(): Promise<void> {
-    if (this.closed || this.started || !durableRunsEnabled() || !durableSchedulesEnabled()) return;
+    if (this.closed || this.started) return;
     this.started = true;
     try {
       await this.reconcile();
@@ -85,7 +84,7 @@ export class BullMqScheduleService {
   }
 
   async reconcile(): Promise<void> {
-    if (this.closed || !durableRunsEnabled() || !durableSchedulesEnabled()) return;
+    if (this.closed) return;
     if (this.activeReconcile) return this.activeReconcile;
     const active = this.reconcileCycle();
     this.activeReconcile = active;
@@ -186,7 +185,6 @@ export class BullMqScheduleService {
 
   /** Admit a fire, then enqueue the resulting run before acknowledging the job. */
   async deliverFire(job: Job<AgentRunJobData>): Promise<void> {
-    if (!durableRunsEnabled() || !durableSchedulesEnabled()) return;
     if (!isScheduleFireData(job.data)) throw new Error("Invalid schedule.fire payload");
     const data = job.data;
     const identity = scheduleFireIdentity(job);
@@ -221,8 +219,4 @@ export class BullMqScheduleService {
     if (this.activeReconcile) await this.activeReconcile;
     await this.queue.close();
   }
-}
-
-export function durableSchedulesActive(): boolean {
-  return durableRunsEnabled() && durableSchedulesEnabled();
 }

@@ -1,13 +1,9 @@
 import { randomUUID } from "node:crypto";
-import { db } from "@/lib/db";
 import { Cron } from "croner";
-import { runScheduleNow, ScheduleDisabledError, ScheduleNotFoundError, ScheduleRunnerUnavailableError } from "@/lib/schedule-runner";
-import { durableSchedulesActive } from "@/lib/queue/schedules";
 import {
   deleteDurableSchedule,
   getDurableSchedule,
   runDurableScheduleNow,
-  setDurableScheduleEnabled,
   updateDurableSchedule,
   type DurableRunAdmission,
   type DurableSchedule,
@@ -21,40 +17,26 @@ type SchedulePatch = { name?: unknown; cronExpr?: unknown; timezone?: unknown; p
 
 export async function GET(_req: Request, ctx: Params) {
   const { id } = await ctx.params;
-  if (durableSchedulesActive()) {
-    try {
-      const schedule = await getDurableSchedule(id);
-      if (!schedule || schedule.deletedAt !== undefined) return Response.json({ error: "not_found" }, { status: 404 });
-      return Response.json(durableResponse(schedule));
-    } catch {
-      return Response.json({ error: "durable_unavailable" }, { status: 503 });
-    }
+  try {
+    const schedule = await getDurableSchedule(id);
+    if (!schedule || schedule.deletedAt !== undefined) return Response.json({ error: "not_found" }, { status: 404 });
+    return Response.json(durableResponse(schedule));
+  } catch {
+    return Response.json({ error: "durable_unavailable" }, { status: 503 });
   }
-  const schedule = await db.schedule.findUnique({ where: { id } });
-  return schedule ? Response.json(schedule) : Response.json({ error: "not_found" }, { status: 404 });
 }
 
 /** Run now is admission + short queue delivery; it never waits for execution. */
 export async function POST(req: Request, ctx: Params) {
   const { id } = await ctx.params;
-  if (durableSchedulesActive()) {
-    const body = await req.json().catch(() => null) as { requestId?: unknown } | null;
-    const requestId = requestKey(req, body?.requestId);
-    try {
-      const schedule = await getDurableSchedule(id);
-      const result = await runDurableScheduleNow(id, requestId);
-      return runAdmissionResponse(result, schedule);
-    } catch (error) {
-      return durableError(error);
-    }
-  }
+  const body = await req.json().catch(() => null) as { requestId?: unknown } | null;
+  const requestId = requestKey(req, body?.requestId);
   try {
-    return Response.json(await runScheduleNow(id));
+    const schedule = await getDurableSchedule(id);
+    const result = await runDurableScheduleNow(id, requestId);
+    return runAdmissionResponse(result, schedule);
   } catch (error) {
-    if (error instanceof ScheduleNotFoundError) return Response.json({ error: "not_found" }, { status: 404 });
-    if (error instanceof ScheduleDisabledError) return Response.json({ error: "disabled" }, { status: 409 });
-    if (error instanceof ScheduleRunnerUnavailableError) return Response.json({ error: "runner_unavailable" }, { status: 503 });
-    return Response.json({ error: "run_failed" }, { status: 500 });
+    return durableError(error);
   }
 }
 
@@ -64,29 +46,16 @@ export async function PATCH(req: Request, ctx: Params) {
   const fields = validatePatch(body);
   if (!fields.ok) return Response.json({ error: "invalid_request", fields: fields.fields }, { status: 400 });
 
-  if (durableSchedulesActive()) {
-    try {
-      const current = await getDurableSchedule(id);
-      if (!current || current.deletedAt !== undefined) return Response.json({ error: "not_found" }, { status: 404 });
-      if (body?.configRevision !== undefined && body.configRevision !== current.configRevision) {
-        return Response.json({ error: "conflict", reason: "stale_revision", configRevision: current.configRevision }, { status: 409 });
-      }
-      const result = await updateDurableSchedule({ scheduleId: id, ...fields.value });
-      return mutationResponse(result, "updated");
-    } catch (error) {
-      return durableError(error);
-    }
-  }
-
   try {
-    const schedule = await db.schedule.update({ where: { id }, data: {
-      ...(fields.value.name !== undefined ? { name: fields.value.name } : {}),
-      ...(fields.value.cronExpr !== undefined ? { cronExpr: fields.value.cronExpr } : {}),
-      ...(fields.value.prompt !== undefined ? { prompt: fields.value.prompt } : {}),
-    } });
-    return Response.json(schedule);
-  } catch {
-    return Response.json({ error: "not_found" }, { status: 404 });
+    const current = await getDurableSchedule(id);
+    if (!current || current.deletedAt !== undefined) return Response.json({ error: "not_found" }, { status: 404 });
+    if (body?.configRevision !== undefined && body.configRevision !== current.configRevision) {
+      return Response.json({ error: "conflict", reason: "stale_revision", configRevision: current.configRevision }, { status: 409 });
+    }
+    const result = await updateDurableSchedule({ scheduleId: id, ...fields.value });
+    return mutationResponse(result, "updated");
+  } catch (error) {
+    return durableError(error);
   }
 }
 
@@ -96,44 +65,22 @@ export async function PUT(req: Request, ctx: Params) {
 
 export async function DELETE(_req: Request, ctx: Params) {
   const { id } = await ctx.params;
-  if (durableSchedulesActive()) {
-    try {
-      const current = await getDurableSchedule(id);
-      if (!current) return Response.json({ error: "not_found" }, { status: 404 });
-      const result = await deleteDurableSchedule(id);
-      if (result.outcome === "not_found") return Response.json({ error: "not_found" }, { status: 404 });
-      const schedule = current.deletedAt !== undefined ? current : {
-        ...current,
-        enabled: false,
-        deletedAt: Date.now(),
-        configRevision: (current.configRevision ?? 1) + 1,
-        syncState: "pending",
-      };
-      return Response.json({ outcome: result.outcome ?? "deleted", scheduleId: id, schedule: durableResponse(schedule), configRevision: schedule.configRevision, syncState: schedule.syncState });
-    } catch (error) {
-      return durableError(error);
-    }
+  try {
+    const current = await getDurableSchedule(id);
+    if (!current) return Response.json({ error: "not_found" }, { status: 404 });
+    const result = await deleteDurableSchedule(id);
+    if (result.outcome === "not_found") return Response.json({ error: "not_found" }, { status: 404 });
+    const schedule = current.deletedAt !== undefined ? current : {
+      ...current,
+      enabled: false,
+      deletedAt: Date.now(),
+      configRevision: current.configRevision + 1,
+      syncState: "pending",
+    };
+    return Response.json({ outcome: result.outcome ?? "deleted", scheduleId: id, schedule: durableResponse(schedule), configRevision: schedule.configRevision, syncState: schedule.syncState });
+  } catch (error) {
+    return durableError(error);
   }
-  const result = await db.schedule.updateMany({ where: { id }, data: { enabled: false } });
-  if (result.count === 0) return Response.json({ error: "not_found" }, { status: 404 });
-  return Response.json({ ok: true });
-}
-
-async function setEnabled(req: Request, ctx: Params, enabled: boolean) {
-  const { id } = await ctx.params;
-  const body = await req.json().catch(() => null) as { enabled?: unknown; configRevision?: unknown } | null;
-  const requested = body?.enabled === undefined ? enabled : body.enabled;
-  if (typeof requested !== "boolean") return Response.json({ error: "invalid_request", fields: ["enabled"] }, { status: 400 });
-  if (durableSchedulesActive()) {
-    try {
-      const current = await getDurableSchedule(id);
-      if (!current || current.deletedAt !== undefined) return Response.json({ error: "not_found" }, { status: 404 });
-      if (body?.configRevision !== undefined && body.configRevision !== current.configRevision) return Response.json({ error: "conflict", reason: "stale_revision", configRevision: current.configRevision }, { status: 409 });
-      return mutationResponse(await setDurableScheduleEnabled(id, requested), requested ? "enabled" : "disabled");
-    } catch (error) { return durableError(error); }
-  }
-  const result = await db.schedule.updateMany({ where: { id }, data: { enabled: requested } });
-  return result.count ? Response.json({ enabled: requested }) : Response.json({ error: "not_found" }, { status: 404 });
 }
 
 function requestKey(req: Request, bodyValue: unknown): string {

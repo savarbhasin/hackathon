@@ -3,8 +3,6 @@ import { api } from "../../convex/_generated/api";
 import { convexUrl } from "./queue/env";
 import { enqueueAdmittedRun } from "./queue/producer";
 
-// Generated bindings intentionally lag the checked-in Convex modules. Keep this
-// boundary dynamic until the next `convex dev` codegen pass.
 const anyApi = api as unknown as Record<string, Record<string, any>>;
 let client: ConvexHttpClient | undefined;
 
@@ -23,11 +21,11 @@ function ref(name: string): any {
 }
 
 export type DurableSchedule = Record<string, unknown> & {
-  _id?: string;
+  _id: string;
   deletedAt?: number;
-  enabled?: boolean;
-  configRevision?: number;
-  syncState?: string;
+  enabled: boolean;
+  configRevision: number;
+  syncState: string;
 };
 
 export async function listDurableSchedules(input: { limit: number; includeDisabled: boolean; includeDeleted?: boolean }): Promise<unknown[]> {
@@ -67,10 +65,6 @@ export async function updateDurableSchedule(input: {
     ...(input.prompt !== undefined ? { prompt: input.prompt } : {}),
     ...(input.enabled !== undefined ? { enabled: input.enabled } : {}),
   }) as { outcome?: string; schedule?: DurableSchedule };
-}
-
-export async function setDurableScheduleEnabled(scheduleId: string, enabled: boolean): Promise<{ outcome?: string; schedule?: DurableSchedule }> {
-  return await convex().mutation(ref("setEnabled"), { scheduleId: id(scheduleId), enabled });
 }
 
 export async function deleteDurableSchedule(scheduleId: string): Promise<{ outcome?: string; schedulerId?: string }> {

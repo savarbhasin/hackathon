@@ -14,8 +14,6 @@ import type * as conversations from "../conversations.js";
 import type * as documents from "../documents.js";
 import type * as missions from "../missions.js";
 import type * as schedules from "../schedules.js";
-import type * as taskEvents from "../taskEvents.js";
-import type * as tasks from "../tasks.js";
 
 import type {
   ApiFromModules,
@@ -30,8 +28,6 @@ declare const fullApi: ApiFromModules<{
   documents: typeof documents;
   missions: typeof missions;
   schedules: typeof schedules;
-  taskEvents: typeof taskEvents;
-  tasks: typeof tasks;
 }>;
 
 /**

@@ -41,7 +41,7 @@ export async function appendDurableTaskEvent(
   operationKey?: string,
 ): Promise<unknown> {
   const key = operationKey ?? `event:${type}:${operationHash(payload)}`;
-  return await convex().mutation(convexApi.taskEvents.append, {
+  return await convex().mutation(convexApi.missions.appendTaskEvent, {
     taskId,
     type,
     payload,
@@ -85,7 +85,7 @@ function buildDurableKickoff(context: DispatchContext): string {
     mission.goal,
     "",
     `YOUR ASSIGNMENT: ${task.title}`,
-    task.detail ?? task.description ?? "(no additional detail)",
+    task.detail,
     "",
     `TASK_ID: ${task._id}`,
   ];
@@ -136,7 +136,7 @@ function buildDurableKickoff(context: DispatchContext): string {
 
 function identity(context: DispatchContext, retry = false): { externalId: string; operationKey: string } {
   const taskId = context.task._id;
-  const claim = Number(context.task.claimCount ?? 0) + (retry ? 1 : 0);
+  const claim = Number(context.task.claimCount) + (retry ? 1 : 0);
   if (retry || claim > 1) {
     return { externalId: `specialist:${taskId}:retry:${claim}`, operationKey: `admission:${taskId}:retry:${claim}` };
   }
@@ -351,37 +351,7 @@ export async function durableSweep(): Promise<void> {
   }
 }
 
-function legacyDate(value: unknown): string | null {
-  return typeof value === "number" ? new Date(value).toISOString() : value == null ? null : String(value);
-}
-
-function boardTask(task: any): any {
-  return {
-    ...task,
-    id: id(task),
-    missionId: task.missionId ? id(task.missionId) : task.missionId,
-    dependsOn: JSON.stringify(Array.isArray(task.dependsOn) ? task.dependsOn.map(String) : []),
-    pendingActions: task.pendingActions == null ? null : JSON.stringify(task.pendingActions),
-    createdAt: legacyDate(task.createdAt),
-    updatedAt: legacyDate(task.updatedAt),
-  };
-}
-
 export async function durableGetBoard(): Promise<any[]> {
   const board = await convex().query(convexApi.missions.listBoard, { limit: 500 });
-  if (!Array.isArray(board)) return [];
-  return board.map((mission: any) => ({
-    ...mission,
-    id: id(mission),
-    createdAt: legacyDate(mission.createdAt),
-    updatedAt: legacyDate(mission.updatedAt),
-    tasks: Array.isArray(mission.tasks) ? mission.tasks.map(boardTask) : [],
-  }));
+  return Array.isArray(board) ? board : [];
 }
-
-// Kept local so the facade has no dependency on the Prisma engine module.
-export type DurablePendingAction = {
-  type: string;
-  threadId?: string | null;
-  calls: Array<{ id: string; threadId?: string | null; name?: string; args?: string }>;
-};

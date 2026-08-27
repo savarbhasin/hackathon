@@ -33,21 +33,6 @@ function hashConfig(name: string, cronExpr: string, timezone: string, prompt: st
   return `fnv1a:${(hash >>> 0).toString(16).padStart(8, "0")}`;
 }
 
-function normalizedSchedule(schedule: any): any {
-  const timezone = normalizeTimezone(schedule.timezone);
-  const schedulerId = schedule.schedulerId ?? schedulerIdentity(String(schedule._id));
-  const configRevision = typeof schedule.configRevision === "number" ? schedule.configRevision : 1;
-  const configHash = schedule.configHash ?? hashConfig(schedule.name, schedule.cronExpr, timezone, schedule.prompt, schedule.enabled);
-  return {
-    ...schedule,
-    timezone,
-    schedulerId,
-    configRevision,
-    configHash,
-    syncState: schedule.syncState ?? "pending",
-  };
-}
-
 function cap(value: number | undefined): number {
   return Math.max(1, Math.min(MAX_LIMIT, value ?? 100));
 }
@@ -64,7 +49,7 @@ function configPatch(schedule: any, changes: { name?: string; cronExpr?: string;
     timezone,
     ...(changes.prompt !== undefined ? { prompt } : {}),
     ...(changes.enabled !== undefined ? { enabled } : {}),
-    configRevision: (typeof schedule.configRevision === "number" ? schedule.configRevision : 1) + 1,
+    configRevision: schedule.configRevision + 1,
     configHash: hashConfig(name, cronExpr, timezone, prompt, enabled),
     syncState: "pending",
     syncError: undefined,
@@ -78,7 +63,7 @@ export const get = query({
   returns: v.any(),
   handler: async (ctx, { scheduleId }) => {
     const schedule = await ctx.db.get(scheduleId);
-    return schedule ? normalizedSchedule(schedule) : null;
+    return schedule;
   },
 });
 
@@ -87,10 +72,8 @@ export const list = query({
   returns: v.any(),
   handler: async (ctx, args) => {
     const rows = await ctx.db.query("schedules").order("desc").take(cap(args.limit));
-    return rows
-      .filter((schedule: any) => (args.includeDeleted || schedule.deletedAt === undefined)
-        && (args.includeDisabled || schedule.enabled))
-      .map(normalizedSchedule);
+    return rows.filter((schedule: any) => (args.includeDeleted || schedule.deletedAt === undefined)
+      && (args.includeDisabled || schedule.enabled));
   },
 });
 
@@ -104,7 +87,7 @@ export const reconciliationSnapshot = query({
     const schedules: any[] = [];
     const tombstones: any[] = [];
     for (const row of rows) {
-      const schedule = normalizedSchedule(row);
+      const schedule = row;
       if (schedule.deletedAt !== undefined || !schedule.enabled) tombstones.push({
         _id: schedule._id,
         schedulerId: schedule.schedulerId,
@@ -132,7 +115,7 @@ export const create = mutation({
         .first();
       // The operation key is the caller's logical create identity. Return the
       // existing row (including a tombstone) rather than creating a duplicate.
-      if (existing) return normalizedSchedule(existing);
+      if (existing) return existing;
     }
     const now = Date.now();
     const timezone = normalizeTimezone(args.timezone);
@@ -153,7 +136,7 @@ export const create = mutation({
     });
     const schedulerId = schedulerIdentity(String(id));
     await ctx.db.patch(id, { schedulerId });
-    return normalizedSchedule(await ctx.db.get(id));
+    return await ctx.db.get(id);
   },
 });
 
@@ -168,30 +151,8 @@ export const update = mutation({
     if (!schedule || schedule.deletedAt !== undefined) return { outcome: "not_found" };
     const now = Date.now();
     await ctx.db.patch(args.scheduleId, configPatch(schedule, args, now));
-    return { outcome: "updated", schedule: normalizedSchedule(await ctx.db.get(args.scheduleId)) };
+    return { outcome: "updated", schedule: await ctx.db.get(args.scheduleId) };
   },
-});
-
-async function setEnabledInternal(ctx: any, scheduleId: any, enabled: boolean): Promise<any> {
-  const schedule = await ctx.db.get(scheduleId);
-  if (!schedule || schedule.deletedAt !== undefined) return { outcome: "not_found" };
-  if (schedule.enabled === enabled) return { outcome: "idempotent", schedule: normalizedSchedule(schedule) };
-  await ctx.db.patch(scheduleId, configPatch(schedule, { enabled }, Date.now()));
-  return { outcome: "updated", schedule: normalizedSchedule(await ctx.db.get(scheduleId)) };
-}
-
-export const setEnabled = mutation({
-  args: { scheduleId: v.id("schedules"), enabled: v.boolean() },
-  returns: v.any(),
-  handler: async (ctx, args) => await setEnabledInternal(ctx, args.scheduleId, args.enabled),
-});
-export const enable = mutation({
-  args: { scheduleId: v.id("schedules") }, returns: v.any(),
-  handler: async (ctx, { scheduleId }) => await setEnabledInternal(ctx, scheduleId, true),
-});
-export const disable = mutation({
-  args: { scheduleId: v.id("schedules") }, returns: v.any(),
-  handler: async (ctx, { scheduleId }) => await setEnabledInternal(ctx, scheduleId, false),
 });
 
 export const deleteSchedule = mutation({
@@ -200,20 +161,20 @@ export const deleteSchedule = mutation({
   handler: async (ctx, { scheduleId }) => {
     const schedule = await ctx.db.get(scheduleId);
     if (!schedule) return { outcome: "not_found" };
-    if (schedule.deletedAt !== undefined) return { outcome: "idempotent", schedulerId: schedulerIdentity(String(scheduleId)) };
+    if (schedule.deletedAt !== undefined) return { outcome: "idempotent", schedulerId: schedule.schedulerId };
     const now = Date.now();
     await ctx.db.patch(scheduleId, {
       enabled: false,
       deletedAt: now,
-      schedulerId: schedule.schedulerId ?? schedulerIdentity(String(scheduleId)),
-      configRevision: (typeof schedule.configRevision === "number" ? schedule.configRevision : 1) + 1,
+      schedulerId: schedule.schedulerId,
+      configRevision: schedule.configRevision + 1,
       configHash: hashConfig(schedule.name, schedule.cronExpr, normalizeTimezone(schedule.timezone), schedule.prompt, false),
       syncState: "pending",
       syncError: undefined,
       syncedAt: undefined,
       updatedAt: now,
     });
-    return { outcome: "deleted", schedulerId: schedule.schedulerId ?? schedulerIdentity(String(scheduleId)) };
+    return { outcome: "deleted", schedulerId: schedule.schedulerId };
   },
 });
 
@@ -223,8 +184,7 @@ export const markSyncSuccess = mutation({
   handler: async (ctx, args) => {
     const schedule = await ctx.db.get(args.scheduleId);
     if (!schedule) return { outcome: "not_found" };
-    const expectedId = schedule.schedulerId ?? schedulerIdentity(String(args.scheduleId));
-    if (args.schedulerId !== expectedId || (schedule.configRevision ?? 1) !== args.configRevision) return { outcome: "stale" };
+    if (args.schedulerId !== schedule.schedulerId || schedule.configRevision !== args.configRevision) return { outcome: "stale" };
     await ctx.db.patch(args.scheduleId, { syncState: "synced", syncError: undefined, syncedAt: Date.now(), updatedAt: Date.now() });
     return { outcome: "updated" };
   },
@@ -238,8 +198,7 @@ export const markSyncFailure = mutation({
   handler: async (ctx, args) => {
     const schedule = await ctx.db.get(args.scheduleId);
     if (!schedule) return { outcome: "not_found" };
-    const expectedId = schedule.schedulerId ?? schedulerIdentity(String(args.scheduleId));
-    if ((args.schedulerId !== undefined && args.schedulerId !== expectedId) || (schedule.configRevision ?? 1) !== args.configRevision) return { outcome: "stale" };
+    if ((args.schedulerId !== undefined && args.schedulerId !== schedule.schedulerId) || schedule.configRevision !== args.configRevision) return { outcome: "stale" };
     await ctx.db.patch(args.scheduleId, { syncState: "error", syncError: args.error.slice(0, 2000), syncedAt: Date.now(), updatedAt: Date.now() });
     return { outcome: "updated" };
   },

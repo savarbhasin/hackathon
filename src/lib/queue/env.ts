@@ -29,22 +29,11 @@ export function redisUrl(): string {
 }
 
 export function convexUrl(): string {
-  // The server-only name is preferred; the existing public deployment URL is
-  // acceptable for this unauthenticated Phase-1 foundation until auth lands.
-  return requiredUrl("CONVEX_URL or NEXT_PUBLIC_CONVEX_URL", ["https:", "http:"], process.env.CONVEX_URL ?? process.env.NEXT_PUBLIC_CONVEX_URL);
+  return requiredUrl("CONVEX_URL", ["https:", "http:"]);
 }
 
 export function trueForgeBaseUrl(): string {
   return requiredUrl("TRUEFORGE_BASE_URL", ["https:", "http:"], process.env.TRUEFORGE_BASE_URL ?? "http://localhost:8790");
-}
-
-export function durableRunsEnabled(): boolean {
-  return process.env.DURABLE_RUNS_ENABLED === "true";
-}
-
-/** Schedule ownership is independently gated while the legacy scheduler remains available. */
-export function durableSchedulesEnabled(): boolean {
-  return process.env.DURABLE_SCHEDULES_ENABLED === "true";
 }
 
 export function requireWorkerEnvironment(): { redisUrl: string; convexUrl: string; trueForgeBaseUrl: string } {

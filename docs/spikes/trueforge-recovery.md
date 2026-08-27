@@ -1,6 +1,6 @@
 # TrueForge detach and recovery probe
 
-This isolated Phase 0 probe tests the provider behavior required before moving turn consumption into a restartable worker. It does not touch the current engine, database, or queue.
+This isolated probe tests the provider behavior required by the restartable worker. It does not mutate product records or queue jobs.
 
 The probe uses the recovery-safe sequence documented in [the SDK research](../trueforge-sdk-recovery-research.md):
 

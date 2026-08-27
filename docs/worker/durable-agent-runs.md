@@ -1,6 +1,6 @@
 # Durable `agent-runs` worker
 
-The production durable path is feature-gated. Legacy Prisma execution remains the default until `DURABLE_RUNS_ENABLED=true` is deliberately enabled for callers that use `createAndEnqueueDurableRun`.
+The production path uses Convex for durable run state and BullMQ for delivery. The worker owns each live TrueForge stream.
 
 ## Contract
 
@@ -17,9 +17,8 @@ The production durable path is feature-gated. Legacy Prisma execution remains th
 Keep actual values only in `.env.local`; never print or commit them.
 
 ```bash
-DURABLE_RUNS_ENABLED=true
 REDIS_URL=rediss://:<token>@<host>:<port>
-CONVEX_URL=https://<deployment>.convex.cloud # NEXT_PUBLIC_CONVEX_URL is accepted as a temporary fallback
+CONVEX_URL=https://<deployment>.convex.cloud
 TRUEFORGE_BASE_URL=http://localhost:8790 # defaults to this local URL when omitted
 WORKER_CONCURRENCY=2
 ```
@@ -43,10 +42,10 @@ npm run dev:worker
 npm run worker
 ```
 
-Create and enqueue a feature-flagged run. `external-id` is an application idempotency key; the printed `runId` is the Convex ID and the stable BullMQ job ID.
+Create and enqueue a run. `external-id` is an application idempotency key; the printed `runId` is the Convex ID and the stable BullMQ job ID.
 
 ```bash
-DURABLE_RUNS_ENABLED=true npm run enqueue:run -- \
+npm run enqueue:run -- \
   --external-id drill-$(date +%s) \
   --kind specialist \
   --agent researcher \

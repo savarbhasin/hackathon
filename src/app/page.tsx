@@ -120,15 +120,11 @@ function isWorkerProcessingStatus(status: RunStatus): boolean {
 }
 
 function parseMessageTools(raw: unknown): string[] {
-  if (Array.isArray(raw)) return raw.filter((item): item is string => typeof item === "string");
-  if (typeof raw !== "string") return [];
-  return parseTools(raw);
+  return Array.isArray(raw) ? raw.filter((item): item is string => typeof item === "string") : [];
 }
 
-function parseMessagePause(raw: unknown, messageId: string): PauseAction[] | undefined {
-  if (Array.isArray(raw)) return parsePauseArray(raw, messageId);
-  if (typeof raw === "string") return parsePauseActions(raw, messageId);
-  return undefined;
+function parseMessagePause(raw: unknown): PauseAction[] | undefined {
+  return Array.isArray(raw) ? parsePauseArray(raw) : undefined;
 }
 
 function messageFromConvex(message: ConvexMessage): Msg {
@@ -143,7 +139,7 @@ function messageFromConvex(message: ConvexMessage): Msg {
     tools: parseMessageTools(message.tools),
     status,
     pending: role === "assistant" && isPendingMessageStatus(status),
-    pause: parseMessagePause(message.pauseActions, id),
+    pause: parseMessagePause(message.pauseActions),
   };
 }
 
@@ -214,7 +210,7 @@ export default function Home() {
     conversationId ? { conversationId: conversationId as never } : "skip",
   ) as unknown;
   const selectedMessages = useQuery(
-    anyApi.conversations.conversationMessages,
+    anyApi.conversations.listMessages,
     conversationId ? { conversationId: conversationId as never, limit: 2000 } : "skip",
   ) as unknown;
   const selectedRunState = useQuery(
@@ -1295,24 +1291,13 @@ function PauseActionCard({
   );
 }
 
-function parseTools(raw: string): string[] {
-  try {
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : [];
-  } catch {
-    return [];
-  }
-}
-
-function parsePauseArray(parsed: unknown[], messageId: string): PauseAction[] | undefined {
-  const actions = parsed.flatMap((item, index) => {
+function parsePauseArray(parsed: unknown[]): PauseAction[] | undefined {
+  const actions = parsed.flatMap((item) => {
     if (!item || typeof item !== "object" || Array.isArray(item)) return [];
     const action = item as Record<string, unknown>;
-    if (typeof action.type !== "string") return [];
+    if (typeof action.type !== "string" || typeof action.selector !== "string" || !action.selector.trim()) return [];
     return [{
-      selector: typeof action.selector === "string" && action.selector.trim()
-        ? action.selector
-        : `legacy_${messageId}_${index}`,
+      selector: action.selector,
       type: action.type,
       name: typeof action.name === "string" ? action.name : undefined,
       question: typeof action.question === "string" ? action.question : undefined,
@@ -1323,14 +1308,4 @@ function parsePauseArray(parsed: unknown[], messageId: string): PauseAction[] | 
     }];
   });
   return actions.length > 0 ? actions : undefined;
-}
-
-function parsePauseActions(raw: string | null, messageId: string): PauseAction[] | undefined {
-  if (!raw) return undefined;
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsePauseArray(parsed, messageId) : undefined;
-  } catch {
-    return undefined;
-  }
 }
