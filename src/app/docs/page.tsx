@@ -34,6 +34,12 @@ interface DocumentDraft {
 type DocumentGroupId = "all" | "mine" | "agents" | "handoffs";
 type DocumentSort = "recent" | "oldest" | "title";
 
+const MAX_DOCUMENT_TITLE_LENGTH = 160;
+
+function normalizedDocumentTitle(value: string): string {
+  return value.slice(0, MAX_DOCUMENT_TITLE_LENGTH).trim() || "Untitled document";
+}
+
 export default function DocsPage() {
   const documentRows = useQuery(convexApi.documents.list, { limit: 200 }) as unknown;
   const createDocumentMutation = useMutation(convexApi.documents.create);
@@ -154,7 +160,7 @@ export default function DocsPage() {
   async function flushDraft(id: string): Promise<boolean> {
     const currentDraft = drafts[id];
     if (!currentDraft) return true;
-    const title = currentDraft.title.trim() || "Untitled document";
+    const title = normalizedDocumentTitle(currentDraft.title);
     setSaving(true);
     setError(null);
     try {
@@ -237,7 +243,7 @@ export default function DocsPage() {
 
   useEffect(() => {
     if (!selectedDocumentId || !dirty || draftTitle === undefined || draftContent === undefined) return;
-    const title = draftTitle.trim() || "Untitled document";
+    const title = normalizedDocumentTitle(draftTitle);
     const timer = window.setTimeout(() => {
       setSaving(true);
       setError(null);
@@ -272,7 +278,7 @@ export default function DocsPage() {
             <button type="button" onClick={() => void returnToLibrary()} disabled={saving} className="flex h-8 shrink-0 items-center gap-2 rounded border border-line px-2.5 font-mono text-[9px] uppercase tracking-[0.12em] text-ink-soft transition-colors hover:border-line-strong hover:text-ink disabled:opacity-40" aria-label="Back to document library">
               <span aria-hidden="true">←</span> Library
             </button>
-            <input value={draft.title} onChange={(event) => updateDraft({ title: event.target.value })} placeholder="Untitled document" className="min-w-0 flex-1 border-0 bg-transparent text-lg font-semibold tracking-[-0.025em] text-ink outline-none placeholder:text-ink-faint" />
+            <input value={draft.title} maxLength={MAX_DOCUMENT_TITLE_LENGTH} onChange={(event) => updateDraft({ title: event.target.value })} placeholder="Untitled document" className="min-w-0 flex-1 border-0 bg-transparent text-lg font-semibold tracking-[-0.025em] text-ink outline-none placeholder:text-ink-faint" />
             <span className="shrink-0 font-mono text-[9px] uppercase tracking-[0.14em] text-ink-faint">
               {saving ? "Saving..." : dirty ? "Unsaved" : "Saved"}
             </span>
