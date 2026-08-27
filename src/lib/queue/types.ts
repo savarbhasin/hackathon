@@ -140,6 +140,7 @@ export interface AgentRunStore {
   }): Promise<boolean>;
   checkpointProviderCursor(input: { runId: string; attempt: number; workerId: string; turnId: string; providerSequence: number }): Promise<boolean>;
   appendProviderEvent(input: ProviderEventCheckpoint): Promise<{ inserted: boolean; id: string }>;
+  getRecoveryModelEvents?(runId: string, throughSequence: number): Promise<Array<{ sequence: number; type: string; payload: Record<string, unknown> }>>;
   waitForUser(input: { runId: string; attempt: number; workerId: string; pendingActions: PendingAction[]; pendingActionSelector?: string }): Promise<boolean>;
   waitForApproval(input: { runId: string; attempt: number; workerId: string; pendingActions: PendingAction[]; pendingActionSelector?: string }): Promise<boolean>;
   complete(input: { runId: string; attempt: number; workerId: string; turnId: string; output: Record<string, unknown> | null }): Promise<boolean>;
@@ -162,6 +163,9 @@ export interface AgentRunStore {
   releaseForRetry(input: { runId: string; attempt: number; workerId: string; errorCode: string; errorMessage: string }): Promise<boolean>;
   getDocument(documentId: string): Promise<{ title: string; content: string } | null>;
   getConversationSession(conversationId: string): Promise<string | null>;
+  /** Existing assistant projection, used to resume a stream without replacing
+   * previously persisted content when the worker is retried mid-turn. */
+  getAssistantMessage?(conversationId: string, operationKey: string): Promise<{ content: string; tools: string[] } | null>;
   checkpointConversationSession(input: { conversationId: string; sessionId: string; expectedSessionId?: string }): Promise<boolean>;
   upsertAssistantMessage(input: {
     conversationId: string;
@@ -171,6 +175,9 @@ export interface AgentRunStore {
     tools: string[];
     status: string;
     pauseActions?: PendingAction[];
+    /** Optimistic ownership guard for retry-safe worker projections. */
+    attempt?: number;
+    workerId?: string;
   }): Promise<unknown>;
   checkpointSpecialist(input: { taskId: string; runId: string; sessionId?: string; turnId?: string }): Promise<boolean>;
   appendTaskEvent(input: { taskId: string; type: string; payload: unknown; operationKey: string }): Promise<unknown>;

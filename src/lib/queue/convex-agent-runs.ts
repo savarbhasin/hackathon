@@ -130,6 +130,20 @@ export class ConvexAgentRunStore implements AgentRunStore {
     return await this.client.mutation(api.agentRuns.appendProviderEvent, { ...input, runId: runId(input.runId) });
   }
 
+  async getRecoveryModelEvents(runIdValue: string, throughSequence: number): Promise<Array<{ sequence: number; type: string; payload: Record<string, unknown> }>> {
+    const value = await this.client.query(anyApi.agentRuns.recoveryModelEvents, {
+      runId: runId(runIdValue),
+      throughSequence,
+    });
+    if (!Array.isArray(value)) return [];
+    return value.flatMap((item) => {
+      if (!item || typeof item !== "object") return [];
+      const row = item as { sequence?: unknown; type?: unknown; payload?: unknown };
+      if (typeof row.sequence !== "number" || typeof row.type !== "string" || !row.payload || typeof row.payload !== "object" || Array.isArray(row.payload)) return [];
+      return [{ sequence: row.sequence, type: row.type, payload: row.payload as Record<string, unknown> }];
+    });
+  }
+
   async waitForUser(input: { runId: string; attempt: number; workerId: string; pendingActions: PendingAction[]; pendingActionSelector?: string }): Promise<boolean> {
     return await this.client.mutation(api.agentRuns.waitForUser, { ...input, runId: runId(input.runId) });
   }
@@ -190,6 +204,19 @@ export class ConvexAgentRunStore implements AgentRunStore {
       : null;
   }
 
+  async getAssistantMessage(conversationId: string, operationKey: string): Promise<{ content: string; tools: string[] } | null> {
+    const value = await this.client.query(anyApi.conversations.getMessageByOperationKey, {
+      conversationId: runId(conversationId),
+      operationKey,
+    });
+    if (!value || typeof value !== "object") return null;
+    const row = value as { content?: unknown; tools?: unknown };
+    return {
+      content: typeof row.content === "string" ? row.content : "",
+      tools: Array.isArray(row.tools) ? row.tools.filter((tool): tool is string => typeof tool === "string") : [],
+    };
+  }
+
   async checkpointConversationSession(input: { conversationId: string; sessionId: string; expectedSessionId?: string }): Promise<boolean> {
     return await this.client.mutation(anyApi.conversations.checkpointSession, {
       conversationId: runId(input.conversationId),
@@ -206,6 +233,8 @@ export class ConvexAgentRunStore implements AgentRunStore {
     tools: string[];
     status: string;
     pauseActions?: PendingAction[];
+    attempt?: number;
+    workerId?: string;
   }): Promise<unknown> {
     return await this.client.mutation(anyApi.conversations.upsertMessage, {
       conversationId: runId(input.conversationId),
@@ -216,6 +245,8 @@ export class ConvexAgentRunStore implements AgentRunStore {
       tools: input.tools,
       status: input.status,
       ...(input.pauseActions !== undefined ? { pauseActions: input.pauseActions } : {}),
+      ...(input.attempt !== undefined ? { attempt: input.attempt } : {}),
+      ...(input.workerId !== undefined ? { workerId: input.workerId } : {}),
     });
   }
 

@@ -248,6 +248,28 @@ export const checkpointProviderCursor = mutation({
   },
 });
 
+/**
+ * Bounded worker recovery projection. Only model message events are needed
+ * to rebuild the SDK merge map; the caller supplies its last durable cursor.
+ */
+export const recoveryModelEvents = query({
+  args: { runId: v.id("agentRuns"), throughSequence: v.number() },
+  returns: v.any(),
+  handler: async (ctx, args) => {
+    // The sequence range is bounded to this run's durable cursor. Collecting
+    // the range (rather than taking an arbitrary prefix) preserves exact base
+    // and delta replay even when tool events dominate the journal.
+    const events = await ctx.db
+      .query("runEvents")
+      .withIndex("by_run_sequence", (q: any) => q.eq("runId", args.runId).lte("sequence", args.throughSequence))
+      .order("asc")
+      .collect();
+    return events
+      .filter((event: any) => event.type === "model.message" || event.type === "model.message.delta")
+      .map((event: any) => ({ sequence: event.sequence, type: event.type, payload: event.payload }));
+  },
+});
+
 export const appendProviderEvent = mutation({
   args: { ...guardArgs, turnId: v.string(), sequence: v.number(), providerEventId: v.optional(v.string()), providerSequence: v.optional(v.number()), type: v.string(), payload: v.any() },
   returns: v.object({ inserted: v.boolean(), id: v.id("runEvents") }),

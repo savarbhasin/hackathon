@@ -241,7 +241,28 @@ export default function Home() {
       .filter((message) => message.role === "user" || message.role === "assistant")
       .map(messageFromConvex);
     const placeholder = pendingPlaceholdersRef.current[conversationId];
-    const hasPersistedAssistant = Boolean(placeholder?.runId && loaded.some((message) => message.role === "assistant" && message.runId === placeholder.runId));
+
+    // The submitting browser owns the optimistic placeholder, but another
+    // device may open the conversation before the worker's first Convex
+    // projection. Synthesize the same loading row from the durable active run
+    // until its assistant message appears (or the run leaves the active state).
+    const activeRun = selectedRunState?.active;
+    const activeRunId = typeof activeRun?._id === "string" ? activeRun._id : undefined;
+    const activeStatus = typeof activeRun?.status === "string" ? activeRun.status : undefined;
+    const activeProcessing = !!activeRunId && typeof activeStatus === "string"
+      && (ACTIVE_RUN_STATUSES.has(activeStatus) || activeStatus === RETRYING_STATUS);
+    const hasActiveAssistant = !!activeRunId && loaded.some((message) => message.role === "assistant" && message.runId === activeRunId);
+    const latestUserIndex = loaded.reduce((latest, message, index) => message.role === "user" ? index : latest, -1);
+    // During the small window before conversationRunState arrives, message
+    // order still identifies a newly persisted assistant response after the
+    // latest user message. Treat it as authoritative for placeholder cleanup.
+    const hasDurableAssistantAfterLatestUser = latestUserIndex >= 0
+      && loaded.slice(latestUserIndex + 1).some((message) => message.role === "assistant");
+    const hasPersistedAssistant = Boolean(
+      (placeholder?.runId && loaded.some((message) => message.role === "assistant" && message.runId === placeholder.runId))
+      || hasActiveAssistant
+      || (!activeRunId && hasDurableAssistantAfterLatestUser),
+    );
     if (hasPersistedAssistant) {
       setPlaceholderMap((current) => {
         if (!current[conversationId]) return current;
@@ -250,8 +271,37 @@ export default function Home() {
         return next;
       });
     }
-    setMessages(placeholder && !hasPersistedAssistant ? [...loaded, placeholder] : loaded);
-  }, [conversationId, selectedMessages]);
+
+    const placeholderForActive = !!placeholder && (!placeholder.runId || placeholder.runId === activeRunId);
+    let visiblePlaceholder = placeholder && !hasPersistedAssistant ? placeholder : undefined;
+    if (activeProcessing && !hasActiveAssistant && !hasPersistedAssistant) {
+      if (placeholderForActive) {
+        visiblePlaceholder = {
+          ...placeholder,
+          runId: placeholder.runId ?? activeRunId,
+          status: activeStatus,
+          pending: true,
+        };
+        if (placeholder.runId !== activeRunId || placeholder.status !== activeStatus) {
+          setPlaceholderMap((current) => ({
+            ...current,
+            [conversationId]: visiblePlaceholder as Msg,
+          }));
+        }
+      } else {
+        visiblePlaceholder = {
+          id: `active:${activeRunId}`,
+          runId: activeRunId,
+          role: "assistant",
+          content: "",
+          tools: [],
+          pending: true,
+          status: activeStatus,
+        };
+      }
+    }
+    setMessages(visiblePlaceholder ? [...loaded, visiblePlaceholder] : loaded);
+  }, [conversationId, selectedMessages, selectedRunState]);
 
   useEffect(() => {
     if (!historyOpen) return;
