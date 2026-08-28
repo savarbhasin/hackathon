@@ -2,7 +2,7 @@ import { isEventDelta, mergeEventDelta, TrueForge } from "@truefoundry/trueforge
 import type { TrueForgeApi } from "@truefoundry/trueforge-sdk";
 import { ORCHESTRATOR_INSTRUCTIONS, ORCHESTRATOR_SPEC } from "./fleet";
 import { fallbackConversationTitle, generateConversationTitle } from "./conversation-title";
-import type { AgentRunRecord, AgentRunStore, AssistantDeltaStream, PendingAction } from "./queue/types";
+import type { AgentRunRecord, AgentRunStore, AssistantDeltaStream, AssistantToolCall, PendingAction } from "./queue/types";
 import { RecoverableRunError } from "./queue/types";
 import { trueForgeBaseUrl } from "./queue/env";
 import { workerLog } from "./queue/log";
@@ -87,6 +87,18 @@ function eventPayload(event: unknown): RecordValue {
 }
 
 function toolName(call: RecordValue): string | undefined {
+  // TrueForge attaches the resolved tool metadata before the wrapper's JSON
+  // arguments have necessarily finished streaming. Prefer it so the UI can
+  // display the real MCP action immediately instead of waiting for call_tool's
+  // complete argument object.
+  const info = record(call.toolInfo);
+  const resolvedName = typeof info?.name === "string" ? info.name : undefined;
+  if (resolvedName) {
+    return info?.type === "mcp" && typeof info?.serverName === "string"
+      ? `${info.serverName}.${resolvedName}`
+      : resolvedName;
+  }
+
   const fn = record(call.function);
   const name = typeof fn?.name === "string" ? fn.name : undefined;
   if (!name || name !== "call_tool") return name;
@@ -119,16 +131,66 @@ function normalizedText(messages: Map<string, RecordValue>, fallback: string): s
   return text || fallback;
 }
 
-function toolsFromMessages(messages: Map<string, RecordValue>): string[] {
-  const names = new Set<string>();
+/**
+ * Tool-calling models often narrate an action ("I'll check…") in the same
+ * message that requests the tool. Keep that text live until the tool appears,
+ * but exclude it from the durable answer once a later model message responds.
+ */
+export function textAfterLastToolCall(messages: Map<string, RecordValue>, fallback: string): string {
+  const main = [...messages.values()]
+    .filter((message) => message.threadId === undefined || message.threadId === "main");
+  let lastToolCall = -1;
+  for (let index = 0; index < main.length; index += 1) {
+    const toolCalls = main[index].toolCalls;
+    if (Array.isArray(toolCalls) && toolCalls.length > 0) lastToolCall = index;
+  }
+  if (lastToolCall < 0) return normalizedText(messages, fallback);
+  return main
+    .slice(lastToolCall + 1)
+    .map((message) => typeof message.content === "string" ? message.content : "")
+    .join("");
+}
+
+export function toolNamesFromMessages(messages: Map<string, RecordValue>): string[] {
+  const names: string[] = [];
   for (const message of messages.values()) {
     for (const call of (Array.isArray(message.toolCalls) ? message.toolCalls : [])) {
       const value = record(call);
       const name = value ? toolName(value) : undefined;
-      if (name) names.add(name);
+      if (name) names.push(name);
     }
   }
-  return [...names];
+  return names;
+}
+
+/** Cumulative tool-call snapshots consumed by the Convex UIMessageChunk adapter. */
+export function streamingToolCalls(messages: Map<string, RecordValue>): AssistantToolCall[] {
+  const calls: AssistantToolCall[] = [];
+  for (const message of messages.values()) {
+    for (const rawCall of (Array.isArray(message.toolCalls) ? message.toolCalls : [])) {
+      const call = record(rawCall);
+      if (!call || typeof call.id !== "string") continue;
+      const name = toolName(call);
+      const fn = record(call.function);
+      if (!name || typeof fn?.arguments !== "string") continue;
+      let input: unknown;
+      let inputAvailable = false;
+      try {
+        input = JSON.parse(fn.arguments);
+        inputAvailable = true;
+      } catch {
+        // Arguments are expected to be incomplete while model deltas arrive.
+      }
+      calls.push({
+        toolCallId: call.id,
+        toolName: name,
+        inputText: fn.arguments,
+        inputAvailable,
+        ...(inputAvailable ? { input } : {}),
+      });
+    }
+  }
+  return calls;
 }
 
 function stableSelector(runId: string, actionIndex: number, toolCallId: string, sourceEventId?: string): string {
@@ -410,10 +472,28 @@ export async function processDurableOrchestratorRun(store: AgentRunStore, run: A
       const candidateText = normalizedText(messages, fallbackDelta);
       streamDelta = mergeStreamingCandidate(projectionBaseline, streamDelta, candidateText);
       projectedText = `${projectionBaseline}${streamDelta}`;
-      const streamedTools = toolsFromMessages(messages);
-      tools = [...new Set([...tools, ...streamedTools])];
+      const streamedTools = toolNamesFromMessages(messages);
+      // The merged provider messages are cumulative and ordered, so replacing
+      // from that snapshot preserves every call without duplicating replays.
+      if (streamedTools.length > 0) tools = streamedTools;
+      // Preserve provider order: prose from a delta belongs before a tool that
+      // starts in that same delta. The adapter closes that text segment when it
+      // receives the first tool-input chunk.
       if (type !== "turn.done" && projectedText.startsWith(previousProjectedText)) {
         await deltaStream?.addText(projectedText.slice(previousProjectedText.length));
+      }
+      await deltaStream?.syncToolCalls(streamingToolCalls(messages));
+      if (type === "tool.response" && typeof event.toolCallId === "string") {
+        // The component only needs the lifecycle transition. TrueForge remains
+        // authoritative for the potentially large or sensitive result body.
+        await deltaStream?.completeToolCall(event.toolCallId);
+      } else if (type === "tool.approval_required" && typeof event.id === "string") {
+        for (const value of (Array.isArray(event.toolCalls) ? event.toolCalls : [])) {
+          const ref = record(value);
+          if (typeof ref?.id === "string") {
+            await deltaStream?.requestToolApproval(ref.id, `trueforge:${event.id}:${ref.id}`);
+          }
+        }
       }
 
       if (type !== "turn.done") continue;
@@ -421,18 +501,32 @@ export async function processDurableOrchestratorRun(store: AgentRunStore, run: A
       const state = record(event.state) ?? {};
       stateStatus = typeof state.status === "string" ? state.status : "error";
       metrics = record(state.metrics) ?? undefined;
-      tools = [...new Set([...tools, ...toolsFromMessages(messages)])];
+      const terminalTools = toolNamesFromMessages(messages);
+      if (terminalTools.length > 0) tools = terminalTools;
       const outputContent = typeof record(state.output)?.content === "string" ? record(state.output)?.content as string : "";
       const beforeTerminalText = projectedText;
       streamDelta = mergeStreamingCandidate(projectionBaseline, streamDelta, outputContent || normalizedText(messages, fallbackDelta));
-      mergedText = `${projectionBaseline}${streamDelta}`;
-      projectedText = mergedText;
-      if (mergedText.startsWith(beforeTerminalText)) {
-        await deltaStream?.addText(mergedText.slice(beforeTerminalText.length));
+      const streamedTerminalText = `${projectionBaseline}${streamDelta}`;
+      projectedText = streamedTerminalText;
+      if (streamedTerminalText.startsWith(beforeTerminalText)) {
+        await deltaStream?.addText(streamedTerminalText.slice(beforeTerminalText.length));
       }
+      // The component stream retains the transient narration in its first text
+      // segment for realtime continuity. The durable row keeps only the actual
+      // response after the final tool call, so reloads never restore the prose
+      // the UI intentionally hid.
+      mergedText = tools.length > 0
+        ? textAfterLastToolCall(messages, fallbackDelta)
+        : streamedTerminalText;
       if (stateStatus === "done") {
         const actions = enrichPendingActions(run._id, Array.isArray(state.requiredActions) ? state.requiredActions : [], messages);
         if (actions.length > 0) {
+          for (const action of actions) {
+            if (action.type !== "tool.approval_required") continue;
+            for (const ref of action.toolCalls) {
+              await deltaStream?.requestToolApproval(ref.id, action.selector ?? `trueforge:${run._id}:${ref.id}`);
+            }
+          }
           const waitingStatus = actions.some((action) => action.type === "tool.approval_required") ? "waiting_for_approval" : "waiting_for_user";
           await project(store, run, mergedText, tools, waitingStatus, actions, { attempt, workerId: context.workerId });
           const pendingActionSelector = actions.length === 1 ? actions[0].selector : undefined;
