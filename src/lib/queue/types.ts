@@ -157,6 +157,8 @@ export interface AgentRunStore {
   releaseForRetry(input: { runId: string; attempt: number; workerId: string; errorCode: string; errorMessage: string }): Promise<boolean>;
   getDocument(documentId: string): Promise<{ title: string; content: string } | null>;
   getConversationSession(conversationId: string): Promise<string | null>;
+  getConversationTitle(conversationId: string): Promise<string | null>;
+  updateConversationTitle(input: { conversationId: string; title: string }): Promise<boolean>;
   createAssistantDeltaStream(input: {
     conversationId: string;
     runId: string;
