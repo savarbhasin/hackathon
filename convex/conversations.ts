@@ -413,12 +413,15 @@ export const update = mutation({
   args: {
     conversationId,
     title: v.optional(v.string()),
+    /** Optimistic guard used by delayed title generation. */
+    expectedTitle: v.optional(v.string()),
     sessionId: v.optional(v.string()),
   },
   returns: v.any(),
   handler: async (ctx, args) => {
     const existing = await ctx.db.get(args.conversationId);
     if (!existing) return null;
+    if (args.title !== undefined && args.expectedTitle !== undefined && existing.title !== args.expectedTitle) return null;
     const now = Date.now();
     const patch: Record<string, unknown> = { updatedAt: now };
     if (args.title !== undefined) {

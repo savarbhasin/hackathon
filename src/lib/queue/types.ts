@@ -102,9 +102,24 @@ export type AdmissionResult<T = unknown> =
   | { kind: "selector_mismatch"; conversationId?: string; runId?: string; selector?: string }
   | { kind: "invalid_state"; conversationId?: string; runId?: string; reason?: string };
 
+export type AssistantToolCall = {
+  toolCallId: string;
+  toolName: string;
+  /** Cumulative JSON argument text after merging provider deltas. */
+  inputText: string;
+  inputAvailable: boolean;
+  input?: unknown;
+};
+
 export type AssistantDeltaStream = {
   /** Append one provider text fragment to the official Convex Agent stream. */
   addText(delta: string): Promise<void>;
+  /** Reconcile cumulative provider tool calls into incremental UIMessageChunks. */
+  syncToolCalls(calls: AssistantToolCall[]): Promise<void>;
+  /** Mark a provider-executed tool call complete without persisting its result body. */
+  completeToolCall(toolCallId: string): Promise<void>;
+  /** Project a TrueForge approval pause through the standard AI SDK tool state. */
+  requestToolApproval(toolCallId: string, approvalId: string): Promise<void>;
   /** Flush remaining deltas and mark the component stream finished. */
   finish(): Promise<void>;
   /** Abort the component stream without changing the durable run lifecycle. */
@@ -157,8 +172,8 @@ export interface AgentRunStore {
   releaseForRetry(input: { runId: string; attempt: number; workerId: string; errorCode: string; errorMessage: string }): Promise<boolean>;
   getDocument(documentId: string): Promise<{ title: string; content: string } | null>;
   getConversationSession(conversationId: string): Promise<string | null>;
-  getConversationTitle(conversationId: string): Promise<string | null>;
-  updateConversationTitle(input: { conversationId: string; title: string }): Promise<boolean>;
+  getConversationTitleState(conversationId: string): Promise<{ title: string; seedMessage: string } | null>;
+  updateConversationTitle(input: { conversationId: string; expectedTitle: string; title: string }): Promise<boolean>;
   createAssistantDeltaStream(input: {
     conversationId: string;
     runId: string;
