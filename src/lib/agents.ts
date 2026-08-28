@@ -115,12 +115,20 @@ async function buildAgentRosterBlock(): Promise<string> {
 // it in Redis so the hot path does not call TrueForge `agents.list` (and the
 // matching Convex profile query) for every run. The short TTL is a safety net
 // for changes made outside the agent API; API writes explicitly invalidate it.
-const AGENT_ROSTER_CACHE_KEY = "mission-control:agent-roster:v1";
+const AGENT_ROSTER_CACHE_KEY = "mission-control:agent-roster:v2";
+const AGENT_ROSTER_REVISION_KEY = "mission-control:agent-roster:revision:v1";
 const AGENT_ROSTER_CACHE_TTL_SECONDS = 60;
+
+type AgentRosterBuild = {
+  generation: number;
+  revision: string | null;
+  promise: Promise<string>;
+};
 
 type AgentRosterGlobals = {
   agentRosterRedis?: ReturnType<typeof createRedisConnection>;
-  agentRosterInFlight?: Promise<string>;
+  agentRosterInFlight?: AgentRosterBuild;
+  agentRosterGeneration?: number;
 };
 
 const globalForAgentRoster = globalThis as unknown as AgentRosterGlobals;
@@ -139,43 +147,91 @@ function agentRosterRedis(): ReturnType<typeof createRedisConnection> | null {
   }
 }
 
+const READ_ROSTER_CACHE_SCRIPT = `
+local revision = redis.call("GET", KEYS[1]) or "0"
+local roster = redis.call("GET", KEYS[2])
+return {revision, roster or false}
+`;
+
+const STORE_ROSTER_IF_CURRENT_SCRIPT = `
+local revision = redis.call("GET", KEYS[1]) or "0"
+if revision ~= ARGV[1] then return 0 end
+redis.call("SET", KEYS[2], ARGV[2], "EX", ARGV[3])
+return 1
+`;
+
+async function readAgentRosterCache(cache: ReturnType<typeof createRedisConnection>): Promise<{ revision: string; roster: string | null }> {
+  const result = await cache.eval(READ_ROSTER_CACHE_SCRIPT, 2, AGENT_ROSTER_REVISION_KEY, AGENT_ROSTER_CACHE_KEY);
+  if (!Array.isArray(result) || typeof result[0] !== "string") throw new Error("Invalid agent roster cache response");
+  return { revision: result[0], roster: typeof result[1] === "string" ? result[1] : null };
+}
+
+async function storeAgentRosterIfCurrent(
+  cache: ReturnType<typeof createRedisConnection>,
+  revision: string,
+  roster: string,
+): Promise<boolean> {
+  return await cache.eval(
+    STORE_ROSTER_IF_CURRENT_SCRIPT,
+    2,
+    AGENT_ROSTER_REVISION_KEY,
+    AGENT_ROSTER_CACHE_KEY,
+    revision,
+    roster,
+    String(AGENT_ROSTER_CACHE_TTL_SECONDS),
+  ) === 1;
+}
+
 export async function agentRosterBlock(): Promise<string> {
   const cache = agentRosterRedis();
-  if (cache) {
-    try {
-      const cached = await cache.get(AGENT_ROSTER_CACHE_KEY);
-      if (cached) return cached;
-    } catch {
-      // Redis is an optimization only. Build directly from the source on miss.
-    }
-  }
-
-  // Avoid duplicate source calls from concurrent runs in this process. A
-  // separate worker process gets the same protection from the Redis value once
-  // the first request has populated it.
-  if (!globalForAgentRoster.agentRosterInFlight) {
-    globalForAgentRoster.agentRosterInFlight = buildAgentRosterBlock();
-  }
-  const pending = globalForAgentRoster.agentRosterInFlight;
-  try {
-    const roster = await pending;
+  for (;;) {
+    const generation = globalForAgentRoster.agentRosterGeneration ?? 0;
+    let revision: string | null = null;
     if (cache) {
-      void cache.set(AGENT_ROSTER_CACHE_KEY, roster, "EX", AGENT_ROSTER_CACHE_TTL_SECONDS).catch(() => undefined);
+      try {
+        const snapshot = await readAgentRosterCache(cache);
+        revision = snapshot.revision;
+        if (snapshot.roster) return snapshot.roster;
+      } catch {
+        // Redis is an optimization only. Build directly from the source.
+      }
     }
-    return roster;
-  } finally {
-    if (globalForAgentRoster.agentRosterInFlight === pending) {
-      delete globalForAgentRoster.agentRosterInFlight;
+
+    // Coalesce only builds from the same local and Redis generation. An
+    // invalidation immediately makes older in-flight work ineligible.
+    let pending = globalForAgentRoster.agentRosterInFlight;
+    if (!pending || pending.generation !== generation || pending.revision !== revision) {
+      pending = { generation, revision, promise: buildAgentRosterBlock() };
+      globalForAgentRoster.agentRosterInFlight = pending;
+    }
+    try {
+      const roster = await pending.promise;
+      if ((globalForAgentRoster.agentRosterGeneration ?? 0) !== generation) continue;
+      if (cache && revision !== null) {
+        try {
+          if (!await storeAgentRosterIfCurrent(cache, revision, roster)) continue;
+        } catch {
+          // The source result is still usable when the cache is unavailable.
+        }
+      }
+      return roster;
+    } finally {
+      if (globalForAgentRoster.agentRosterInFlight === pending) {
+        delete globalForAgentRoster.agentRosterInFlight;
+      }
     }
   }
 }
 
 /** Invalidate after agent create/update so the next orchestrator sees changes. */
 export async function invalidateAgentRosterCache(): Promise<void> {
+  globalForAgentRoster.agentRosterGeneration = (globalForAgentRoster.agentRosterGeneration ?? 0) + 1;
   const cache = agentRosterRedis();
   if (!cache) return;
   try {
-    await cache.del(AGENT_ROSTER_CACHE_KEY);
+    // Revision and deletion are atomic. A build from any process can only
+    // repopulate the value when it observed this latest revision.
+    await cache.multi().incr(AGENT_ROSTER_REVISION_KEY).del(AGENT_ROSTER_CACHE_KEY).exec();
   } catch {
     // TTL expiry remains the fallback if Redis is unavailable.
   }

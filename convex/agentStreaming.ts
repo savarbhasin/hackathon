@@ -147,6 +147,10 @@ export const finish = mutation({
   },
   returns: v.null(),
   handler: async (ctx, args) => {
+    const owner = await streamOwner(ctx, args.streamId);
+    // The prior call may have committed both the component finish and sidecar
+    // deletion before its response was lost. Treat that retry as success.
+    if (!owner) return null;
     const owned = await currentOwner(ctx, args.streamId, args.expectedAttempt, args.expectedWorkerId);
     if (!owned) throw new Error("Stream ownership was lost before finish");
     await ctx.runMutation(components.agent.streams.finish, {

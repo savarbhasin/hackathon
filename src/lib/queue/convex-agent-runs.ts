@@ -239,10 +239,11 @@ export class ConvexAgentRunStore implements AgentRunStore {
     await streamer.getOrCreateStreamId();
     const textPartId = `assistant:${input.runId}:${input.attempt}`;
     let started = false;
+    let textEnded = false;
     let ended = false;
     return {
       async addText(delta: string): Promise<void> {
-        if (!delta || ended) return;
+        if (!delta || ended || textEnded) return;
         const chunks: UIMessageChunk[] = [];
         if (!started) {
           chunks.push({ type: "text-start", id: textPartId });
@@ -253,14 +254,20 @@ export class ConvexAgentRunStore implements AgentRunStore {
       },
       async finish(): Promise<void> {
         if (ended) return;
-        ended = true;
-        if (started) await streamer.addParts([{ type: "text-end", id: textPartId }]);
+        // Do not mark the adapter ended until the component mutation succeeds:
+        // Convex can commit and still report a transport error, and callers
+        // must be able to retry without adding a second text-end chunk.
+        if (started && !textEnded) {
+          await streamer.addParts([{ type: "text-end", id: textPartId }]);
+          textEnded = true;
+        }
         await streamer.finish();
+        ended = true;
       },
       async fail(reason: string): Promise<void> {
         if (ended) return;
-        ended = true;
         await streamer.fail(reason.slice(0, 500));
+        ended = true;
       },
     };
   }

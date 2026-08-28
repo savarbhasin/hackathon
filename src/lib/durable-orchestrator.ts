@@ -232,11 +232,30 @@ async function project(
  */
 export function mergeStreamingCandidate(baseline: string, previousDelta: string, candidate: string): string {
   if (!candidate) return previousDelta;
-  const delta = baseline && candidate.startsWith(baseline) ? candidate.slice(baseline.length) : candidate;
+
+  // A cursorless retry replays cumulative text from the beginning. Ignore
+  // candidates that have not reached the persisted prefix yet, then remove
+  // either the full prefix or the replay overlap at its boundary.
+  if (baseline.startsWith(candidate)) return previousDelta;
+  let delta = candidate.startsWith(baseline) ? candidate.slice(baseline.length) : candidate;
+  if (baseline && delta === candidate) {
+    const overlap = suffixPrefixOverlap(baseline, candidate);
+    delta = candidate.slice(overlap);
+  }
+  if (!delta) return previousDelta;
   if (!previousDelta) return delta;
   if (delta.startsWith(previousDelta)) return delta;
   if (previousDelta.startsWith(delta) || previousDelta.endsWith(delta)) return previousDelta;
-  return `${previousDelta}${delta}`;
+  const overlap = suffixPrefixOverlap(previousDelta, delta);
+  return `${previousDelta}${delta.slice(overlap)}`;
+}
+
+function suffixPrefixOverlap(left: string, right: string): number {
+  const limit = Math.min(left.length, right.length);
+  for (let length = limit; length > 0; length -= 1) {
+    if (left.endsWith(right.slice(0, length))) return length;
+  }
+  return 0;
 }
 
 const settledRunStatuses = new Set(["waiting_for_user", "waiting_for_approval", "completed", "failed", "cancelled"]);
@@ -456,7 +475,27 @@ export async function processDurableOrchestratorRun(store: AgentRunStore, run: A
 
     const settledStatus = latest && settledRunStatuses.has(latest.status) ? latest.status : undefined;
     let projectionError: unknown;
-    if (!settledStatus) {
+    if (settledStatus) {
+      // The lifecycle mutation may have committed before finish reported an
+      // ambiguous transport failure. Retry the idempotent finish while this
+      // attempt still owns the stream; aborting is the final fallback so a
+      // settled run can never leave a component row stuck in `streaming`.
+      try {
+        await deltaStream?.finish();
+      } catch (finishFailure) {
+        try {
+          await deltaStream?.fail("durable run settled before stream finalization");
+        } catch (abortFailure) {
+          workerLog("run.stream_cleanup_failed", {
+            runId: run._id,
+            attempt,
+            finishMessage: finishFailure instanceof Error ? finishFailure.message.slice(0, 200) : "unknown",
+            abortMessage: abortFailure instanceof Error ? abortFailure.message.slice(0, 200) : "unknown",
+          });
+          throw finishFailure;
+        }
+      }
+    } else {
       const projectionStatus = retryable ? "retrying" : "failed";
       try {
         await deltaStream?.fail(retryable ? retryable.message : message).catch(() => undefined);
