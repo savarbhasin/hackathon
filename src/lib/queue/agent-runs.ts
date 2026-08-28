@@ -26,13 +26,11 @@ export type EnqueueResult =
 
 /**
  * Queue data intentionally contains nothing except the durable Convex run ID.
- * A duplicate `add` returns/retains the existing BullMQ job; it cannot create a
- * second logical run because the stable BullMQ job ID equals `runId`.
+ * Convex admission makes a new run ID unique, while BullMQ's stable `jobId`
+ * makes an ambiguous retry idempotent. Calling `add` directly avoids a separate
+ * `getJob` round trip; BullMQ retains the existing job if the ID already exists.
  */
 export async function enqueueAgentRun(queue: Queue<AgentRunJobData>, runId: string): Promise<EnqueueResult> {
-  const existing = await queue.getJob(runId);
-  if (existing) return { kind: "already_present", jobId: runId, state: await existing.getState() };
-
   const job = await queue.add(RUN_JOB_NAME, { runId }, { ...agentRunJobOptions, jobId: runId });
   return { kind: "enqueued", jobId: job.id ?? runId };
 }
