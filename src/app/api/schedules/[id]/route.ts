@@ -10,7 +10,7 @@ import {
 } from "@/lib/durable-schedule-api";
 
 export const runtime = "nodejs";
-export const maxDuration = 800;
+export const maxDuration = 300;
 
 type Params = { params: Promise<{ id: string }> };
 type SchedulePatch = { name?: unknown; cronExpr?: unknown; timezone?: unknown; prompt?: unknown; enabled?: unknown; configRevision?: unknown };

@@ -271,8 +271,13 @@ export default function Home() {
       .filter((stream) => typeof stream.agentName === "string" && stream.agentName.length > 0)
       .map((stream) => {
         const runId = stream.agentName as string;
+        // A component stream may remain marked "streaming" briefly after its
+        // durable run completes. Only the current active run can be pending;
+        // otherwise the stale stream would keep the UI on "Thinking" forever.
         const pending = stream.status === "streaming"
-          && (!activeRunId || (runId === activeRunId && activeProcessing));
+          && !!activeRunId
+          && runId === activeRunId
+          && activeProcessing;
         const tools = [...new Set((stream.parts ?? [])
           .map((part) => part.toolName)
           .filter((name): name is string => typeof name === "string" && name.length > 0))];

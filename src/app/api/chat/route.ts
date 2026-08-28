@@ -2,7 +2,7 @@ import { admitDurableResume, admitDurableStart } from "@/lib/durable-chat-admiss
 import { ResumeStateError } from "@/lib/orchestrator-pause";
 
 export const runtime = "nodejs";
-export const maxDuration = 800;
+export const maxDuration = 300;
 
 interface ChatBody {
   message?: unknown;
