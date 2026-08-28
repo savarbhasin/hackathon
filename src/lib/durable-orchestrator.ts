@@ -301,7 +301,8 @@ export async function processDurableOrchestratorRun(store: AgentRunStore, run: A
 
   try {
     const input = parseDurableOrchestratorInput(run.input);
-    firstMessage = input.message;
+    const firstUserItem = input.items?.find((item) => item.type === "user.message" && typeof item.content === "string");
+    firstMessage = input.message || (typeof firstUserItem?.content === "string" ? firstUserItem.content : "");
     const hasResume = run.resumeInput !== undefined && run.resumeInput !== null;
     if (!sessionId && run.conversationId) sessionId = await store.getConversationSession(run.conversationId) ?? undefined;
     if (!sessionId) {
