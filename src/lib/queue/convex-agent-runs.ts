@@ -184,6 +184,22 @@ export class ConvexAgentRunStore implements AgentRunStore {
       : null;
   }
 
+  async getConversationTitle(conversationId: string): Promise<string | null> {
+    const conversation = await this.client.query(anyApi.conversations.get, { conversationId: runId(conversationId) });
+    if (!conversation || typeof conversation !== "object") return null;
+    return typeof (conversation as { title?: unknown }).title === "string"
+      ? (conversation as { title: string }).title
+      : null;
+  }
+
+  async updateConversationTitle(input: { conversationId: string; title: string }): Promise<boolean> {
+    const conversation = await this.client.mutation(anyApi.conversations.update, {
+      conversationId: runId(input.conversationId),
+      title: input.title,
+    }) as unknown;
+    return !!conversation;
+  }
+
   async createAssistantDeltaStream(input: {
     conversationId: string;
     runId: string;

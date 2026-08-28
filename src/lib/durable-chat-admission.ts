@@ -9,6 +9,7 @@ import {
   type PersistedPauseAction,
   type ResumeSelection,
 } from "./orchestrator-pause";
+import { fallbackConversationTitle } from "./conversation-title";
 
 const convexFunctions = api as unknown as Record<string, Record<string, any>>;
 
@@ -65,11 +66,7 @@ function asConversationId(value: unknown): string | undefined {
   return asId((value as Record<string, unknown>)._id);
 }
 
-function titleFor(message: string): string {
-  const line = message.replace(/\s+/g, " ").trim();
-  if (!line) return "New conversation";
-  return line.length <= 72 ? line : `${line.slice(0, 69)}...`;
-}
+const titleFor = fallbackConversationTitle;
 
 function keyFrom(value: unknown, header: string | null | undefined): string {
   const candidate = typeof value === "string" ? value.trim() : "";

@@ -1,6 +1,7 @@
 import { isEventDelta, mergeEventDelta, TrueForge } from "@truefoundry/trueforge-sdk";
 import type { TrueForgeApi } from "@truefoundry/trueforge-sdk";
 import { ORCHESTRATOR_INSTRUCTIONS, ORCHESTRATOR_SPEC } from "./fleet";
+import { fallbackConversationTitle, generateConversationTitle } from "./conversation-title";
 import type { AgentRunRecord, AgentRunStore, AssistantDeltaStream, PendingAction } from "./queue/types";
 import { RecoverableRunError } from "./queue/types";
 import { trueForgeBaseUrl } from "./queue/env";
@@ -202,6 +203,23 @@ function completionTokenStatus(metrics: RecordValue | undefined): string {
 
 type ProjectionOwnership = { attempt: number; workerId: string };
 
+async function maybeGenerateConversationTitle(
+  store: AgentRunStore,
+  client: TrueForge,
+  conversationId: string | undefined,
+  firstMessage: string,
+): Promise<void> {
+  if (!conversationId || !firstMessage.trim()) return;
+  const currentTitle = await store.getConversationTitle(conversationId);
+  // Admission seeds new conversations with the first-message fallback. Once a
+  // model title exists, later turns must never rename the conversation.
+  if (currentTitle !== fallbackConversationTitle(firstMessage)) return;
+  const generated = await generateConversationTitle(client, firstMessage);
+  if (generated && generated !== currentTitle) {
+    await store.updateConversationTitle({ conversationId, title: generated });
+  }
+}
+
 async function project(
   store: AgentRunStore,
   run: AgentRunRecord,
@@ -279,9 +297,11 @@ export async function processDurableOrchestratorRun(store: AgentRunStore, run: A
   let streamDelta = "";
   let projectedText = "";
   let deltaStream: AssistantDeltaStream | undefined;
+  let firstMessage = "";
 
   try {
     const input = parseDurableOrchestratorInput(run.input);
+    firstMessage = input.message;
     const hasResume = run.resumeInput !== undefined && run.resumeInput !== null;
     if (!sessionId && run.conversationId) sessionId = await store.getConversationSession(run.conversationId) ?? undefined;
     if (!sessionId) {
@@ -427,6 +447,14 @@ export async function processDurableOrchestratorRun(store: AgentRunStore, run: A
         await project(store, run, mergedText, tools, completionTokenStatus(metrics), [], { attempt, workerId: context.workerId });
         if (!await store.complete({ runId: run._id, attempt, workerId: context.workerId, turnId, output: { content: mergedText, status: stateStatus, tools, ...(metrics ? { metrics } : {}) }, ...(providerSequence !== null ? { providerSequence } : {}) })) return;
         await deltaStream?.finish();
+        try {
+          await maybeGenerateConversationTitle(store, client, run.conversationId, firstMessage);
+        } catch (error) {
+          workerLog("run.title_generation_failed", {
+            runId: run._id,
+            message: error instanceof Error ? error.message.slice(0, 200) : "unknown",
+          });
+        }
         return;
       }
       if (stateStatus === "cancelled") {
