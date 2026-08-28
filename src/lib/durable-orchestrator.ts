@@ -449,7 +449,9 @@ export async function processDurableOrchestratorRun(store: AgentRunStore, run: A
         if (!await store.complete({ runId: run._id, attempt, workerId: context.workerId, turnId, output: { content: mergedText, status: stateStatus, tools, ...(metrics ? { metrics } : {}) }, ...(providerSequence !== null ? { providerSequence } : {}) })) return;
         await deltaStream?.finish();
         try {
+          workerLog("run.title_generation_started", { runId: run._id });
           await maybeGenerateConversationTitle(store, client, run.conversationId, firstMessage);
+          workerLog("run.title_generation_completed", { runId: run._id });
         } catch (error) {
           workerLog("run.title_generation_failed", {
             runId: run._id,
