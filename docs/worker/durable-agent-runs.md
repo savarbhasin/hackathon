@@ -4,13 +4,13 @@ The production path uses Convex for durable run state and BullMQ for delivery. T
 
 ## Contract
 
-- Convex `agentRuns` and `runEvents` are the source of truth.
+- Convex `agentRuns` is the source of truth for run ownership and lifecycle; TrueForge is the replay authority for provider events.
 - BullMQ queue name is `agent-runs`.
 - Every queue payload is exactly `{ runId }`; its BullMQ `jobId` is the same Convex run ID.
 - Redis carries delivery and locking only. It never carries prompts, provider credentials, actions, output, or the canonical run state.
-- A worker claims a run with its expected attempt, persists a new TrueForge session **before** creating a turn, creates the turn with `stream:false`, persists the turn ID, then subscribes from the durable provider cursor.
-- Every event is persisted before advancing the provider cursor. A terminal result or durable pause is written before the BullMQ processor resolves.
-- A recoverable stream failure calls the guarded `releaseForRetry` transition, preserves session/turn/cursor, and throws to invoke BullMQ's bounded retry. A later job gets the latest snapshot and claims with its exact attempt before attaching to that provider turn.
+- A worker claims a run with its expected attempt, persists a new TrueForge session **before** creating a turn, creates the turn with `stream:false`, persists the turn ID, then subscribes to that provider turn. When a same-turn cursor exists, it is passed as `afterSequenceNumber` for server-side replay.
+- Provider events are merged in memory and are not journaled to Convex. A numeric `turn.done` cursor is persisted atomically with the terminal result or durable pause before the BullMQ processor resolves.
+- A recoverable stream failure calls the guarded `releaseForRetry` transition, preserves the session and turn, and throws to invoke BullMQ's bounded retry. Because in-progress events are not checkpointed, a retry normally replays the turn from the beginning of TrueForge's server-side buffer.
 
 ## Environment
 
@@ -61,15 +61,15 @@ The CLI prints IDs and queue status only, not prompt content or connection setti
 1. Start `npm run dev:worker`.
 2. Enqueue a run with the command above.
 3. Close the browser (or do not open one); observe `job.active` then `run.completed`, `run.paused`, `run.cancelled`, or `run.failed` worker JSON logs.
-4. Inspect the corresponding Convex `agentRuns` and `runEvents` records.
+4. Inspect the corresponding Convex `agentRuns` record and final application projections.
 
 ### Worker-kill recovery
 
 1. Enqueue a deliberately longer-running run.
-2. Wait for `runId`, `sessionId`, `turnId`, and `providerSequence` to appear in Convex.
+2. Wait for `runId`, `sessionId`, and `turnId` to appear in Convex, but stop the worker before `turn.done`.
 3. Send `SIGTERM` to the worker process. The worker aborts the subscription, guarded-releases the run, and stops accepting work.
-4. Start another `npm run dev:worker`. The retry gets the latest run snapshot, claims only the matching attempt, and attaches via `subscribeToTurn(afterSequenceNumber)`.
-5. Verify no duplicate `runEvents` provider ID/sequence and one final run state.
+4. Start another `npm run dev:worker`. The retry gets the latest run snapshot, claims only the matching attempt, and re-subscribes to the persisted turn. With no terminal cursor yet, TrueForge replays the turn from the beginning of its server-side buffer.
+5. Verify one final application projection and that the numeric terminal cursor, when supplied by TrueForge, is stored with the final run state.
 
 ### Pause and resume
 
@@ -82,7 +82,7 @@ The CLI prints IDs and queue status only, not prompt content or connection setti
 
 - **Redis**: stop/revoke Redis briefly during an active stream. Confirm the job retries or becomes visibly failed after its bounded attempts; never leave a falsely completed Convex run.
 - **TrueForge**: stop the server or block access during an active stream. Confirm guarded release plus attach-on-retry after it returns.
-- **Convex**: block the worker's Convex access. Event/cursor checkpoint failure must prevent job acknowledgement; restoration allows retry from the prior cursor.
+- **Convex**: block the worker's Convex access. A lifecycle checkpoint failure must prevent job acknowledgement; restoration allows TrueForge server-side replay and another guarded terminal transition.
 - **MCP**: stop the MCP server before a tool call. The terminal provider result must become a durable pause/failure, not an unrecorded active run.
 
 ## Stable job-ID behavior

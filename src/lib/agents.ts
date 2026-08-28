@@ -11,6 +11,7 @@ import {
   withSpecialistRuntimeInstructions,
 } from "./fleet";
 import { tf } from "./tf";
+import { createRedisConnection } from "./queue/redis";
 
 const REQUIRED_MISSION_CONTROL_TOOLS = ["mark_done", "create_doc", "update_doc", "get_doc"] as const;
 const DEFAULT_MODEL = ROLES.writer.spec.model.name;
@@ -72,7 +73,7 @@ interface RosterEntry {
 const ROSTER_HEADER = `## Available agents
 This roster is the complete set of specialist agents you may assign. Use each id exactly as the role value in create_task. Never invent an agent name or assume a connector exists.`;
 
-export async function agentRosterBlock(): Promise<string> {
+async function buildAgentRosterBlock(): Promise<string> {
   let entries: RosterEntry[];
   try {
     entries = (await listAgentDefinitions())
@@ -108,6 +109,76 @@ export async function agentRosterBlock(): Promise<string> {
     return line;
   });
   return `${header}\n${lines.join("\n")}`;
+}
+
+// The roster is read for every newly-created or resumed orchestrator turn. Keep
+// it in Redis so the hot path does not call TrueForge `agents.list` (and the
+// matching Convex profile query) for every run. The short TTL is a safety net
+// for changes made outside the agent API; API writes explicitly invalidate it.
+const AGENT_ROSTER_CACHE_KEY = "mission-control:agent-roster:v1";
+const AGENT_ROSTER_CACHE_TTL_SECONDS = 60;
+
+type AgentRosterGlobals = {
+  agentRosterRedis?: ReturnType<typeof createRedisConnection>;
+  agentRosterInFlight?: Promise<string>;
+};
+
+const globalForAgentRoster = globalThis as unknown as AgentRosterGlobals;
+
+function agentRosterRedis(): ReturnType<typeof createRedisConnection> | null {
+  if (globalForAgentRoster.agentRosterRedis) return globalForAgentRoster.agentRosterRedis;
+  try {
+    const client = createRedisConnection("cache");
+    // A cache outage must never turn an otherwise healthy orchestrator into an
+    // unhandled Redis error. Cache reads/writes already fall back to the source.
+    client.on("error", () => undefined);
+    globalForAgentRoster.agentRosterRedis = client;
+    return client;
+  } catch {
+    return null;
+  }
+}
+
+export async function agentRosterBlock(): Promise<string> {
+  const cache = agentRosterRedis();
+  if (cache) {
+    try {
+      const cached = await cache.get(AGENT_ROSTER_CACHE_KEY);
+      if (cached) return cached;
+    } catch {
+      // Redis is an optimization only. Build directly from the source on miss.
+    }
+  }
+
+  // Avoid duplicate source calls from concurrent runs in this process. A
+  // separate worker process gets the same protection from the Redis value once
+  // the first request has populated it.
+  if (!globalForAgentRoster.agentRosterInFlight) {
+    globalForAgentRoster.agentRosterInFlight = buildAgentRosterBlock();
+  }
+  const pending = globalForAgentRoster.agentRosterInFlight;
+  try {
+    const roster = await pending;
+    if (cache) {
+      void cache.set(AGENT_ROSTER_CACHE_KEY, roster, "EX", AGENT_ROSTER_CACHE_TTL_SECONDS).catch(() => undefined);
+    }
+    return roster;
+  } finally {
+    if (globalForAgentRoster.agentRosterInFlight === pending) {
+      delete globalForAgentRoster.agentRosterInFlight;
+    }
+  }
+}
+
+/** Invalidate after agent create/update so the next orchestrator sees changes. */
+export async function invalidateAgentRosterCache(): Promise<void> {
+  const cache = agentRosterRedis();
+  if (!cache) return;
+  try {
+    await cache.del(AGENT_ROSTER_CACHE_KEY);
+  } catch {
+    // TTL expiry remains the fallback if Redis is unavailable.
+  }
 }
 
 async function presetRosterEntries(): Promise<RosterEntry[]> {
@@ -249,7 +320,9 @@ export async function createAgentDefinition(input: AgentWriteInput): Promise<Age
       enabled: input.enabled ?? true,
       isDefault: false,
     });
-    return toDefinition(remote, requireProfileMetadata(metadata));
+    const definition = toDefinition(remote, requireProfileMetadata(metadata));
+    await invalidateAgentRosterCache();
+    return definition;
   } catch (error) {
     await tf().agents.delete(remote.id).catch(() => undefined);
     throw error;
@@ -285,7 +358,9 @@ export async function updateAgentDefinition(
     enabled: input.enabled ?? currentMetadata?.enabled ?? true,
     isDefault: Boolean(role),
   });
-  return toDefinition(updated, requireProfileMetadata(metadata));
+  const definition = toDefinition(updated, requireProfileMetadata(metadata));
+  await invalidateAgentRosterCache();
+  return definition;
 }
 
 export function registryError(error: unknown): { status: number; message: string } {

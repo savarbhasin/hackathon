@@ -10,7 +10,6 @@ import type {
   AgentRunStore,
   AssistantDeltaStream,
   PendingAction,
-  ProviderEventCheckpoint,
   ScheduleReconciliationSnapshot,
 } from "./types";
 
@@ -125,56 +124,23 @@ export class ConvexAgentRunStore implements AgentRunStore {
     return await this.client.mutation(api.agentRuns.checkpointSessionTurn, { ...input, runId: runId(input.runId) });
   }
 
-  async checkpointProviderCursor(input: { runId: string; attempt: number; workerId: string; turnId: string; providerSequence: number }): Promise<boolean> {
-    return await this.client.mutation(api.agentRuns.checkpointProviderCursor, { ...input, runId: runId(input.runId) });
-  }
-
-  async appendProviderEvent(input: ProviderEventCheckpoint): Promise<{ inserted: boolean; id: string }> {
-    return await this.client.mutation(api.agentRuns.appendProviderEvent, { ...input, runId: runId(input.runId) });
-  }
-
-  async appendProviderEventAndCheckpoint(input: ProviderEventCheckpoint & { providerSequence: number }): Promise<{ inserted: boolean; id: string | null; checkpointed: boolean } | null> {
-    const value = await this.client.mutation(anyApi.agentRuns.appendProviderEventAndCheckpoint, { ...input, runId: runId(input.runId) });
-    if (!value || typeof value !== "object") return null;
-    const row = value as { inserted?: unknown; id?: unknown; checkpointed?: unknown };
-    return {
-      inserted: row.inserted === true,
-      id: typeof row.id === "string" ? row.id : null,
-      checkpointed: row.checkpointed === true,
-    };
-  }
-
-  async getRecoveryModelEvents(runIdValue: string, throughSequence: number): Promise<Array<{ sequence: number; type: string; payload: Record<string, unknown> }>> {
-    const value = await this.client.query(anyApi.agentRuns.recoveryModelEvents, {
-      runId: runId(runIdValue),
-      throughSequence,
-    });
-    if (!Array.isArray(value)) return [];
-    return value.flatMap((item) => {
-      if (!item || typeof item !== "object") return [];
-      const row = item as { sequence?: unknown; type?: unknown; payload?: unknown };
-      if (typeof row.sequence !== "number" || typeof row.type !== "string" || !row.payload || typeof row.payload !== "object" || Array.isArray(row.payload)) return [];
-      return [{ sequence: row.sequence, type: row.type, payload: row.payload as Record<string, unknown> }];
-    });
-  }
-
-  async waitForUser(input: { runId: string; attempt: number; workerId: string; pendingActions: PendingAction[]; pendingActionSelector?: string }): Promise<boolean> {
+  async waitForUser(input: { runId: string; attempt: number; workerId: string; turnId: string; pendingActions: PendingAction[]; pendingActionSelector?: string; providerSequence?: number }): Promise<boolean> {
     return await this.client.mutation(api.agentRuns.waitForUser, { ...input, runId: runId(input.runId) });
   }
 
-  async waitForApproval(input: { runId: string; attempt: number; workerId: string; pendingActions: PendingAction[]; pendingActionSelector?: string }): Promise<boolean> {
+  async waitForApproval(input: { runId: string; attempt: number; workerId: string; turnId: string; pendingActions: PendingAction[]; pendingActionSelector?: string; providerSequence?: number }): Promise<boolean> {
     return await this.client.mutation(api.agentRuns.waitForApproval, { ...input, runId: runId(input.runId) });
   }
 
-  async complete(input: { runId: string; attempt: number; workerId: string; turnId: string; output: Record<string, unknown> | null }): Promise<boolean> {
+  async complete(input: { runId: string; attempt: number; workerId: string; turnId: string; output: Record<string, unknown> | null; providerSequence?: number }): Promise<boolean> {
     return await this.client.mutation(api.agentRuns.complete, { ...input, runId: runId(input.runId) });
   }
 
-  async fail(input: { runId: string; attempt: number; workerId: string; turnId?: string; errorCode: string; errorMessage: string }): Promise<boolean> {
+  async fail(input: { runId: string; attempt: number; workerId: string; turnId?: string; errorCode: string; errorMessage: string; providerSequence?: number }): Promise<boolean> {
     return await this.client.mutation(api.agentRuns.fail, { ...input, runId: runId(input.runId) });
   }
 
-  async cancel(input: { runId: string; attempt: number; workerId: string; turnId?: string }): Promise<boolean> {
+  async cancel(input: { runId: string; attempt: number; workerId: string; turnId?: string; providerSequence?: number }): Promise<boolean> {
     return await this.client.mutation(api.agentRuns.cancel, { ...input, runId: runId(input.runId) });
   }
 
@@ -366,6 +332,8 @@ export class ConvexAgentRunStore implements AgentRunStore {
   async finalizeSpecialist(input: {
     taskId: string;
     runId: string;
+    attempt: number;
+    workerId: string;
     status: "completed" | "waiting_for_approval" | "waiting_for_user" | "failed" | "cancelled";
     sessionId?: string;
     turnId?: string;
@@ -374,11 +342,14 @@ export class ConvexAgentRunStore implements AgentRunStore {
     pendingActionSelector?: string;
     errorCode?: string;
     errorMessage?: string;
+    providerSequence?: number;
     operationKey: string;
   }): Promise<unknown> {
     return await this.client.mutation(anyApi.missions.finalizeSpecialist, {
       taskId: runId(input.taskId),
       runId: runId(input.runId),
+      attempt: input.attempt,
+      workerId: input.workerId,
       status: input.status,
       operationKey: input.operationKey,
       ...(input.sessionId !== undefined ? { sessionId: input.sessionId } : {}),
@@ -388,6 +359,7 @@ export class ConvexAgentRunStore implements AgentRunStore {
       ...(input.pendingActionSelector !== undefined ? { pendingActionSelector: input.pendingActionSelector } : {}),
       ...(input.errorCode !== undefined ? { errorCode: input.errorCode } : {}),
       ...(input.errorMessage !== undefined ? { errorMessage: input.errorMessage } : {}),
+      ...(input.providerSequence !== undefined ? { providerSequence: input.providerSequence } : {}),
     });
   }
 

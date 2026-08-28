@@ -111,18 +111,6 @@ export type AssistantDeltaStream = {
   fail(reason: string): Promise<void>;
 };
 
-export type ProviderEventCheckpoint = {
-  runId: string;
-  attempt: number;
-  workerId: string;
-  turnId: string;
-  sequence: number;
-  providerEventId?: string;
-  providerSequence?: number;
-  type: string;
-  payload: Record<string, unknown>;
-};
-
 /** Persisted state adapter. Its implementation calls `api.agentRuns.*`. */
 export interface AgentRunStore {
   get(runId: string): Promise<AgentRunRecord | null>;
@@ -147,15 +135,11 @@ export interface AgentRunStore {
     turnId: string;
     expectedTurnId?: string;
   }): Promise<boolean>;
-  checkpointProviderCursor(input: { runId: string; attempt: number; workerId: string; turnId: string; providerSequence: number }): Promise<boolean>;
-  appendProviderEvent(input: ProviderEventCheckpoint): Promise<{ inserted: boolean; id: string }>;
-  appendProviderEventAndCheckpoint?(input: ProviderEventCheckpoint & { providerSequence: number }): Promise<{ inserted: boolean; id: string | null; checkpointed: boolean } | null>;
-  getRecoveryModelEvents?(runId: string, throughSequence: number): Promise<Array<{ sequence: number; type: string; payload: Record<string, unknown> }>>;
-  waitForUser(input: { runId: string; attempt: number; workerId: string; pendingActions: PendingAction[]; pendingActionSelector?: string }): Promise<boolean>;
-  waitForApproval(input: { runId: string; attempt: number; workerId: string; pendingActions: PendingAction[]; pendingActionSelector?: string }): Promise<boolean>;
-  complete(input: { runId: string; attempt: number; workerId: string; turnId: string; output: Record<string, unknown> | null }): Promise<boolean>;
-  fail(input: { runId: string; attempt: number; workerId: string; turnId?: string; errorCode: string; errorMessage: string }): Promise<boolean>;
-  cancel(input: { runId: string; attempt: number; workerId: string; turnId?: string }): Promise<boolean>;
+  waitForUser(input: { runId: string; attempt: number; workerId: string; turnId: string; pendingActions: PendingAction[]; pendingActionSelector?: string; providerSequence?: number }): Promise<boolean>;
+  waitForApproval(input: { runId: string; attempt: number; workerId: string; turnId: string; pendingActions: PendingAction[]; pendingActionSelector?: string; providerSequence?: number }): Promise<boolean>;
+  complete(input: { runId: string; attempt: number; workerId: string; turnId: string; output: Record<string, unknown> | null; providerSequence?: number }): Promise<boolean>;
+  fail(input: { runId: string; attempt: number; workerId: string; turnId?: string; errorCode: string; errorMessage: string; providerSequence?: number }): Promise<boolean>;
+  cancel(input: { runId: string; attempt: number; workerId: string; turnId?: string; providerSequence?: number }): Promise<boolean>;
   queueResume(input: {
     runId: string;
     pendingAction?: PendingAction[];
@@ -200,6 +184,8 @@ export interface AgentRunStore {
   finalizeSpecialist(input: {
     taskId: string;
     runId: string;
+    attempt: number;
+    workerId: string;
     status: "completed" | "waiting_for_approval" | "waiting_for_user" | "failed" | "cancelled";
     sessionId?: string;
     turnId?: string;
@@ -208,6 +194,7 @@ export interface AgentRunStore {
     pendingActionSelector?: string;
     errorCode?: string;
     errorMessage?: string;
+    providerSequence?: number;
     operationKey: string;
   }): Promise<unknown>;
   readySuccessors(taskId: string): Promise<unknown>;

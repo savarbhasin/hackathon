@@ -73,7 +73,7 @@ function runState(run: any, includePending = false): Record<string, unknown> {
   };
 }
 
-/** Narrow selected-conversation run state; no prompts, outputs, or runEvents. */
+/** Narrow selected-conversation run state; no prompts or outputs. */
 export const conversationRunState = query({
   args: { conversationId: v.id("conversations") },
   returns: v.any(),
@@ -232,87 +232,14 @@ export const checkpointSessionTurn = mutation({
   handler: async (ctx, args) => {
     const run = await guardedRun(ctx, args);
     if (!run || (run.status !== "connecting" && run.status !== "running") || (args.expectedTurnId !== undefined && run.turnId !== args.expectedTurnId)) return false;
-    await ctx.db.patch(args.runId, { sessionId: args.sessionId, turnId: args.turnId, status: "running", updatedAt: Date.now() });
+    const changedTurn = run.turnId !== args.turnId;
+    await ctx.db.patch(args.runId, { sessionId: args.sessionId, turnId: args.turnId, ...(changedTurn ? { providerSequence: undefined } : {}), status: "running", updatedAt: Date.now() });
     return true;
-  },
-});
-
-export const checkpointProviderCursor = mutation({
-  args: { ...guardArgs, turnId: v.string(), providerSequence: v.number() },
-  returns: v.boolean(),
-  handler: async (ctx, args) => {
-    const run = await guardedRun(ctx, args);
-    if (!run || run.turnId !== args.turnId || (run.providerSequence !== undefined && args.providerSequence < run.providerSequence)) return false;
-    await ctx.db.patch(args.runId, { providerSequence: args.providerSequence, updatedAt: Date.now() });
-    return true;
-  },
-});
-
-/**
- * Bounded worker recovery projection. Only model message events are needed
- * to rebuild the SDK merge map; the caller supplies its last durable cursor.
- */
-export const recoveryModelEvents = query({
-  args: { runId: v.id("agentRuns"), throughSequence: v.number() },
-  returns: v.any(),
-  handler: async (ctx, args) => {
-    // The sequence range is bounded to this run's durable cursor. Collecting
-    // the range (rather than taking an arbitrary prefix) preserves exact base
-    // and delta replay even when tool events dominate the journal.
-    const events = await ctx.db
-      .query("runEvents")
-      .withIndex("by_run_sequence", (q: any) => q.eq("runId", args.runId).lte("sequence", args.throughSequence))
-      .order("asc")
-      .collect();
-    return events
-      .filter((event: any) => event.type === "model.message" || event.type === "model.message.delta")
-      .map((event: any) => ({ sequence: event.sequence, type: event.type, payload: event.payload }));
-  },
-});
-
-export const appendProviderEvent = mutation({
-  args: { ...guardArgs, turnId: v.string(), sequence: v.number(), providerEventId: v.optional(v.string()), providerSequence: v.optional(v.number()), type: v.string(), payload: v.any() },
-  returns: v.object({ inserted: v.boolean(), id: v.id("runEvents") }),
-  handler: async (ctx, args) => {
-    const run = await guardedRun(ctx, args);
-    if (!run || run.turnId !== args.turnId) throw new Error("run ownership or turn mismatch");
-    const duplicate = args.providerEventId
-      ? await ctx.db.query("runEvents").withIndex("by_run_providerEventId", (q: any) => q.eq("runId", args.runId).eq("providerEventId", args.providerEventId)).first()
-      : await ctx.db.query("runEvents").withIndex("by_run_sequence", (q: any) => q.eq("runId", args.runId).eq("sequence", args.sequence)).first();
-    if (duplicate) return { inserted: false, id: duplicate._id };
-    const id = await ctx.db.insert("runEvents", { runId: args.runId, sequence: args.sequence, providerEventId: args.providerEventId, providerSequence: args.providerSequence, type: args.type, payload: args.payload, createdAt: Date.now() });
-    return { inserted: true, id };
-  },
-});
-
-/**
- * Atomically journal a provider event and advance its cursor. The orchestrator
- * uses this to avoid two serialized Convex round-trips for every stream chunk;
- * keeping both writes in one transaction preserves the append-before-cursor
- * recovery invariant.
- */
-export const appendProviderEventAndCheckpoint = mutation({
-  args: { ...guardArgs, turnId: v.string(), sequence: v.number(), providerEventId: v.optional(v.string()), providerSequence: v.number(), type: v.string(), payload: v.any() },
-  returns: v.any(),
-  handler: async (ctx, args) => {
-    const run = await guardedRun(ctx, args);
-    if (!run || run.turnId !== args.turnId) return null;
-    if (run.providerSequence !== undefined && args.providerSequence < run.providerSequence) {
-      return { inserted: false, checkpointed: false, id: null };
-    }
-    const duplicate = args.providerEventId
-      ? await ctx.db.query("runEvents").withIndex("by_run_providerEventId", (q: any) => q.eq("runId", args.runId).eq("providerEventId", args.providerEventId)).first()
-      : await ctx.db.query("runEvents").withIndex("by_run_sequence", (q: any) => q.eq("runId", args.runId).eq("sequence", args.sequence)).first();
-    const id = duplicate
-      ? duplicate._id
-      : await ctx.db.insert("runEvents", { runId: args.runId, sequence: args.sequence, providerEventId: args.providerEventId, providerSequence: args.providerSequence, type: args.type, payload: args.payload, createdAt: Date.now() });
-    await ctx.db.patch(args.runId, { providerSequence: args.providerSequence, updatedAt: Date.now() });
-    return { inserted: !duplicate, checkpointed: true, id };
   },
 });
 
 export const waitForUser = mutation({
-  args: { ...guardArgs, pendingActions: v.any(), pendingActionSelector: v.optional(v.string()) },
+  args: { ...guardArgs, turnId: v.string(), pendingActions: v.any(), pendingActionSelector: v.optional(v.string()), providerSequence: v.optional(v.number()) },
   returns: v.boolean(),
   handler: async (ctx, args) => transition(ctx, args, "waiting_for_user", {
     pendingActions: args.pendingActions,
@@ -320,7 +247,7 @@ export const waitForUser = mutation({
   }),
 });
 export const waitForApproval = mutation({
-  args: { ...guardArgs, pendingActions: v.any(), pendingActionSelector: v.optional(v.string()) },
+  args: { ...guardArgs, turnId: v.string(), pendingActions: v.any(), pendingActionSelector: v.optional(v.string()), providerSequence: v.optional(v.number()) },
   returns: v.boolean(),
   handler: async (ctx, args) => transition(ctx, args, "waiting_for_approval", {
     pendingActions: args.pendingActions,
@@ -382,24 +309,25 @@ async function projectScheduleOutcome(ctx: any, run: any, status: string): Promi
 
 async function transition(ctx: any, args: any, status: string, extra: any) {
   const run = await guardedRun(ctx, args);
-  if (!run) return false;
-  await ctx.db.patch(args.runId, { status, ...extra, updatedAt: Date.now() });
+  if (!run || run.turnId !== args.turnId) return false;
+  if (args.providerSequence !== undefined && run.providerSequence !== undefined && args.providerSequence < run.providerSequence) return false;
+  await ctx.db.patch(args.runId, { status, ...extra, ...(args.providerSequence !== undefined ? { providerSequence: args.providerSequence } : {}), updatedAt: Date.now() });
   await projectScheduleOutcome(ctx, { ...run, status, ...extra }, status);
   return true;
 }
 
 export const complete = mutation({
-  args: { ...guardArgs, turnId: v.string(), output: v.any() },
+  args: { ...guardArgs, turnId: v.string(), output: v.any(), providerSequence: v.optional(v.number()) },
   returns: v.boolean(),
   handler: async (ctx, args) => finish(ctx, args, "completed", { output: args.output, finishedAt: Date.now() }),
 });
 export const fail = mutation({
-  args: { ...guardArgs, turnId: v.optional(v.string()), errorCode: v.string(), errorMessage: v.string() },
+  args: { ...guardArgs, turnId: v.optional(v.string()), errorCode: v.string(), errorMessage: v.string(), providerSequence: v.optional(v.number()) },
   returns: v.boolean(),
   handler: async (ctx, args) => finish(ctx, args, "failed", { errorCode: args.errorCode, errorMessage: args.errorMessage, finishedAt: Date.now() }),
 });
 export const cancel = mutation({
-  args: { ...guardArgs, turnId: v.optional(v.string()) },
+  args: { ...guardArgs, turnId: v.optional(v.string()), providerSequence: v.optional(v.number()) },
   returns: v.boolean(),
   handler: async (ctx, args) => finish(ctx, args, "cancelled", { finishedAt: Date.now() }),
 });
@@ -407,7 +335,8 @@ export const cancel = mutation({
 async function finish(ctx: any, args: any, status: string, extra: any) {
   const run = await guardedRun(ctx, args);
   if (!run || (args.turnId !== undefined && run.turnId !== args.turnId)) return false;
-  await ctx.db.patch(args.runId, { status, ...extra, updatedAt: Date.now() });
+  if (args.providerSequence !== undefined && (args.turnId === undefined || run.providerSequence !== undefined && args.providerSequence < run.providerSequence)) return false;
+  await ctx.db.patch(args.runId, { status, ...extra, ...(args.providerSequence !== undefined ? { providerSequence: args.providerSequence } : {}), updatedAt: Date.now() });
   await projectScheduleOutcome(ctx, { ...run, status, ...extra }, status);
   return true;
 }

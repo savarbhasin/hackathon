@@ -130,27 +130,6 @@ function toolsFromMessages(messages: Map<string, RecordValue>): string[] {
   return [...names];
 }
 
-async function hydratePersistedMessages(
-  store: AgentRunStore,
-  runId: string,
-  throughSequence: number,
-  messages: Map<string, RecordValue>,
-): Promise<void> {
-  // Rebuild from the worker's durable event journal, not an unbounded provider
-  // history. This is exactly the prefix already checkpointed for this attempt.
-  const events = await store.getRecoveryModelEvents?.(runId, throughSequence);
-  if (!events) return;
-  for (const persisted of events) {
-    const event = persisted.payload;
-    if (persisted.type === "model.message" && typeof event.id === "string") {
-      messages.set(event.id, event);
-    } else if (persisted.type === "model.message.delta" && typeof event.id === "string") {
-      const base = messages.get(event.id);
-      if (base) mergeEventDelta(base as never, event as never);
-    }
-  }
-}
-
 function stableSelector(runId: string, actionIndex: number, toolCallId: string, sourceEventId?: string): string {
   const suffix = sourceEventId ? `${sourceEventId}_${toolCallId}` : toolCallId;
   return `pause_${runId}_${actionIndex}_${suffix}`.slice(0, 240);
@@ -357,9 +336,6 @@ export async function processDurableOrchestratorRun(store: AgentRunStore, run: A
         tools = existing.tools;
       }
     }
-    if (run.providerSequence !== undefined && !hasResume) {
-      await hydratePersistedMessages(store, run._id, run.providerSequence, messages);
-    }
     if (run.conversationId) {
       deltaStream = await store.createAssistantDeltaStream({
         conversationId: run.conversationId,
@@ -372,15 +348,14 @@ export async function processDurableOrchestratorRun(store: AgentRunStore, run: A
       if (projectedText) await deltaStream.addText(projectedText);
     }
 
+    // Provider events are replayable by TrueForge. Keep the merge state local
+    // and persist only the terminal cursor with the lifecycle outcome.
     const stream = await client.sessions.subscribeToTurn(sessionId, turnId, hasResume ? {} : (run.providerSequence === undefined ? {} : { afterSequenceNumber: run.providerSequence }), { abortSignal: context.signal });
-    let fallbackSequence = (run.providerSequence ?? 0) + 1;
     for await (const metadata of stream.withMetadata()) {
       if (context.signal.aborted) throw new RecoverableRunError("worker_shutdown", "Worker shutdown interrupted provider subscription");
       const event = eventPayload(metadata.data);
       const type = typeof event.type === "string" ? event.type : "unknown";
       const providerSequence = numberCursor(metadata.id);
-      const sequence = providerSequence ?? fallbackSequence++;
-      const providerEventId = typeof event.id === "string" && !isEventDelta(metadata.data as never) ? event.id : undefined;
       if (type === "model.message") {
         if (typeof event.id === "string") messages.set(event.id, event);
       } else if (isEventDelta(metadata.data as never)) {
@@ -390,9 +365,8 @@ export async function processDurableOrchestratorRun(store: AgentRunStore, run: A
         }
         if (event.threadId === "main" && typeof event.content === "string") fallbackDelta += event.content;
       }
-      // Publish through Convex Agent's official delta component before the
-      // worker's event journal round-trip. The guarded bridge rejects stale
-      // ownership while the provider journal remains recovery authority.
+      // Publish through Convex Agent's official delta component. This is the
+      // live UI projection; run lifecycle state remains the recovery authority.
       const previousProjectedText = projectedText;
       const candidateText = normalizedText(messages, fallbackDelta);
       streamDelta = mergeStreamingCandidate(projectionBaseline, streamDelta, candidateText);
@@ -403,20 +377,6 @@ export async function processDurableOrchestratorRun(store: AgentRunStore, run: A
         await deltaStream?.addText(projectedText.slice(previousProjectedText.length));
       }
 
-      const providerEvent = { runId: run._id, attempt, workerId: context.workerId, turnId, sequence, providerEventId, providerSequence: providerSequence ?? undefined, type, payload: event };
-      if (providerSequence !== null && store.appendProviderEventAndCheckpoint) {
-        const checkpoint = await store.appendProviderEventAndCheckpoint({ ...providerEvent, providerSequence });
-        if (!checkpoint?.checkpointed) {
-          await deltaStream?.fail("run ownership lost").catch(() => undefined);
-          return;
-        }
-      } else {
-        await store.appendProviderEvent(providerEvent);
-        if (providerSequence !== null && !await store.checkpointProviderCursor({ runId: run._id, attempt, workerId: context.workerId, turnId, providerSequence })) {
-          await deltaStream?.fail("run ownership lost").catch(() => undefined);
-          return;
-        }
-      }
       if (type !== "turn.done") continue;
 
       const state = record(event.state) ?? {};
@@ -438,21 +398,21 @@ export async function processDurableOrchestratorRun(store: AgentRunStore, run: A
           await project(store, run, mergedText, tools, waitingStatus, actions, { attempt, workerId: context.workerId });
           const pendingActionSelector = actions.length === 1 ? actions[0].selector : undefined;
           const paused = actions.some((action) => action.type === "tool.approval_required")
-            ? await store.waitForApproval({ runId: run._id, attempt, workerId: context.workerId, pendingActions: actions, pendingActionSelector })
-            : await store.waitForUser({ runId: run._id, attempt, workerId: context.workerId, pendingActions: actions, pendingActionSelector });
+            ? await store.waitForApproval({ runId: run._id, attempt, workerId: context.workerId, turnId, pendingActions: actions, pendingActionSelector, ...(providerSequence !== null ? { providerSequence } : {}) })
+            : await store.waitForUser({ runId: run._id, attempt, workerId: context.workerId, turnId, pendingActions: actions, pendingActionSelector, ...(providerSequence !== null ? { providerSequence } : {}) });
           if (!paused) return;
           await deltaStream?.finish();
           workerLog("run.orchestrator_paused", { runId: run._id, attempt, turnId, actionCount: actions.length });
           return;
         }
         await project(store, run, mergedText, tools, completionTokenStatus(metrics), [], { attempt, workerId: context.workerId });
-        if (!await store.complete({ runId: run._id, attempt, workerId: context.workerId, turnId, output: { content: mergedText, status: stateStatus, tools, ...(metrics ? { metrics } : {}) } })) return;
+        if (!await store.complete({ runId: run._id, attempt, workerId: context.workerId, turnId, output: { content: mergedText, status: stateStatus, tools, ...(metrics ? { metrics } : {}) }, ...(providerSequence !== null ? { providerSequence } : {}) })) return;
         await deltaStream?.finish();
         return;
       }
       if (stateStatus === "cancelled") {
         await project(store, run, mergedText, tools, "cancelled", [], { attempt, workerId: context.workerId });
-        if (!await store.cancel({ runId: run._id, attempt, workerId: context.workerId, turnId })) return;
+        if (!await store.cancel({ runId: run._id, attempt, workerId: context.workerId, turnId, ...(providerSequence !== null ? { providerSequence } : {}) })) return;
         await deltaStream?.finish();
         return;
       }
@@ -460,7 +420,7 @@ export async function processDurableOrchestratorRun(store: AgentRunStore, run: A
       if (recoverableTerminal(message)) throw new RecoverableRunError("trueforge_terminal_transient", message);
       mergedText = mergedText || message;
       await project(store, run, mergedText, tools, "failed", [], { attempt, workerId: context.workerId });
-      if (await store.fail({ runId: run._id, attempt, workerId: context.workerId, turnId, errorCode: "trueforge_terminal", errorMessage: message })) {
+      if (await store.fail({ runId: run._id, attempt, workerId: context.workerId, turnId, errorCode: "trueforge_terminal", errorMessage: message, ...(providerSequence !== null ? { providerSequence } : {}) })) {
         await deltaStream?.finish();
       }
       return;
@@ -489,7 +449,7 @@ export async function processDurableOrchestratorRun(store: AgentRunStore, run: A
       // Without the authoritative lifecycle snapshot, neither a retrying
       // projection nor a guarded transition is safe after an ambiguous
       // terminal mutation. Abort this attempt's component stream and let
-      // redelivery reconcile from the provider journal.
+      // redelivery replays from TrueForge's server-side turn buffer.
       await deltaStream?.fail("lifecycle state unavailable").catch(() => undefined);
       throw readFailure;
     }

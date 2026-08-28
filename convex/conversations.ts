@@ -90,7 +90,7 @@ export const list = query({
 
 /**
  * One bounded subscription for the conversation rail. It deliberately reads
- * no message content or runEvents and returns only the fields needed to draw
+ * no message content and returns only the fields needed to draw
  * titles, activity, counts, and run indicators.
  */
 export const listSummaries = query({

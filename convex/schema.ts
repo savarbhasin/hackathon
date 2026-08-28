@@ -211,18 +211,6 @@ export default defineSchema({
     .index("by_status_updatedAt", ["status", "updatedAt"])
     .index("by_session_turn", ["sessionId", "turnId"]),
 
-  runEvents: defineTable({
-    runId: v.id("agentRuns"),
-    sequence: v.number(),
-    providerEventId: v.optional(v.string()),
-    providerSequence: v.optional(v.number()),
-    type: v.string(),
-    payload: v.any(),
-    createdAt: v.number(),
-  })
-    .index("by_run_sequence", ["runId", "sequence"])
-    .index("by_run_providerEventId", ["runId", "providerEventId"]),
-
   // Ownership sidecar for official Convex Agent component streams. Component
   // IDs cannot be declared as app-table IDs, so they are stored as strings.
   agentStreams: defineTable({
