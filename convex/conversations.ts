@@ -90,7 +90,7 @@ export const list = query({
 
 /**
  * One bounded subscription for the conversation rail. It deliberately reads
- * no message content or runEvents and returns only the fields needed to draw
+ * no message content and returns only the fields needed to draw
  * titles, activity, counts, and run indicators.
  */
 export const listSummaries = query({
@@ -146,6 +146,7 @@ export const conversationState = query({
       _creationTime: conversation._creationTime,
       title: conversation.title,
       sessionId: conversation.sessionId,
+      agentThreadId: conversation.agentThreadId,
       createdAt: conversation.createdAt,
       updatedAt: conversation.updatedAt,
       summaryUpdatedAt: conversation.summaryUpdatedAt,
@@ -488,6 +489,17 @@ export const listMessages = query({
       .take(cap(args.limit, 500, 2000)),
 });
 
+/** Worker recovery lookup for the one assistant row projected for a run. */
+export const getMessageByOperationKey = query({
+  args: { conversationId, operationKey: v.string() },
+  returns: v.any(),
+  handler: async (ctx, args) =>
+    await ctx.db
+      .query("chatMessages")
+      .withIndex("by_conversation_operationKey", (q) => q.eq("conversationId", args.conversationId).eq("operationKey", args.operationKey))
+      .first(),
+});
+
 const messageFields = {
   role: v.string(),
   content: v.string(),
@@ -561,9 +573,19 @@ export const upsertMessage = mutation({
     conversationId,
     operationKey: v.string(),
     ...messageFields,
+    // Worker projections optionally carry an optimistic ownership guard.
+    // General callers may omit both fields for backwards compatibility.
+    attempt: v.optional(v.number()),
+    workerId: v.optional(v.string()),
   },
   returns: v.any(),
   handler: async (ctx, args) => {
+    if ((args.attempt === undefined) !== (args.workerId === undefined)) return null;
+    if (args.attempt !== undefined && args.workerId !== undefined) {
+      if (!args.runId) return null;
+      const run = await ctx.db.get(args.runId);
+      if (!run || run.attempt !== args.attempt || run.claimedBy !== args.workerId) return null;
+    }
     const existing = await ctx.db
       .query("chatMessages")
       .withIndex("by_conversation_operationKey", (q) => q.eq("conversationId", args.conversationId).eq("operationKey", args.operationKey))

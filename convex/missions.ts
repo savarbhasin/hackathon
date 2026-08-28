@@ -557,36 +557,40 @@ export const resumeSpecialist = mutation({
 });
 
 export const finalizeSpecialist = mutation({
-  args: { taskId, runId, status: v.union(v.literal("completed"), v.literal("waiting_for_approval"), v.literal("waiting_for_user"), v.literal("failed"), v.literal("cancelled")), sessionId: v.optional(v.string()), turnId: v.optional(v.string()), output: v.optional(v.any()), pendingActions: v.optional(v.any()), pendingActionSelector: v.optional(v.string()), errorCode: v.optional(v.string()), errorMessage: v.optional(v.string()), operationKey: v.optional(v.string()) }, returns: v.any(),
+  args: { taskId, runId, attempt: v.number(), workerId: v.string(), status: v.union(v.literal("completed"), v.literal("waiting_for_approval"), v.literal("waiting_for_user"), v.literal("failed"), v.literal("cancelled")), sessionId: v.optional(v.string()), turnId: v.optional(v.string()), providerSequence: v.optional(v.number()), output: v.optional(v.any()), pendingActions: v.optional(v.any()), pendingActionSelector: v.optional(v.string()), errorCode: v.optional(v.string()), errorMessage: v.optional(v.string()), operationKey: v.optional(v.string()) }, returns: v.any(),
   handler: async (ctx, args) => {
     const task = await ctx.db.get(args.taskId); const run = await ctx.db.get(args.runId);
     if (!task || !run) return result("not_found");
+    if (run.attempt !== args.attempt || run.claimedBy !== args.workerId) return result("conflict", { reason: "run_ownership" });
     if (!taskLinkedToRun(task, args.runId) || run.taskId !== args.taskId) return result("conflict", { reason: "run_not_linked" });
     if (args.sessionId !== undefined && ((task.sessionId !== undefined && task.sessionId !== args.sessionId) || (run.sessionId !== undefined && run.sessionId !== args.sessionId))) return result("conflict", { reason: "session_ownership" });
     if (args.turnId !== undefined && ((task.turnId !== undefined && task.turnId !== args.turnId) || (run.turnId !== undefined && run.turnId !== args.turnId))) return result("conflict", { reason: "turn_ownership" });
+    if (args.providerSequence !== undefined && (args.turnId === undefined || run.turnId !== args.turnId)) return result("conflict", { reason: "provider_cursor_without_owned_turn" });
+    if (args.providerSequence !== undefined && run.providerSequence !== undefined && args.providerSequence < run.providerSequence) return result("conflict", { reason: "provider_cursor_regression" });
+    const runCursor = args.providerSequence !== undefined ? { providerSequence: args.providerSequence } : {};
     const op = args.operationKey ?? `finalize:${args.runId}:${args.status}`;
     const now = Date.now();
     if (args.status === "completed") {
       const summary = task.output != null && String(task.output).trim() ? task.output : args.output;
       const event = await insertTaskEvent(ctx, args.taskId, "activity.completed", { summary: summary ?? null, runId: args.runId }, op);
-      await ctx.db.patch(args.runId, { status: "completed", output: summary, finishedAt: now, updatedAt: now, claimedBy: undefined });
+      await ctx.db.patch(args.runId, { status: "completed", output: summary, ...runCursor, finishedAt: now, updatedAt: now, claimedBy: undefined });
       await ctx.db.patch(args.taskId, { column: "settled", output: summary, sessionId: undefined, turnId: undefined, pendingActions: undefined, error: undefined, activeRunId: undefined, updatedAt: now });
       return result(event.inserted ? "created" : "idempotent", { task: await ctx.db.get(args.taskId), run: await ctx.db.get(args.runId) });
     }
     if (args.status === "cancelled") {
-      await ctx.db.patch(args.runId, { status: "cancelled", finishedAt: now, updatedAt: now, claimedBy: undefined });
+      await ctx.db.patch(args.runId, { status: "cancelled", ...runCursor, finishedAt: now, updatedAt: now, claimedBy: undefined });
       await ctx.db.patch(args.taskId, { column: "backlog", sessionId: undefined, turnId: undefined, pendingActions: undefined, handoff: undefined, output: undefined, error: args.errorMessage ?? "cancelled", specialistRunId: undefined, activeRunId: undefined, updatedAt: now });
       const event = await insertTaskEvent(ctx, args.taskId, "activity.cancelled", { reason: args.errorMessage ?? null, runId: args.runId }, op);
       return result(event.inserted ? "created" : "idempotent", { task: await ctx.db.get(args.taskId), run: await ctx.db.get(args.runId) });
     }
     if (args.status === "failed") {
-      await ctx.db.patch(args.runId, { status: "failed", errorCode: args.errorCode, errorMessage: args.errorMessage, ...(args.sessionId !== undefined ? { sessionId: args.sessionId } : {}), ...(args.turnId !== undefined ? { turnId: args.turnId } : {}), finishedAt: now, updatedAt: now, claimedBy: undefined });
+      await ctx.db.patch(args.runId, { status: "failed", errorCode: args.errorCode, errorMessage: args.errorMessage, ...runCursor, ...(args.sessionId !== undefined ? { sessionId: args.sessionId } : {}), ...(args.turnId !== undefined ? { turnId: args.turnId } : {}), finishedAt: now, updatedAt: now, claimedBy: undefined });
       await ctx.db.patch(args.taskId, { column: "blocked", sessionId: args.sessionId ?? run.sessionId, turnId: args.turnId ?? run.turnId, pendingActions: undefined, activeRunId: undefined, error: args.errorMessage ?? args.errorCode ?? "run_failed", updatedAt: now });
       const event = await insertTaskEvent(ctx, args.taskId, "activity.failed", { runId: args.runId, errorCode: args.errorCode, message: args.errorMessage }, op);
       return result(event.inserted ? "created" : "idempotent", { task: await ctx.db.get(args.taskId), run: await ctx.db.get(args.runId), event: event.event });
     }
     const waiting = args.status === "waiting_for_approval";
-    await ctx.db.patch(args.runId, { status: waiting ? "waiting_for_approval" : "waiting_for_user", pendingActions: args.pendingActions, pendingActionSelector: args.pendingActionSelector, ...(args.sessionId !== undefined ? { sessionId: args.sessionId } : {}), ...(args.turnId !== undefined ? { turnId: args.turnId } : {}), updatedAt: now, claimedBy: undefined });
+    await ctx.db.patch(args.runId, { status: waiting ? "waiting_for_approval" : "waiting_for_user", pendingActions: args.pendingActions, pendingActionSelector: args.pendingActionSelector, ...runCursor, ...(args.sessionId !== undefined ? { sessionId: args.sessionId } : {}), ...(args.turnId !== undefined ? { turnId: args.turnId } : {}), updatedAt: now, claimedBy: undefined });
     await ctx.db.patch(args.taskId, { column: waiting ? "approval" : "blocked", sessionId: args.sessionId ?? run.sessionId, turnId: args.turnId ?? run.turnId, activeRunId: args.runId, pendingActions: args.pendingActions, error: args.errorMessage, updatedAt: now });
     const event = await insertTaskEvent(ctx, args.taskId, waiting ? "activity.waiting_approval" : "activity.waiting_response", { runId: args.runId, pendingActions: args.pendingActions }, op);
     return result(event.inserted ? "created" : "idempotent", { task: await ctx.db.get(args.taskId), run: await ctx.db.get(args.runId) });

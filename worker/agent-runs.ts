@@ -4,7 +4,7 @@ import { ConvexAgentRunStore } from "../src/lib/queue/convex-agent-runs";
 import { BullMqScheduleService } from "../src/lib/queue/schedules";
 import { requireWorkerEnvironment } from "../src/lib/queue/env";
 import { workerLog, safeError } from "../src/lib/queue/log";
-import { createRedisConnection } from "../src/lib/queue/redis";
+import { closeProducerRedisConnection, createRedisConnection } from "../src/lib/queue/redis";
 import { processAgentRun } from "../src/lib/queue/run-worker";
 import { AGENT_RUNS_QUEUE, SCHEDULE_FIRE_JOB_NAME, type AgentRunJobData } from "../src/lib/queue/types";
 
@@ -77,6 +77,7 @@ async function main(): Promise<void> {
     await worker.close(); // Stops new claims and waits for active jobs to checkpoint/release.
     await queueEvents.close();
     await scheduleService.close();
+    await closeProducerRedisConnection();
     workerLog("worker.shutdown_complete", { workerId, signal });
   }
 

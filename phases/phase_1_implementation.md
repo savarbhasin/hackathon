@@ -1,5 +1,7 @@
 # Phase 1 Implementation — Durable Agent Runs
 
+> Historical implementation record: the current worker no longer persists the per-event `runEvents` journal described below. TrueForge now provides server-side replay, and Mission Control stores only a numeric terminal cursor atomically with the run outcome. See `docs/worker/durable-agent-runs.md` for the current contract.
+
 ## What Phase 1 delivered
 
 A production BullMQ worker that consumes agent runs from a durable Convex queue, holds live TrueForge streams, persists every event, and survives worker restarts — without requiring an open browser tab.

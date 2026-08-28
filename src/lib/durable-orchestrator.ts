@@ -1,7 +1,7 @@
 import { isEventDelta, mergeEventDelta, TrueForge } from "@truefoundry/trueforge-sdk";
 import type { TrueForgeApi } from "@truefoundry/trueforge-sdk";
 import { ORCHESTRATOR_INSTRUCTIONS, ORCHESTRATOR_SPEC } from "./fleet";
-import type { AgentRunRecord, AgentRunStore, PendingAction } from "./queue/types";
+import type { AgentRunRecord, AgentRunStore, AssistantDeltaStream, PendingAction } from "./queue/types";
 import { RecoverableRunError } from "./queue/types";
 import { trueForgeBaseUrl } from "./queue/env";
 import { workerLog } from "./queue/log";
@@ -200,6 +200,8 @@ function completionTokenStatus(metrics: RecordValue | undefined): string {
   return tokens > 0 ? `${Math.round(tokens).toLocaleString()} tokens` : "";
 }
 
+type ProjectionOwnership = { attempt: number; workerId: string };
+
 async function project(
   store: AgentRunStore,
   run: AgentRunRecord,
@@ -207,6 +209,7 @@ async function project(
   tools: string[],
   status: string,
   pauseActions?: PendingAction[],
+  ownership?: ProjectionOwnership,
 ): Promise<void> {
   if (!run.conversationId) return;
   await store.upsertAssistantMessage({
@@ -217,8 +220,45 @@ async function project(
     tools,
     status,
     ...(pauseActions ? { pauseActions } : {}),
+    ...(ownership ?? {}),
   });
 }
+
+/**
+ * Merges either a cumulative or fragmentary provider text candidate against a
+ * stable persisted prefix. A retry can begin with only a suffix (and some
+ * providers emit cumulative suffixes), so appending every candidate directly
+ * would produce e.g. `Hello w world`.
+ */
+export function mergeStreamingCandidate(baseline: string, previousDelta: string, candidate: string): string {
+  if (!candidate) return previousDelta;
+
+  // A cursorless retry replays cumulative text from the beginning. Ignore
+  // candidates that have not reached the persisted prefix yet, then remove
+  // either the full prefix or the replay overlap at its boundary.
+  if (baseline.startsWith(candidate)) return previousDelta;
+  let delta = candidate.startsWith(baseline) ? candidate.slice(baseline.length) : candidate;
+  if (baseline && delta === candidate) {
+    const overlap = suffixPrefixOverlap(baseline, candidate);
+    delta = candidate.slice(overlap);
+  }
+  if (!delta) return previousDelta;
+  if (!previousDelta) return delta;
+  if (delta.startsWith(previousDelta)) return delta;
+  if (previousDelta.startsWith(delta) || previousDelta.endsWith(delta)) return previousDelta;
+  const overlap = suffixPrefixOverlap(previousDelta, delta);
+  return `${previousDelta}${delta.slice(overlap)}`;
+}
+
+function suffixPrefixOverlap(left: string, right: string): number {
+  const limit = Math.min(left.length, right.length);
+  for (let length = limit; length > 0; length -= 1) {
+    if (left.endsWith(right.slice(0, length))) return length;
+  }
+  return 0;
+}
+
+const settledRunStatuses = new Set(["waiting_for_user", "waiting_for_approval", "completed", "failed", "cancelled"]);
 
 /** Executes an orchestrator run after the generic claim has succeeded. */
 export async function processDurableOrchestratorRun(store: AgentRunStore, run: AgentRunRecord, context: WorkerContext): Promise<void> {
@@ -232,6 +272,13 @@ export async function processDurableOrchestratorRun(store: AgentRunStore, run: A
   const messages = new Map<string, RecordValue>();
   let fallbackDelta = "";
   let tools: string[] = [];
+  // Keep the prior Convex content separate from this subscription's text
+  // delta. This is important when reconnecting after a provider cursor: each
+  // retry candidate must be merged against the same stable prefix.
+  let projectionBaseline = "";
+  let streamDelta = "";
+  let projectedText = "";
+  let deltaStream: AssistantDeltaStream | undefined;
 
   try {
     const input = parseDurableOrchestratorInput(run.input);
@@ -299,15 +346,35 @@ export async function processDurableOrchestratorRun(store: AgentRunStore, run: A
     }
     if (!turnId) throw new Error("Orchestrator turn was not established");
 
+    const operationKey = `assistant:${run._id}`;
+    if (run.conversationId && store.getAssistantMessage) {
+      const existing = await store.getAssistantMessage(run.conversationId, operationKey);
+      if (existing) {
+        projectionBaseline = existing.content;
+        projectedText = projectionBaseline;
+        tools = existing.tools;
+      }
+    }
+    if (run.conversationId) {
+      deltaStream = await store.createAssistantDeltaStream({
+        conversationId: run.conversationId,
+        runId: run._id,
+        attempt,
+        workerId: context.workerId,
+      });
+      // A retry starts a fresh official component stream. Seed it with the
+      // previously durable prefix so the replacement stream is self-contained.
+      if (projectedText) await deltaStream.addText(projectedText);
+    }
+
+    // Provider events are replayable by TrueForge. Keep the merge state local
+    // and persist only the terminal cursor with the lifecycle outcome.
     const stream = await client.sessions.subscribeToTurn(sessionId, turnId, hasResume ? {} : (run.providerSequence === undefined ? {} : { afterSequenceNumber: run.providerSequence }), { abortSignal: context.signal });
-    let fallbackSequence = (run.providerSequence ?? 0) + 1;
     for await (const metadata of stream.withMetadata()) {
       if (context.signal.aborted) throw new RecoverableRunError("worker_shutdown", "Worker shutdown interrupted provider subscription");
       const event = eventPayload(metadata.data);
       const type = typeof event.type === "string" ? event.type : "unknown";
       const providerSequence = numberCursor(metadata.id);
-      const sequence = providerSequence ?? fallbackSequence++;
-      const providerEventId = typeof event.id === "string" && !isEventDelta(metadata.data as never) ? event.id : undefined;
       if (type === "model.message") {
         if (typeof event.id === "string") messages.set(event.id, event);
       } else if (isEventDelta(metadata.data as never)) {
@@ -317,53 +384,153 @@ export async function processDurableOrchestratorRun(store: AgentRunStore, run: A
         }
         if (event.threadId === "main" && typeof event.content === "string") fallbackDelta += event.content;
       }
-      await store.appendProviderEvent({ runId: run._id, attempt, workerId: context.workerId, turnId, sequence, providerEventId, providerSequence: providerSequence ?? undefined, type, payload: event });
-      if (providerSequence !== null && !await store.checkpointProviderCursor({ runId: run._id, attempt, workerId: context.workerId, turnId, providerSequence })) return;
+      // Publish through Convex Agent's official delta component. This is the
+      // live UI projection; run lifecycle state remains the recovery authority.
+      const previousProjectedText = projectedText;
+      const candidateText = normalizedText(messages, fallbackDelta);
+      streamDelta = mergeStreamingCandidate(projectionBaseline, streamDelta, candidateText);
+      projectedText = `${projectionBaseline}${streamDelta}`;
+      const streamedTools = toolsFromMessages(messages);
+      tools = [...new Set([...tools, ...streamedTools])];
+      if (type !== "turn.done" && projectedText.startsWith(previousProjectedText)) {
+        await deltaStream?.addText(projectedText.slice(previousProjectedText.length));
+      }
+
       if (type !== "turn.done") continue;
 
       const state = record(event.state) ?? {};
       stateStatus = typeof state.status === "string" ? state.status : "error";
       metrics = record(state.metrics) ?? undefined;
-      tools = toolsFromMessages(messages);
-      mergedText = typeof record(state.output)?.content === "string" ? record(state.output)?.content as string : normalizedText(messages, fallbackDelta);
+      tools = [...new Set([...tools, ...toolsFromMessages(messages)])];
+      const outputContent = typeof record(state.output)?.content === "string" ? record(state.output)?.content as string : "";
+      const beforeTerminalText = projectedText;
+      streamDelta = mergeStreamingCandidate(projectionBaseline, streamDelta, outputContent || normalizedText(messages, fallbackDelta));
+      mergedText = `${projectionBaseline}${streamDelta}`;
+      projectedText = mergedText;
+      if (mergedText.startsWith(beforeTerminalText)) {
+        await deltaStream?.addText(mergedText.slice(beforeTerminalText.length));
+      }
       if (stateStatus === "done") {
         const actions = enrichPendingActions(run._id, Array.isArray(state.requiredActions) ? state.requiredActions : [], messages);
         if (actions.length > 0) {
-          await project(store, run, mergedText, tools, actions.some((action) => action.type === "tool.approval_required") ? "waiting_for_approval" : "waiting_for_user", actions);
+          const waitingStatus = actions.some((action) => action.type === "tool.approval_required") ? "waiting_for_approval" : "waiting_for_user";
+          await project(store, run, mergedText, tools, waitingStatus, actions, { attempt, workerId: context.workerId });
           const pendingActionSelector = actions.length === 1 ? actions[0].selector : undefined;
           const paused = actions.some((action) => action.type === "tool.approval_required")
-            ? await store.waitForApproval({ runId: run._id, attempt, workerId: context.workerId, pendingActions: actions, pendingActionSelector })
-            : await store.waitForUser({ runId: run._id, attempt, workerId: context.workerId, pendingActions: actions, pendingActionSelector });
+            ? await store.waitForApproval({ runId: run._id, attempt, workerId: context.workerId, turnId, pendingActions: actions, pendingActionSelector, ...(providerSequence !== null ? { providerSequence } : {}) })
+            : await store.waitForUser({ runId: run._id, attempt, workerId: context.workerId, turnId, pendingActions: actions, pendingActionSelector, ...(providerSequence !== null ? { providerSequence } : {}) });
           if (!paused) return;
+          await deltaStream?.finish();
           workerLog("run.orchestrator_paused", { runId: run._id, attempt, turnId, actionCount: actions.length });
           return;
         }
-        await project(store, run, mergedText, tools, completionTokenStatus(metrics), []);
-        if (!await store.complete({ runId: run._id, attempt, workerId: context.workerId, turnId, output: { content: mergedText, status: stateStatus, tools, ...(metrics ? { metrics } : {}) } })) return;
+        await project(store, run, mergedText, tools, completionTokenStatus(metrics), [], { attempt, workerId: context.workerId });
+        if (!await store.complete({ runId: run._id, attempt, workerId: context.workerId, turnId, output: { content: mergedText, status: stateStatus, tools, ...(metrics ? { metrics } : {}) }, ...(providerSequence !== null ? { providerSequence } : {}) })) return;
+        await deltaStream?.finish();
         return;
       }
       if (stateStatus === "cancelled") {
-        await project(store, run, mergedText, tools, "cancelled", []);
-        if (!await store.cancel({ runId: run._id, attempt, workerId: context.workerId, turnId })) return;
+        await project(store, run, mergedText, tools, "cancelled", [], { attempt, workerId: context.workerId });
+        if (!await store.cancel({ runId: run._id, attempt, workerId: context.workerId, turnId, ...(providerSequence !== null ? { providerSequence } : {}) })) return;
+        await deltaStream?.finish();
         return;
       }
       const message = typeof state.message === "string" ? state.message : "TrueForge turn returned an error state";
       if (recoverableTerminal(message)) throw new RecoverableRunError("trueforge_terminal_transient", message);
-      await project(store, run, mergedText || message, tools, "failed", []);
-      await store.fail({ runId: run._id, attempt, workerId: context.workerId, turnId, errorCode: "trueforge_terminal", errorMessage: message });
+      mergedText = mergedText || message;
+      await project(store, run, mergedText, tools, "failed", [], { attempt, workerId: context.workerId });
+      if (await store.fail({ runId: run._id, attempt, workerId: context.workerId, turnId, errorCode: "trueforge_terminal", errorMessage: message, ...(providerSequence !== null ? { providerSequence } : {}) })) {
+        await deltaStream?.finish();
+      }
       return;
     }
     throw new RecoverableRunError("trueforge_stream_ended", "Provider stream ended without turn.done");
   } catch (error) {
     const retryable = recoverableError(error);
     const message = error instanceof Error ? error.message : "Unknown orchestrator worker failure";
-    if (retryable) {
-      await project(store, run, mergedText || message, tools, "retrying", []);
-      await store.releaseForRetry({ runId: run._id, attempt, workerId: context.workerId, errorCode: retryable.code, errorMessage: retryable.message });
-      throw retryable;
+    mergedText = mergedText || projectedText;
+
+    // A Convex mutation can commit and still report a transport error. Re-read
+    // first; a settled run already has its terminal/pause projection and must
+    // not be regressed. Active runs are projected before release/fail so a
+    // projection failure cannot bypass the guarded lifecycle transition.
+    let latest: AgentRunRecord | null = null;
+    let lifecycleApplied = false;
+    let lifecycleError: unknown;
+    try {
+      latest = await store.get(run._id);
+    } catch (readFailure) {
+      workerLog("run.lifecycle_read_failed", {
+        runId: run._id,
+        attempt,
+        message: readFailure instanceof Error ? readFailure.message.slice(0, 200) : "unknown",
+      });
+      // Without the authoritative lifecycle snapshot, neither a retrying
+      // projection nor a guarded transition is safe after an ambiguous
+      // terminal mutation. Abort this attempt's component stream and let
+      // redelivery replays from TrueForge's server-side turn buffer.
+      await deltaStream?.fail("lifecycle state unavailable").catch(() => undefined);
+      throw readFailure;
     }
-    await project(store, run, mergedText || message, tools, "failed", []);
-    await store.fail({ runId: run._id, attempt, workerId: context.workerId, turnId, errorCode: "worker_permanent", errorMessage: message });
+
+    const settledStatus = latest && settledRunStatuses.has(latest.status) ? latest.status : undefined;
+    let projectionError: unknown;
+    if (settledStatus) {
+      // The lifecycle mutation may have committed before finish reported an
+      // ambiguous transport failure. Retry the idempotent finish while this
+      // attempt still owns the stream; aborting is the final fallback so a
+      // settled run can never leave a component row stuck in `streaming`.
+      try {
+        await deltaStream?.finish();
+      } catch (finishFailure) {
+        try {
+          await deltaStream?.fail("durable run settled before stream finalization");
+        } catch (abortFailure) {
+          workerLog("run.stream_cleanup_failed", {
+            runId: run._id,
+            attempt,
+            finishMessage: finishFailure instanceof Error ? finishFailure.message.slice(0, 200) : "unknown",
+            abortMessage: abortFailure instanceof Error ? abortFailure.message.slice(0, 200) : "unknown",
+          });
+          throw finishFailure;
+        }
+      }
+    } else {
+      const projectionStatus = retryable ? "retrying" : "failed";
+      try {
+        await deltaStream?.fail(retryable ? retryable.message : message).catch(() => undefined);
+        await project(store, run, mergedText || message, tools, projectionStatus, [], { attempt, workerId: context.workerId });
+      } catch (flushFailure) {
+        projectionError = flushFailure;
+        workerLog("run.assistant_projection_failed", {
+          runId: run._id,
+          attempt,
+          message: flushFailure instanceof Error ? flushFailure.message.slice(0, 200) : "unknown",
+        });
+      }
+
+      try {
+        lifecycleApplied = retryable
+          ? await store.releaseForRetry({ runId: run._id, attempt, workerId: context.workerId, errorCode: retryable.code, errorMessage: retryable.message })
+          : await store.fail({ runId: run._id, attempt, workerId: context.workerId, turnId, errorCode: "worker_permanent", errorMessage: message });
+      } catch (lifecycleFailure) {
+        lifecycleError = lifecycleFailure;
+        workerLog("run.lifecycle_transition_failed", {
+          runId: run._id,
+          attempt,
+          retryable: !!retryable,
+          message: lifecycleFailure instanceof Error ? lifecycleFailure.message.slice(0, 200) : "unknown",
+        });
+      }
+    }
+
+    // Lifecycle errors remain actionable even when projection failed too; the
+    // original retryable error is what BullMQ should redeliver for retries.
+    if (lifecycleError) throw lifecycleError;
+    if (projectionError && retryable) throw retryable;
+    if (retryable && lifecycleApplied) throw retryable;
+    if (retryable && !settledStatus) throw retryable;
+    if (projectionError) throw projectionError;
   }
 }
 

@@ -123,7 +123,7 @@ status               queued | enqueued | connecting | running |
                      completed | failed | cancelled
 sessionId            optional TrueForge session ID
 turnId               optional TrueForge turn ID
-providerSequence     last committed provider event cursor
+providerSequence     optional numeric turn.done cursor committed with lifecycle outcome
 attempt              current execution attempt
 claimedBy            worker identity
 startedAt
@@ -142,22 +142,14 @@ Indexes:
 - by status and update time
 - by TrueForge session and turn ID
 
-### `runEvents`
+### Provider event replay
 
-```text
-runId
-sequence              Mission Control sequence
-providerEventId       optional
-providerSequence      optional
-type
-payload
-createdAt
-```
+Mission Control does not store a per-event journal. TrueForge remains the replay authority for turn events:
 
-Required uniqueness:
-
-- A provider event can be persisted once per run.
-- A Mission Control sequence can be persisted once per run.
+- workers merge base and delta events in memory during the active subscription;
+- a pre-terminal crash re-subscribes without a cursor and replays the turn from TrueForge's server-side buffer;
+- a numeric `turn.done` cursor is stored atomically with the final or paused lifecycle state;
+- changing to a new resume turn clears the prior turn's cursor.
 
 ### Other tables
 
@@ -270,7 +262,7 @@ BullMQ will mark a job stalled when its worker stops renewing the lock. Another 
 
 1. Load the run from Convex.
 2. If it is terminal, finish the duplicate job without contacting TrueForge.
-3. If it has a session and turn ID, subscribe to that turn from the last persisted provider cursor.
+3. If it has a session and turn ID, subscribe to that turn from its persisted cursor when one is valid; otherwise replay from the beginning of TrueForge's server-side buffer.
 4. If TrueForge cannot resume an abandoned turn, reconcile its current state before deciding whether to create another turn.
 5. Never repeat an irreversible external action without an idempotency key or confirmed provider state.
 

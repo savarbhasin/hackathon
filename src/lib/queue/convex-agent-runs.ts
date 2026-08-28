@@ -1,3 +1,5 @@
+import { DeltaStreamer, compressUIMessageChunks } from "@convex-dev/agent";
+import type { UIMessageChunk } from "ai";
 import { ConvexHttpClient } from "convex/browser";
 import { anyApi } from "convex/server";
 import { api } from "../../../convex/_generated/api";
@@ -6,8 +8,8 @@ import type {
   AgentRunKind,
   AgentRunRecord,
   AgentRunStore,
+  AssistantDeltaStream,
   PendingAction,
-  ProviderEventCheckpoint,
   ScheduleReconciliationSnapshot,
 } from "./types";
 
@@ -122,31 +124,23 @@ export class ConvexAgentRunStore implements AgentRunStore {
     return await this.client.mutation(api.agentRuns.checkpointSessionTurn, { ...input, runId: runId(input.runId) });
   }
 
-  async checkpointProviderCursor(input: { runId: string; attempt: number; workerId: string; turnId: string; providerSequence: number }): Promise<boolean> {
-    return await this.client.mutation(api.agentRuns.checkpointProviderCursor, { ...input, runId: runId(input.runId) });
-  }
-
-  async appendProviderEvent(input: ProviderEventCheckpoint): Promise<{ inserted: boolean; id: string }> {
-    return await this.client.mutation(api.agentRuns.appendProviderEvent, { ...input, runId: runId(input.runId) });
-  }
-
-  async waitForUser(input: { runId: string; attempt: number; workerId: string; pendingActions: PendingAction[]; pendingActionSelector?: string }): Promise<boolean> {
+  async waitForUser(input: { runId: string; attempt: number; workerId: string; turnId: string; pendingActions: PendingAction[]; pendingActionSelector?: string; providerSequence?: number }): Promise<boolean> {
     return await this.client.mutation(api.agentRuns.waitForUser, { ...input, runId: runId(input.runId) });
   }
 
-  async waitForApproval(input: { runId: string; attempt: number; workerId: string; pendingActions: PendingAction[]; pendingActionSelector?: string }): Promise<boolean> {
+  async waitForApproval(input: { runId: string; attempt: number; workerId: string; turnId: string; pendingActions: PendingAction[]; pendingActionSelector?: string; providerSequence?: number }): Promise<boolean> {
     return await this.client.mutation(api.agentRuns.waitForApproval, { ...input, runId: runId(input.runId) });
   }
 
-  async complete(input: { runId: string; attempt: number; workerId: string; turnId: string; output: Record<string, unknown> | null }): Promise<boolean> {
+  async complete(input: { runId: string; attempt: number; workerId: string; turnId: string; output: Record<string, unknown> | null; providerSequence?: number }): Promise<boolean> {
     return await this.client.mutation(api.agentRuns.complete, { ...input, runId: runId(input.runId) });
   }
 
-  async fail(input: { runId: string; attempt: number; workerId: string; turnId?: string; errorCode: string; errorMessage: string }): Promise<boolean> {
+  async fail(input: { runId: string; attempt: number; workerId: string; turnId?: string; errorCode: string; errorMessage: string; providerSequence?: number }): Promise<boolean> {
     return await this.client.mutation(api.agentRuns.fail, { ...input, runId: runId(input.runId) });
   }
 
-  async cancel(input: { runId: string; attempt: number; workerId: string; turnId?: string }): Promise<boolean> {
+  async cancel(input: { runId: string; attempt: number; workerId: string; turnId?: string; providerSequence?: number }): Promise<boolean> {
     return await this.client.mutation(api.agentRuns.cancel, { ...input, runId: runId(input.runId) });
   }
 
@@ -190,6 +184,107 @@ export class ConvexAgentRunStore implements AgentRunStore {
       : null;
   }
 
+  async createAssistantDeltaStream(input: {
+    conversationId: string;
+    runId: string;
+    attempt: number;
+    workerId: string;
+  }): Promise<AssistantDeltaStream> {
+    const threadId = await this.client.mutation(anyApi.agentStreaming.ensureConversationThread, {
+      conversationId: runId(input.conversationId),
+    }) as string;
+    const bridgeRefs = {
+      create: {},
+      addDelta: {},
+      finish: {},
+      abort: {},
+    };
+    const bridgeComponent = { streams: bridgeRefs };
+    const bridgeContext = {
+      runMutation: async (reference: unknown, args: unknown) => {
+        const payload = args && typeof args === "object" ? args as Record<string, unknown> : {};
+        const guardedPayload = {
+          ...payload,
+          expectedAttempt: input.attempt,
+          expectedWorkerId: input.workerId,
+        };
+        if (reference === bridgeRefs.create) return await this.client.mutation(anyApi.agentStreaming.create, guardedPayload);
+        if (reference === bridgeRefs.addDelta) return await this.client.mutation(anyApi.agentStreaming.addDelta, guardedPayload);
+        if (reference === bridgeRefs.finish) return await this.client.mutation(anyApi.agentStreaming.finish, guardedPayload);
+        if (reference === bridgeRefs.abort) return await this.client.mutation(anyApi.agentStreaming.abort, guardedPayload);
+        throw new Error("Unknown Convex Agent stream bridge operation");
+      },
+    };
+    const streamer = new DeltaStreamer<UIMessageChunk>(
+      bridgeComponent as never,
+      bridgeContext as never,
+      {
+        throttleMs: 100,
+        onAsyncAbort: async () => undefined,
+        abortSignal: undefined,
+        compress: compressUIMessageChunks,
+      },
+      {
+        threadId,
+        userId: input.runId,
+        agentName: input.runId,
+        order: Date.now(),
+        stepOrder: input.attempt,
+        format: "UIMessageChunk",
+        provider: "trueforge",
+      },
+    );
+    // Create the component record immediately so other devices see a durable
+    // streaming row before the first provider text fragment arrives.
+    await streamer.getOrCreateStreamId();
+    const textPartId = `assistant:${input.runId}:${input.attempt}`;
+    let started = false;
+    let textEnded = false;
+    let ended = false;
+    return {
+      async addText(delta: string): Promise<void> {
+        if (!delta || ended || textEnded) return;
+        const chunks: UIMessageChunk[] = [];
+        if (!started) {
+          chunks.push({ type: "text-start", id: textPartId });
+          started = true;
+        }
+        chunks.push({ type: "text-delta", id: textPartId, delta });
+        await streamer.addParts(chunks);
+      },
+      async finish(): Promise<void> {
+        if (ended) return;
+        // Do not mark the adapter ended until the component mutation succeeds:
+        // Convex can commit and still report a transport error, and callers
+        // must be able to retry without adding a second text-end chunk.
+        if (started && !textEnded) {
+          await streamer.addParts([{ type: "text-end", id: textPartId }]);
+          textEnded = true;
+        }
+        await streamer.finish();
+        ended = true;
+      },
+      async fail(reason: string): Promise<void> {
+        if (ended) return;
+        await streamer.fail(reason.slice(0, 500));
+        ended = true;
+      },
+    };
+  }
+
+  async getAssistantMessage(conversationId: string, operationKey: string): Promise<{ content: string; tools: string[] } | null> {
+    const value = await this.client.query(anyApi.conversations.getMessageByOperationKey, {
+      conversationId: runId(conversationId),
+      operationKey,
+    });
+    if (!value || typeof value !== "object") return null;
+    const row = value as { content?: unknown; tools?: unknown };
+    return {
+      content: typeof row.content === "string" ? row.content : "",
+      tools: Array.isArray(row.tools) ? row.tools.filter((tool): tool is string => typeof tool === "string") : [],
+    };
+  }
+
   async checkpointConversationSession(input: { conversationId: string; sessionId: string; expectedSessionId?: string }): Promise<boolean> {
     return await this.client.mutation(anyApi.conversations.checkpointSession, {
       conversationId: runId(input.conversationId),
@@ -206,6 +301,8 @@ export class ConvexAgentRunStore implements AgentRunStore {
     tools: string[];
     status: string;
     pauseActions?: PendingAction[];
+    attempt?: number;
+    workerId?: string;
   }): Promise<unknown> {
     return await this.client.mutation(anyApi.conversations.upsertMessage, {
       conversationId: runId(input.conversationId),
@@ -216,6 +313,8 @@ export class ConvexAgentRunStore implements AgentRunStore {
       tools: input.tools,
       status: input.status,
       ...(input.pauseActions !== undefined ? { pauseActions: input.pauseActions } : {}),
+      ...(input.attempt !== undefined ? { attempt: input.attempt } : {}),
+      ...(input.workerId !== undefined ? { workerId: input.workerId } : {}),
     });
   }
 
@@ -240,6 +339,8 @@ export class ConvexAgentRunStore implements AgentRunStore {
   async finalizeSpecialist(input: {
     taskId: string;
     runId: string;
+    attempt: number;
+    workerId: string;
     status: "completed" | "waiting_for_approval" | "waiting_for_user" | "failed" | "cancelled";
     sessionId?: string;
     turnId?: string;
@@ -248,11 +349,14 @@ export class ConvexAgentRunStore implements AgentRunStore {
     pendingActionSelector?: string;
     errorCode?: string;
     errorMessage?: string;
+    providerSequence?: number;
     operationKey: string;
   }): Promise<unknown> {
     return await this.client.mutation(anyApi.missions.finalizeSpecialist, {
       taskId: runId(input.taskId),
       runId: runId(input.runId),
+      attempt: input.attempt,
+      workerId: input.workerId,
       status: input.status,
       operationKey: input.operationKey,
       ...(input.sessionId !== undefined ? { sessionId: input.sessionId } : {}),
@@ -262,6 +366,7 @@ export class ConvexAgentRunStore implements AgentRunStore {
       ...(input.pendingActionSelector !== undefined ? { pendingActionSelector: input.pendingActionSelector } : {}),
       ...(input.errorCode !== undefined ? { errorCode: input.errorCode } : {}),
       ...(input.errorMessage !== undefined ? { errorMessage: input.errorMessage } : {}),
+      ...(input.providerSequence !== undefined ? { providerSequence: input.providerSequence } : {}),
     });
   }
 

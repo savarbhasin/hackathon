@@ -2,6 +2,7 @@
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useQuery } from "convex/react";
+import { useStreamingUIMessages } from "@convex-dev/agent/react";
 import { api } from "../../convex/_generated/api";
 import { ChatMarkdown } from "@/components/chat-markdown";
 import { ConfirmDialog } from "@/components/confirm-dialog";
@@ -76,6 +77,18 @@ interface ConvexMessage {
 interface ConversationRunState {
   latest?: { _id?: string; status?: string } | null;
   active?: { _id?: string; status?: string } | null;
+}
+
+interface ConvexConversationState {
+  agentThreadId?: string;
+}
+
+interface ConvexAgentStreamMessage {
+  id: string;
+  text: string;
+  status: string;
+  agentName?: string;
+  parts?: Array<{ toolName?: string }>;
 }
 
 const anyApi = api as unknown as Record<string, Record<string, any>>;
@@ -208,7 +221,14 @@ export default function Home() {
   const selectedConversationState = useQuery(
     anyApi.conversations.conversationState,
     conversationId ? { conversationId: conversationId as never } : "skip",
-  ) as unknown;
+  ) as ConvexConversationState | null | undefined;
+  const agentThreadId = selectedConversationState?.agentThreadId;
+  const selectedAgentStreams = useStreamingUIMessages(
+    api.agentStreaming.list,
+    conversationId && agentThreadId
+      ? { conversationId: conversationId as never, threadId: agentThreadId }
+      : "skip",
+  ) as ConvexAgentStreamMessage[] | undefined;
   const selectedMessages = useQuery(
     anyApi.conversations.listMessages,
     conversationId ? { conversationId: conversationId as never, limit: 2000 } : "skip",
@@ -236,12 +256,55 @@ export default function Home() {
 
   useEffect(() => {
     if (!conversationId || !Array.isArray(selectedMessages)) return;
-    const loaded = (selectedMessages as ConvexMessage[])
+    const durableMessages = (selectedMessages as ConvexMessage[])
       .filter((message) => !message.conversationId || String(message.conversationId) === conversationId)
       .filter((message) => message.role === "user" || message.role === "assistant")
       .map(messageFromConvex);
     const placeholder = pendingPlaceholdersRef.current[conversationId];
-    const hasPersistedAssistant = Boolean(placeholder?.runId && loaded.some((message) => message.role === "assistant" && message.runId === placeholder.runId));
+    const activeRun = selectedRunState?.active;
+    const activeRunId = typeof activeRun?._id === "string" ? activeRun._id : undefined;
+    const activeStatus = typeof activeRun?.status === "string" ? activeRun.status : undefined;
+    const activeProcessing = !!activeRunId && typeof activeStatus === "string"
+      && (ACTIVE_RUN_STATUSES.has(activeStatus) || activeStatus === RETRYING_STATUS);
+
+    const componentStreams: Msg[] = (selectedAgentStreams ?? [])
+      .filter((stream) => typeof stream.agentName === "string" && stream.agentName.length > 0)
+      .map((stream) => {
+        const runId = stream.agentName as string;
+        const pending = stream.status === "streaming"
+          && (!activeRunId || (runId === activeRunId && activeProcessing));
+        const tools = [...new Set((stream.parts ?? [])
+          .map((part) => part.toolName)
+          .filter((name): name is string => typeof name === "string" && name.length > 0))];
+        return {
+          id: stream.id,
+          runId,
+          role: "assistant" as const,
+          content: stream.text ?? "",
+          tools,
+          pending,
+          status: pending ? activeStatus ?? "running" : "completed",
+        };
+      });
+
+    // While an official component stream is live it supersedes a retry/final
+    // app-table projection for the same run. Once the component stream is
+    // finished, the durable chat message wins and prevents any duplicate row.
+    const liveStreamRunIds = new Set(componentStreams.filter((message) => message.pending).map((message) => message.runId));
+    const loaded = durableMessages.filter((message) =>
+      message.role !== "assistant" || !message.runId || !liveStreamRunIds.has(message.runId));
+    const visibleStreams = componentStreams.filter((stream) =>
+      stream.pending || !durableMessages.some((message) => message.role === "assistant" && message.runId === stream.runId));
+    const authoritative = [...loaded, ...visibleStreams];
+    const hasActiveAssistant = !!activeRunId && authoritative.some((message) => message.role === "assistant" && message.runId === activeRunId);
+    const latestUserIndex = authoritative.reduce((latest, message, index) => message.role === "user" ? index : latest, -1);
+    const hasAssistantAfterLatestUser = latestUserIndex >= 0
+      && authoritative.slice(latestUserIndex + 1).some((message) => message.role === "assistant");
+    const hasPersistedAssistant = Boolean(
+      (placeholder?.runId && authoritative.some((message) => message.role === "assistant" && message.runId === placeholder.runId))
+      || hasActiveAssistant
+      || (!activeRunId && hasAssistantAfterLatestUser),
+    );
     if (hasPersistedAssistant) {
       setPlaceholderMap((current) => {
         if (!current[conversationId]) return current;
@@ -250,8 +313,37 @@ export default function Home() {
         return next;
       });
     }
-    setMessages(placeholder && !hasPersistedAssistant ? [...loaded, placeholder] : loaded);
-  }, [conversationId, selectedMessages]);
+
+    const placeholderForActive = !!placeholder && (!placeholder.runId || placeholder.runId === activeRunId);
+    let visiblePlaceholder = placeholder && !hasPersistedAssistant ? placeholder : undefined;
+    if (activeProcessing && !hasActiveAssistant && !hasPersistedAssistant) {
+      if (placeholderForActive) {
+        visiblePlaceholder = {
+          ...placeholder,
+          runId: placeholder.runId ?? activeRunId,
+          status: activeStatus,
+          pending: true,
+        };
+        if (placeholder.runId !== activeRunId || placeholder.status !== activeStatus) {
+          setPlaceholderMap((current) => ({
+            ...current,
+            [conversationId]: visiblePlaceholder as Msg,
+          }));
+        }
+      } else {
+        visiblePlaceholder = {
+          id: `active:${activeRunId}`,
+          runId: activeRunId,
+          role: "assistant",
+          content: "",
+          tools: [],
+          pending: true,
+          status: activeStatus,
+        };
+      }
+    }
+    setMessages(visiblePlaceholder ? [...authoritative, visiblePlaceholder] : authoritative);
+  }, [conversationId, selectedAgentStreams, selectedMessages, selectedRunState]);
 
   useEffect(() => {
     if (!historyOpen) return;

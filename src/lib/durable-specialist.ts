@@ -220,15 +220,15 @@ export async function processDurableSpecialistRun(store: AgentRunStore, run: Age
     }
     if (!turnId) throw new Error("Specialist turn was not established");
 
+    // TrueForge replays the provider turn after the last terminal cursor; no
+    // raw provider events need to round-trip through Convex while streaming.
     const stream = await client.sessions.subscribeToTurn(sessionId, turnId, hasResume ? {} : (run.providerSequence === undefined ? {} : { afterSequenceNumber: run.providerSequence }), { abortSignal: context.signal });
-    let fallbackSequence = (run.providerSequence ?? 0) + 1;
+    let fallbackEventSequence = 0;
     for await (const metadata of stream.withMetadata()) {
       if (context.signal.aborted) throw new RecoverableRunError("worker_shutdown", "Worker shutdown interrupted specialist subscription");
       const event = providerPayload(metadata.data);
       const type = typeof event.type === "string" ? event.type : "unknown";
       const providerSequence = cursor(metadata.id);
-      const sequence = providerSequence ?? fallbackSequence++;
-      const providerEventId = typeof event.id === "string" && !isEventDelta(metadata.data as never) ? event.id : undefined;
       if (type === "model.message" && typeof event.id === "string") messages.set(event.id, event);
       if (isEventDelta(metadata.data as never)) {
         if (typeof event.id === "string") {
@@ -237,9 +237,6 @@ export async function processDurableSpecialistRun(store: AgentRunStore, run: Age
         }
         if (event.threadId === "main" && typeof event.content === "string") fallbackText += event.content;
       }
-      await store.appendProviderEvent({ runId: run._id, attempt, workerId: context.workerId, turnId, sequence, providerEventId, providerSequence: providerSequence ?? undefined, type, payload: event });
-      if (providerSequence !== null) await checkpoint(await store.checkpointProviderCursor({ runId: run._id, attempt, workerId: context.workerId, turnId, providerSequence }), "checkpoint_cursor");
-
       if (type === "model.message" || type.startsWith("tool.")) {
         tools = namesFromMessages(messages);
         const toolInfo = record(event.toolInfo);
@@ -249,7 +246,10 @@ export async function processDurableSpecialistRun(store: AgentRunStore, run: Age
             ? event.toolName
             : typeof toolInfo?.name === "string" ? toolInfo.name : undefined;
         if (directName || tools.length > 0) {
-          await semantic(store, taskId, run._id, "activity.tool", { name: directName ?? tools[tools.length - 1], runId: run._id }, `tool:${providerEventId ?? sequence}`);
+          const eventKey = providerSequence !== null
+            ? String(providerSequence)
+            : typeof event.id === "string" ? event.id : `${type}:${fallbackEventSequence++}`;
+          await semantic(store, taskId, run._id, "activity.tool", { name: directName ?? tools[tools.length - 1], runId: run._id }, `tool:${eventKey}`);
         }
       }
       if (type !== "turn.done") continue;
@@ -272,12 +272,12 @@ export async function processDurableSpecialistRun(store: AgentRunStore, run: Age
         if (actions.length > 0) {
           const waitingStatus = actions.some((action) => action.type === "tool.approval_required") ? "waiting_for_approval" : "waiting_for_user";
           const selector = actions.length === 1 ? actions[0].selector : undefined;
-          const finalized = await store.finalizeSpecialist({ taskId, runId: run._id, status: waitingStatus, sessionId, turnId, pendingActions: actions, pendingActionSelector: selector, operationKey: `worker:${run._id}:pause:${selector ?? "multiple"}` });
+          const finalized = await store.finalizeSpecialist({ taskId, runId: run._id, attempt, workerId: context.workerId, status: waitingStatus, sessionId, turnId, pendingActions: actions, pendingActionSelector: selector, ...(providerSequence !== null ? { providerSequence } : {}), operationKey: `worker:${run._id}:pause:${selector ?? "multiple"}` });
           if (!finalized || !["created", "idempotent"].includes(String((finalized as Value).kind))) return;
           workerLog("run.specialist_paused", { runId: run._id, taskId, turnId, actionCount: actions.length });
           return;
         }
-        const finalized = await store.finalizeSpecialist({ taskId, runId: run._id, status: "completed", sessionId, turnId, output: content.slice(0, 8_000), operationKey: `worker:${run._id}:completed` });
+        const finalized = await store.finalizeSpecialist({ taskId, runId: run._id, attempt, workerId: context.workerId, status: "completed", sessionId, turnId, output: content.slice(0, 8_000), ...(providerSequence !== null ? { providerSequence } : {}), operationKey: `worker:${run._id}:completed` });
         if (!finalized || !["created", "idempotent"].includes(String((finalized as Value).kind))) return;
         const ready = await store.readySuccessors(taskId);
         if (Array.isArray(ready)) {
@@ -292,12 +292,12 @@ export async function processDurableSpecialistRun(store: AgentRunStore, run: Age
         return;
       }
       if (status === "cancelled") {
-        await store.finalizeSpecialist({ taskId, runId: run._id, status: "cancelled", sessionId, turnId, errorMessage: typeof state.reason === "string" ? state.reason : "cancelled", operationKey: `worker:${run._id}:cancelled` });
+        await store.finalizeSpecialist({ taskId, runId: run._id, attempt, workerId: context.workerId, status: "cancelled", sessionId, turnId, errorMessage: typeof state.reason === "string" ? state.reason : "cancelled", ...(providerSequence !== null ? { providerSequence } : {}), operationKey: `worker:${run._id}:cancelled` });
         return;
       }
       const message = typeof state.message === "string" ? state.message : "TrueForge turn returned an error state";
       if (retryable(new Error(message))) throw new RecoverableRunError("trueforge_terminal_transient", message);
-      await store.finalizeSpecialist({ taskId, runId: run._id, status: "failed", sessionId, turnId, errorCode: "trueforge_terminal", errorMessage: message, operationKey: `worker:${run._id}:failed` });
+      await store.finalizeSpecialist({ taskId, runId: run._id, attempt, workerId: context.workerId, status: "failed", sessionId, turnId, errorCode: "trueforge_terminal", errorMessage: message, ...(providerSequence !== null ? { providerSequence } : {}), operationKey: `worker:${run._id}:failed` });
       return;
     }
     throw new RecoverableRunError("trueforge_stream_ended", "Provider stream ended without turn.done");
@@ -315,6 +315,6 @@ export async function processDurableSpecialistRun(store: AgentRunStore, run: Age
         ...(clientMessageId ? { clientMessageId } : {}),
       }, `chat-assistant:${clientMessageId ?? run._id}`);
     }
-    await store.finalizeSpecialist({ taskId, runId: run._id, status: "failed", sessionId, turnId, errorCode: "worker_permanent", errorMessage: message, operationKey: `worker:${run._id}:failed` });
+    await store.finalizeSpecialist({ taskId, runId: run._id, attempt, workerId: context.workerId, status: "failed", sessionId, turnId, errorCode: "worker_permanent", errorMessage: message, operationKey: `worker:${run._id}:failed` });
   }
 }

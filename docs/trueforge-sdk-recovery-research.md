@@ -52,7 +52,8 @@ with `responseType: "sse"`, and marks the stream `resumable: true` (line 1392).
 Key facts:
 
 - Resumption is per turn, keyed by `(sessionId, turnId)`. Mission Control checkpoints both IDs and the provider sequence on each Convex `AgentRun`.
-- Cursor is **exclusive replay**: events with sequence number > `after_sequence_number` are replayed. Omitting the cursor starts "from the beginning of the live buffer" — i.e. subscribing with no cursor to a finished turn should replay buffered events rather than hang, but "live buffer" retention size/lifetime is **not documented anywhere in the package** (see §Needs-live-verification).
+- Cursor is **exclusive replay**: events with sequence number > `after_sequence_number` are replayed. Omitting the cursor starts "from the beginning of the live buffer" — Mission Control uses this for pre-terminal crash recovery because it no longer journals or checkpoints each provider event. The buffer's retention size/lifetime is **not documented anywhere in the package** (see §Needs-live-verification).
+- Mission Control stores a numeric `turn.done` cursor atomically with the terminal/pause lifecycle transition. A cursor from a previous turn is cleared before subscribing to a newly created resume turn.
 - There is also a non-streaming fallback for recovery: `listTurnEvents(session_id, turn_id)` ("Paginated persisted events for a turn", Client.d.ts:216-233) returns persisted events (deltas excluded) and `getTurn(session_id, turn_id)` returns the turn's terminal `state`. So even if the live buffer is gone, a new process can reconstruct final state via `getTurn` + `listTurnEvents`.
 - `listEvents(session_id)` (Client.d.ts:116-132) lists events across the active turn branch "including persisted events from a running tip".
 
@@ -60,8 +61,8 @@ What happens when subscribing to an *abandoned* turn: not directly documented. T
 
 ## 2. Event cursors, dedup fields, delta merging
 
-- Every event carries a monotonic ULID `id` field. The worker persists provider event IDs and sequences through `appendProviderEvent` before moving its cursor.
-- The SSE transport layer has its own per-connection event id used as the resume cursor: `stream.withMetadata()` yields `{ data, id }` (`core/stream/Stream.d.ts:44-49`, `ServerSentEvent.id?: string`). The worker parses that ID as `providerSequence` and checkpoints it. The subscribe endpoint's reconnect path sends it back as an HTTP `Last-Event-ID` header (Client.js:1355), and the query-param equivalent is `after_sequence_number`. No SDK type explicitly names that mapping, so this remains partially confirmed.
+- Provider events carry IDs, but Mission Control does not persist raw events. The worker merges base and delta events in memory for the active subscription.
+- The SSE transport layer has its own per-connection event id used as the resume cursor: `stream.withMetadata()` yields `{ data, id }` (`core/stream/Stream.d.ts:44-49`, `ServerSentEvent.id?: string`). Mission Control parses a numeric terminal metadata ID as `providerSequence` and stores it atomically with the run outcome. The subscribe endpoint's reconnect path sends an SSE cursor back as an HTTP `Last-Event-ID` header (Client.js:1355), and the query-param equivalent is `after_sequence_number`. No SDK type explicitly names that mapping, so this remains partially confirmed.
 - Deltas confirmed: base `model.message` events arrive empty and content arrives via `model.message.delta` fragments sharing the same `id`:
   - `ModelMessageEvent.content?` is optional/null; `ModelMessageDeltaEvent` carries incremental `content`, `reasoningContent`, `toolCalls` chunks (`api/types/ModelMessageEvent.d.ts`, `ModelMessageDeltaEvent.d.ts`).
   - `isEventDelta(event)` = `event.type === "model.message.delta"` (`events.js`, exported from package root; decl at `events.d.ts:6-8`).
@@ -169,7 +170,7 @@ Concrete recommendations:
 
 1. **Persist before start.** Admit the run in Convex, checkpoint the TrueForge session, then create the turn and checkpoint its id before subscribing. The worker can then recover from either checkpoint without an open browser.
 
-2. **Consume via `subscribeToTurn`, never via the create-stream socket.** The worker ensures `sessionId` and `turnId` are checkpointed, subscribes after `providerSequence`, and processes through `turn.done`. Convex stores the cursor and deduplicates provider event ids.
+2. **Consume via `subscribeToTurn`, never via the create-stream socket.** The worker ensures `sessionId` and `turnId` are checkpointed, subscribes after a same-turn `providerSequence` when present (otherwise from the beginning), and processes through `turn.done`. Convex stores only a numeric terminal cursor, atomically with the lifecycle outcome; it does not journal or deduplicate raw provider events.
 
 3. **Keep the delta machinery identical.** Replayed streams include deltas too. The worker uses `isEventDelta` and `mergeEventDelta`, keyed by event id. For deep reconstruction use `getTurn` plus `listTurnEvents`.
 

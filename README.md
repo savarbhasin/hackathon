@@ -28,7 +28,7 @@ Next.js  ── Convex ── TrueForge server (sessions, turns, events)
                 MCP server exposing board tools to agents
 ```
 
-Convex is the source of truth for the board and run state. BullMQ and Redis deliver work to the worker, which owns the long-lived TrueForge stream.
+Convex is the source of truth for the board and run state. BullMQ and Redis deliver work to the worker, which owns the long-lived TrueForge stream. Live assistant text is batched into the official Convex Agent streaming component and consumed through Convex subscriptions; the application’s `chatMessages` table remains the final durable record.
 
 ## The board
 

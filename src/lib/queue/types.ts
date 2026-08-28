@@ -102,16 +102,13 @@ export type AdmissionResult<T = unknown> =
   | { kind: "selector_mismatch"; conversationId?: string; runId?: string; selector?: string }
   | { kind: "invalid_state"; conversationId?: string; runId?: string; reason?: string };
 
-export type ProviderEventCheckpoint = {
-  runId: string;
-  attempt: number;
-  workerId: string;
-  turnId: string;
-  sequence: number;
-  providerEventId?: string;
-  providerSequence?: number;
-  type: string;
-  payload: Record<string, unknown>;
+export type AssistantDeltaStream = {
+  /** Append one provider text fragment to the official Convex Agent stream. */
+  addText(delta: string): Promise<void>;
+  /** Flush remaining deltas and mark the component stream finished. */
+  finish(): Promise<void>;
+  /** Abort the component stream without changing the durable run lifecycle. */
+  fail(reason: string): Promise<void>;
 };
 
 /** Persisted state adapter. Its implementation calls `api.agentRuns.*`. */
@@ -138,13 +135,11 @@ export interface AgentRunStore {
     turnId: string;
     expectedTurnId?: string;
   }): Promise<boolean>;
-  checkpointProviderCursor(input: { runId: string; attempt: number; workerId: string; turnId: string; providerSequence: number }): Promise<boolean>;
-  appendProviderEvent(input: ProviderEventCheckpoint): Promise<{ inserted: boolean; id: string }>;
-  waitForUser(input: { runId: string; attempt: number; workerId: string; pendingActions: PendingAction[]; pendingActionSelector?: string }): Promise<boolean>;
-  waitForApproval(input: { runId: string; attempt: number; workerId: string; pendingActions: PendingAction[]; pendingActionSelector?: string }): Promise<boolean>;
-  complete(input: { runId: string; attempt: number; workerId: string; turnId: string; output: Record<string, unknown> | null }): Promise<boolean>;
-  fail(input: { runId: string; attempt: number; workerId: string; turnId?: string; errorCode: string; errorMessage: string }): Promise<boolean>;
-  cancel(input: { runId: string; attempt: number; workerId: string; turnId?: string }): Promise<boolean>;
+  waitForUser(input: { runId: string; attempt: number; workerId: string; turnId: string; pendingActions: PendingAction[]; pendingActionSelector?: string; providerSequence?: number }): Promise<boolean>;
+  waitForApproval(input: { runId: string; attempt: number; workerId: string; turnId: string; pendingActions: PendingAction[]; pendingActionSelector?: string; providerSequence?: number }): Promise<boolean>;
+  complete(input: { runId: string; attempt: number; workerId: string; turnId: string; output: Record<string, unknown> | null; providerSequence?: number }): Promise<boolean>;
+  fail(input: { runId: string; attempt: number; workerId: string; turnId?: string; errorCode: string; errorMessage: string; providerSequence?: number }): Promise<boolean>;
+  cancel(input: { runId: string; attempt: number; workerId: string; turnId?: string; providerSequence?: number }): Promise<boolean>;
   queueResume(input: {
     runId: string;
     pendingAction?: PendingAction[];
@@ -162,6 +157,15 @@ export interface AgentRunStore {
   releaseForRetry(input: { runId: string; attempt: number; workerId: string; errorCode: string; errorMessage: string }): Promise<boolean>;
   getDocument(documentId: string): Promise<{ title: string; content: string } | null>;
   getConversationSession(conversationId: string): Promise<string | null>;
+  createAssistantDeltaStream(input: {
+    conversationId: string;
+    runId: string;
+    attempt: number;
+    workerId: string;
+  }): Promise<AssistantDeltaStream>;
+  /** Existing assistant projection, used to resume a stream without replacing
+   * previously persisted content when the worker is retried mid-turn. */
+  getAssistantMessage?(conversationId: string, operationKey: string): Promise<{ content: string; tools: string[] } | null>;
   checkpointConversationSession(input: { conversationId: string; sessionId: string; expectedSessionId?: string }): Promise<boolean>;
   upsertAssistantMessage(input: {
     conversationId: string;
@@ -171,12 +175,17 @@ export interface AgentRunStore {
     tools: string[];
     status: string;
     pauseActions?: PendingAction[];
+    /** Optimistic ownership guard for retry-safe worker projections. */
+    attempt?: number;
+    workerId?: string;
   }): Promise<unknown>;
   checkpointSpecialist(input: { taskId: string; runId: string; sessionId?: string; turnId?: string }): Promise<boolean>;
   appendTaskEvent(input: { taskId: string; type: string; payload: unknown; operationKey: string }): Promise<unknown>;
   finalizeSpecialist(input: {
     taskId: string;
     runId: string;
+    attempt: number;
+    workerId: string;
     status: "completed" | "waiting_for_approval" | "waiting_for_user" | "failed" | "cancelled";
     sessionId?: string;
     turnId?: string;
@@ -185,6 +194,7 @@ export interface AgentRunStore {
     pendingActionSelector?: string;
     errorCode?: string;
     errorMessage?: string;
+    providerSequence?: number;
     operationKey: string;
   }): Promise<unknown>;
   readySuccessors(taskId: string): Promise<unknown>;

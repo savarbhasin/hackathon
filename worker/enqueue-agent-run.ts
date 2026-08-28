@@ -1,4 +1,5 @@
 import { createAndEnqueueDurableRun } from "../src/lib/queue/producer";
+import { closeProducerRedisConnection } from "../src/lib/queue/redis";
 import type { AgentRunKind } from "../src/lib/queue/types";
 
 function value(name: string): string {
@@ -24,7 +25,9 @@ async function main(): Promise<void> {
   console.log(JSON.stringify({ runId: result.run._id, queue: result.queue }, null, 2));
 }
 
-main().catch((error) => {
-  console.error(JSON.stringify({ error: error instanceof Error ? error.message : "enqueue failed" }));
-  process.exitCode = 1;
-});
+main()
+  .catch((error) => {
+    console.error(JSON.stringify({ error: error instanceof Error ? error.message : "enqueue failed" }));
+    process.exitCode = 1;
+  })
+  .finally(() => closeProducerRedisConnection());

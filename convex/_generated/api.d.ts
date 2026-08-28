@@ -10,6 +10,7 @@
 
 import type * as agentProfiles from "../agentProfiles.js";
 import type * as agentRuns from "../agentRuns.js";
+import type * as agentStreaming from "../agentStreaming.js";
 import type * as conversations from "../conversations.js";
 import type * as documents from "../documents.js";
 import type * as missions from "../missions.js";
@@ -24,6 +25,7 @@ import type {
 declare const fullApi: ApiFromModules<{
   agentProfiles: typeof agentProfiles;
   agentRuns: typeof agentRuns;
+  agentStreaming: typeof agentStreaming;
   conversations: typeof conversations;
   documents: typeof documents;
   missions: typeof missions;
@@ -56,4 +58,6 @@ export declare const internal: FilterApi<
   FunctionReference<any, "internal">
 >;
 
-export declare const components: {};
+export declare const components: {
+  agent: import("@convex-dev/agent/_generated/component.js").ComponentApi<"agent">;
+};

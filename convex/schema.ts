@@ -82,6 +82,9 @@ export default defineSchema({
     // A session is normally seeded by the web enqueue path. It is optional
     // during creation so the worker can establish one durably on first run.
     sessionId: v.optional(v.string()),
+    // Official Convex Agent thread used only for realtime stream deltas. The
+    // durable conversation/message model remains owned by this application.
+    agentThreadId: v.optional(v.string()),
     // Assistant token writes do not move the conversation in the sidebar.
     summaryUpdatedAt: v.number(),
     messageCount: v.number(),
@@ -208,15 +211,19 @@ export default defineSchema({
     .index("by_status_updatedAt", ["status", "updatedAt"])
     .index("by_session_turn", ["sessionId", "turnId"]),
 
-  runEvents: defineTable({
+  // Ownership sidecar for official Convex Agent component streams. Component
+  // IDs cannot be declared as app-table IDs, so they are stored as strings.
+  agentStreams: defineTable({
+    streamId: v.string(),
+    threadId: v.string(),
+    conversationId: v.id("conversations"),
     runId: v.id("agentRuns"),
-    sequence: v.number(),
-    providerEventId: v.optional(v.string()),
-    providerSequence: v.optional(v.number()),
-    type: v.string(),
-    payload: v.any(),
+    attempt: v.number(),
+    workerId: v.string(),
+    state: v.string(),
     createdAt: v.number(),
+    updatedAt: v.number(),
   })
-    .index("by_run_sequence", ["runId", "sequence"])
-    .index("by_run_providerEventId", ["runId", "providerEventId"]),
+    .index("by_streamId", ["streamId"])
+    .index("by_run_attempt", ["runId", "attempt"]),
 });
