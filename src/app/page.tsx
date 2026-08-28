@@ -6,6 +6,7 @@ import { useStreamingUIMessages } from "@convex-dev/agent/react";
 import { api } from "../../convex/_generated/api";
 import { ChatMarkdown } from "@/components/chat-markdown";
 import { ConfirmDialog } from "@/components/confirm-dialog";
+import { visibleStreamText, type StreamingMessagePart } from "@/lib/stream-display";
 
 interface PauseAction {
   selector: string;
@@ -37,6 +38,7 @@ interface Msg {
   role: "user" | "assistant";
   content: string;
   tools?: string[];
+  toolState?: string;
   status?: string;
   pending?: boolean;
   pause?: PauseAction[];
@@ -88,7 +90,7 @@ interface ConvexAgentStreamMessage {
   text: string;
   status: string;
   agentName?: string;
-  parts?: Array<{ toolName?: string }>;
+  parts?: StreamingMessagePart[];
 }
 
 const anyApi = api as unknown as Record<string, Record<string, any>>;
@@ -278,15 +280,17 @@ export default function Home() {
           && !!activeRunId
           && runId === activeRunId
           && activeProcessing;
-        const tools = [...new Set((stream.parts ?? [])
-          .map((part) => part.toolName)
-          .filter((name): name is string => typeof name === "string" && name.length > 0))];
+        const toolParts = (stream.parts ?? [])
+          .filter((part): part is { toolName: string; state?: string } => typeof part.toolName === "string" && part.toolName.length > 0);
+        const tools = toolParts.map((part) => part.toolName);
+        const latestToolPart = toolParts[toolParts.length - 1];
         return {
           id: stream.id,
           runId,
           role: "assistant" as const,
-          content: stream.text ?? "",
+          content: visibleStreamText(stream.parts, stream.text ?? ""),
           tools,
+          toolState: latestToolPart?.state,
           pending,
           status: pending ? activeStatus ?? "running" : "completed",
         };
@@ -1209,7 +1213,7 @@ function Message({ message, busy, onAnswer }: { message: Msg; busy: boolean; onA
         {!message.pending && message.pause?.length ? <span className="text-state-blocked">paused, input needed</span> : null}
       </p>
       {(message.tools?.length ?? 0) > 0 && (
-        <ToolActivity tools={message.tools!} active={Boolean(message.pending)} />
+        <ToolActivity tools={message.tools!} active={Boolean(message.pending)} state={message.toolState} />
       )}
       {failed ? (
         <div role="alert" className="mt-2 rounded-md border border-error/60 bg-error/10 px-3 py-2.5 text-sm leading-relaxed text-error">
@@ -1228,11 +1232,31 @@ function Message({ message, busy, onAnswer }: { message: Msg; busy: boolean; onA
   );
 }
 
-function ToolActivity({ tools, active }: { tools: string[]; active: boolean }) {
+function ToolActivity({ tools, active, state }: { tools: string[]; active: boolean; state?: string }) {
   const latest = tools[tools.length - 1];
-  return <div className="mb-3 max-w-xl font-mono text-[10px] leading-relaxed text-ink-faint">
-    <span className={`truncate ${active ? "tool-activity-live" : ""}`}>{toolActivityLabel(latest, active)}</span>
-  </div>;
+  const extra = tools.length > 1 ? ` + ${tools.length - 1}` : "";
+  const terminal = state === "output-available" || state === "output-error" || state === "output-denied" || state === "approval-requested";
+  const live = active && !terminal;
+  return (
+    <details className="group mb-3 max-w-xl">
+      <summary className="flex cursor-pointer list-none items-center gap-1.5 font-mono text-[10px] leading-relaxed text-ink-faint [&::-webkit-details-marker]:hidden">
+        <span className={`min-w-0 truncate ${live ? "tool-activity-live" : ""}`}>{toolActivityLabel(latest, live, state)}{extra}</span>
+        <svg viewBox="0 0 12 12" className="h-3 w-3 shrink-0 text-ink-faint transition-transform group-open:rotate-90" aria-hidden="true">
+          <path d="m4.5 2.5 3.5 3.5-3.5 3.5" fill="none" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      </summary>
+      <div className="mt-1.5 border-l border-line pl-3">
+        <ol className="space-y-1.5">
+          {tools.map((tool, index) => (
+            <li key={`${tool}-${index}`} className="flex items-start gap-2 font-mono text-[10px] leading-relaxed text-ink-soft">
+              <span className="w-4 shrink-0 text-right tabular-nums text-ink-faint">{index + 1}</span>
+              <code className="break-all">{tool}</code>
+            </li>
+          ))}
+        </ol>
+      </div>
+    </details>
+  );
 }
 
 const TOOL_ACTIVITY: Record<string, { active: string; done: string }> = {
@@ -1253,11 +1277,14 @@ const TOOL_ACTIVITY: Record<string, { active: string; done: string }> = {
   save_document: { active: "Saving a document", done: "Saved a document" },
 };
 
-function toolActivityLabel(tool: string, active: boolean): string {
+function toolActivityLabel(tool: string, active: boolean, state?: string): string {
   const base = tool.split(".").pop() ?? tool;
+  const readable = base.replace(/[_-]+/g, " ").replace(/\s+/g, " ").trim();
+  if (state === "approval-requested") return `Waiting for approval · ${readable || "tool action"}`;
+  if (state === "output-error") return `${readable || "Tool action"} failed`;
+  if (state === "output-denied") return `${readable || "Tool action"} denied`;
   const known = TOOL_ACTIVITY[base];
   if (known) return active ? known.active : known.done;
-  const readable = base.replace(/[_-]+/g, " ").replace(/\s+/g, " ").trim();
   return `${active ? "Using" : "Used"} ${readable || "a tool"}`;
 }
 

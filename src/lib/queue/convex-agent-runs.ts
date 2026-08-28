@@ -4,6 +4,7 @@ import { ConvexHttpClient } from "convex/browser";
 import { anyApi } from "convex/server";
 import { api } from "../../../convex/_generated/api";
 import { convexUrl } from "./env";
+import { AssistantToolStreamProjector } from "./assistant-tool-stream";
 import type {
   AgentRunKind,
   AgentRunRecord,
@@ -235,7 +236,10 @@ export class ConvexAgentRunStore implements AgentRunStore {
       bridgeComponent as never,
       bridgeContext as never,
       {
-        throttleMs: 100,
+        // DeltaStreamer has no trailing throttle timer. A zero throttle keeps
+        // the last text/tool chunk from waiting behind a long-running tool.
+        // Concurrent provider fragments are still serialized and compressed.
+        throttleMs: 0,
         onAsyncAbort: async () => undefined,
         abortSignal: undefined,
         compress: compressUIMessageChunks,
@@ -253,29 +257,49 @@ export class ConvexAgentRunStore implements AgentRunStore {
     // Create the component record immediately so other devices see a durable
     // streaming row before the first provider text fragment arrives.
     await streamer.getOrCreateStreamId();
-    const textPartId = `assistant:${input.runId}:${input.attempt}`;
-    let started = false;
-    let textEnded = false;
+    const textPartPrefix = `assistant:${input.runId}:${input.attempt}`;
+    const toolProjector = new AssistantToolStreamProjector();
+    let textPartIndex = 0;
+    let activeTextPartId: string | undefined;
     let ended = false;
+    const addToolChunks = async (chunks: UIMessageChunk[]) => {
+      if (ended || chunks.length === 0) return;
+      // Close the narration segment before the first tool part. Any later text
+      // starts a new segment, allowing the UI to hide transient pre-tool prose.
+      if (activeTextPartId && chunks.some((chunk) => chunk.type === "tool-input-start")) {
+        chunks = [{ type: "text-end", id: activeTextPartId }, ...chunks];
+        activeTextPartId = undefined;
+      }
+      await streamer.addParts(chunks);
+    };
     return {
       async addText(delta: string): Promise<void> {
-        if (!delta || ended || textEnded) return;
+        if (!delta || ended) return;
         const chunks: UIMessageChunk[] = [];
-        if (!started) {
-          chunks.push({ type: "text-start", id: textPartId });
-          started = true;
+        if (!activeTextPartId) {
+          activeTextPartId = `${textPartPrefix}:${textPartIndex++}`;
+          chunks.push({ type: "text-start", id: activeTextPartId });
         }
-        chunks.push({ type: "text-delta", id: textPartId, delta });
+        chunks.push({ type: "text-delta", id: activeTextPartId, delta });
         await streamer.addParts(chunks);
+      },
+      async syncToolCalls(calls): Promise<void> {
+        await addToolChunks(toolProjector.sync(calls));
+      },
+      async completeToolCall(toolCallId): Promise<void> {
+        await addToolChunks(toolProjector.complete(toolCallId));
+      },
+      async requestToolApproval(toolCallId, approvalId): Promise<void> {
+        await addToolChunks(toolProjector.requestApproval(toolCallId, approvalId));
       },
       async finish(): Promise<void> {
         if (ended) return;
         // Do not mark the adapter ended until the component mutation succeeds:
         // Convex can commit and still report a transport error, and callers
         // must be able to retry without adding a second text-end chunk.
-        if (started && !textEnded) {
-          await streamer.addParts([{ type: "text-end", id: textPartId }]);
-          textEnded = true;
+        if (activeTextPartId) {
+          await streamer.addParts([{ type: "text-end", id: activeTextPartId }]);
+          activeTextPartId = undefined;
         }
         await streamer.finish();
         ended = true;
