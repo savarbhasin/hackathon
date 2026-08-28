@@ -185,17 +185,23 @@ export class ConvexAgentRunStore implements AgentRunStore {
       : null;
   }
 
-  async getConversationTitle(conversationId: string): Promise<string | null> {
-    const conversation = await this.client.query(anyApi.conversations.get, { conversationId: runId(conversationId) });
-    if (!conversation || typeof conversation !== "object") return null;
-    return typeof (conversation as { title?: unknown }).title === "string"
-      ? (conversation as { title: string }).title
-      : null;
+  async getConversationTitleState(conversationId: string): Promise<{ title: string; seedMessage: string } | null> {
+    const id = runId(conversationId);
+    const [conversation, messages] = await Promise.all([
+      this.client.query(anyApi.conversations.get, { conversationId: id }),
+      this.client.query(anyApi.conversations.listMessages, { conversationId: id, limit: 1 }),
+    ]);
+    if (!conversation || typeof conversation !== "object" || !Array.isArray(messages)) return null;
+    const title = (conversation as { title?: unknown }).title;
+    const seedMessage = (messages[0] as { role?: unknown; content?: unknown } | undefined);
+    if (typeof title !== "string" || seedMessage?.role !== "user" || typeof seedMessage.content !== "string") return null;
+    return { title, seedMessage: seedMessage.content };
   }
 
-  async updateConversationTitle(input: { conversationId: string; title: string }): Promise<boolean> {
+  async updateConversationTitle(input: { conversationId: string; expectedTitle: string; title: string }): Promise<boolean> {
     const conversation = await this.client.mutation(anyApi.conversations.update, {
       conversationId: runId(input.conversationId),
+      expectedTitle: input.expectedTitle,
       title: input.title,
     }) as unknown;
     return !!conversation;

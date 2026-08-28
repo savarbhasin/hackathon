@@ -265,21 +265,27 @@ function completionTokenStatus(metrics: RecordValue | undefined): string {
 
 type ProjectionOwnership = { attempt: number; workerId: string };
 
-async function maybeGenerateConversationTitle(
+export async function maybeGenerateConversationTitle(
   store: AgentRunStore,
   client: TrueForge,
   conversationId: string | undefined,
-  firstMessage: string,
-): Promise<void> {
-  if (!conversationId || !firstMessage.trim()) return;
-  const currentTitle = await store.getConversationTitle(conversationId);
-  // Admission seeds new conversations with the first-message fallback. Once a
-  // model title exists, later turns must never rename the conversation.
-  if (currentTitle !== fallbackConversationTitle(firstMessage)) return;
-  const generated = await generateConversationTitle(client, firstMessage);
-  if (generated && generated !== currentTitle) {
-    await store.updateConversationTitle({ conversationId, title: generated });
-  }
+  generate: typeof generateConversationTitle = generateConversationTitle,
+): Promise<"skipped" | "empty" | "updated" | "stale"> {
+  if (!conversationId) return "skipped";
+  const state = await store.getConversationTitleState(conversationId);
+  if (!state?.seedMessage.trim()) return "skipped";
+  const expectedTitle = fallbackConversationTitle(state.seedMessage);
+  // Always compare against the original admitted message, not the current run,
+  // so a transient first-attempt failure can be retried on a later turn.
+  if (state.title !== expectedTitle) return "skipped";
+  const generated = await generate(client, state.seedMessage);
+  if (!generated || generated === state.title) return "empty";
+  // The Convex mutation repeats the expected-title comparison atomically. A
+  // manual rename or competing generator that wins during the provider call is
+  // therefore never overwritten by this delayed result.
+  return await store.updateConversationTitle({ conversationId, expectedTitle, title: generated })
+    ? "updated"
+    : "stale";
 }
 
 async function project(
@@ -359,11 +365,9 @@ export async function processDurableOrchestratorRun(store: AgentRunStore, run: A
   let streamDelta = "";
   let projectedText = "";
   let deltaStream: AssistantDeltaStream | undefined;
-  let firstMessage = "";
 
   try {
     const input = parseDurableOrchestratorInput(run.input);
-    firstMessage = input.message;
     const hasResume = run.resumeInput !== undefined && run.resumeInput !== null;
     if (!sessionId && run.conversationId) sessionId = await store.getConversationSession(run.conversationId) ?? undefined;
     if (!sessionId) {
@@ -542,7 +546,9 @@ export async function processDurableOrchestratorRun(store: AgentRunStore, run: A
         if (!await store.complete({ runId: run._id, attempt, workerId: context.workerId, turnId, output: { content: mergedText, status: stateStatus, tools, ...(metrics ? { metrics } : {}) }, ...(providerSequence !== null ? { providerSequence } : {}) })) return;
         await deltaStream?.finish();
         try {
-          await maybeGenerateConversationTitle(store, client, run.conversationId, firstMessage);
+          workerLog("run.title_generation_started", { runId: run._id });
+          const titleResult = await maybeGenerateConversationTitle(store, client, run.conversationId);
+          workerLog("run.title_generation_completed", { runId: run._id, result: titleResult });
         } catch (error) {
           workerLog("run.title_generation_failed", {
             runId: run._id,
