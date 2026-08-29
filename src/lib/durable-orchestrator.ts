@@ -1,8 +1,7 @@
 import { isEventDelta, mergeEventDelta, TrueForge } from "@truefoundry/trueforge-sdk";
 import type { TrueForgeApi } from "@truefoundry/trueforge-sdk";
 import { ORCHESTRATOR_INSTRUCTIONS, ORCHESTRATOR_SPEC } from "./fleet";
-import { fallbackConversationTitle, generateConversationTitle } from "./conversation-title";
-import type { AgentRunRecord, AgentRunStore, AssistantDeltaStream, AssistantToolCall, PendingAction } from "./queue/types";
+import type { AgentRunRecord, AgentRunStore, AssistantDeltaStream, AssistantMessagePart, AssistantToolCall, PendingAction } from "./queue/types";
 import { RecoverableRunError } from "./queue/types";
 import { trueForgeBaseUrl } from "./queue/env";
 import { workerLog } from "./queue/log";
@@ -193,6 +192,128 @@ export function streamingToolCalls(messages: Map<string, RecordValue>): Assistan
   return calls;
 }
 
+/** Visible assistant text and tool calls in their original provider order. */
+export function orderedAssistantParts(
+  messages: Map<string, RecordValue>,
+  fallback: string,
+  toolStates: ReadonlyMap<string, string> = new Map(),
+): AssistantMessagePart[] {
+  const parts: AssistantMessagePart[] = [];
+  let hasText = false;
+  for (const message of messages.values()) {
+    if (message.threadId !== undefined && message.threadId !== "main") continue;
+    if (typeof message.content === "string" && message.content.length > 0) {
+      parts.push({ type: "text", text: message.content });
+      hasText = true;
+    }
+    for (const rawCall of Array.isArray(message.toolCalls) ? message.toolCalls : []) {
+      const call = record(rawCall);
+      const name = call ? toolName(call) : undefined;
+      if (!call || typeof call.id !== "string" || !name) continue;
+      parts.push({
+        type: "tool",
+        toolCallId: call.id,
+        toolName: name,
+        state: toolStates.get(call.id) ?? "input-available",
+      });
+    }
+  }
+  if (!hasText && fallback) parts.unshift({ type: "text", text: fallback });
+  return parts;
+}
+
+function isTerminalToolState(state?: string): boolean {
+  return state === "output-available"
+    || state === "output-error"
+    || state === "output-denied"
+    || state === "approval-requested"
+    || state === "response-required";
+}
+
+function compatibleAssistantParts(left: AssistantMessagePart, right: AssistantMessagePart): boolean {
+  if (left.type !== right.type) return false;
+  if (left.type === "tool") {
+    return Boolean(left.toolCallId && right.toolCallId && left.toolCallId === right.toolCallId);
+  }
+  const leftText = left.text ?? "";
+  const rightText = right.text ?? "";
+  return leftText.startsWith(rightText) || rightText.startsWith(leftText);
+}
+
+function mergeCompatibleAssistantParts(left: AssistantMessagePart, right: AssistantMessagePart): AssistantMessagePart {
+  if (left.type === "text" && right.type === "text") {
+    return (right.text?.length ?? 0) >= (left.text?.length ?? 0) ? right : left;
+  }
+  if (left.type === "tool" && right.type === "tool") {
+    if (!right.state || (isTerminalToolState(left.state) && !isTerminalToolState(right.state))) {
+      return { ...right, state: left.state };
+    }
+    return right;
+  }
+  return right;
+}
+
+/**
+ * Reconcile a persisted projection with a replayed provider snapshot. TrueForge
+ * may replay the whole turn or only an overlapping suffix after a retry; match
+ * text prefixes and tool-call IDs so already durable cards are not appended a
+ * second time. Distinct tool-call IDs remain distinct even when names repeat.
+ */
+export function mergeAssistantPartProjection(
+  baseline: readonly AssistantMessagePart[],
+  candidate: readonly AssistantMessagePart[],
+): AssistantMessagePart[] {
+  if (baseline.length === 0) return [...candidate];
+  if (candidate.length === 0) return [...baseline];
+
+  let bestOffset = -1;
+  let bestOverlap = 0;
+  for (let offset = 0; offset < baseline.length; offset += 1) {
+    let overlap = 0;
+    while (
+      offset + overlap < baseline.length
+      && overlap < candidate.length
+      && compatibleAssistantParts(baseline[offset + overlap], candidate[overlap])
+    ) {
+      overlap += 1;
+    }
+    if (overlap > bestOverlap) {
+      bestOffset = offset;
+      bestOverlap = overlap;
+    }
+  }
+
+  if (bestOffset < 0) return [...baseline, ...candidate];
+
+  const merged = [...baseline];
+  for (let index = 0; index < bestOverlap; index += 1) {
+    const baselineIndex = bestOffset + index;
+    merged[baselineIndex] = mergeCompatibleAssistantParts(merged[baselineIndex], candidate[index]);
+  }
+  merged.push(...candidate.slice(bestOverlap));
+  return merged;
+}
+
+function withFinalTextPart(parts: AssistantMessagePart[], finalText: string): AssistantMessagePart[] {
+  if (!finalText) return parts;
+  let lastToolIndex = -1;
+  for (let index = 0; index < parts.length; index += 1) {
+    if (parts[index].type === "tool") lastToolIndex = index;
+  }
+  for (let index = parts.length - 1; index > lastToolIndex; index -= 1) {
+    const text = parts[index].type === "text" ? parts[index].text : undefined;
+    if (typeof text !== "string") continue;
+    if (text === finalText || text.endsWith(finalText)) return parts;
+    if (finalText.startsWith(text)) {
+      const next = [...parts];
+      next[index] = { type: "text", text: finalText };
+      return next;
+    }
+    break;
+  }
+  return [...parts, { type: "text", text: finalText }];
+}
+
 function stableSelector(runId: string, actionIndex: number, toolCallId: string, sourceEventId?: string): string {
   const suffix = sourceEventId ? `${sourceEventId}_${toolCallId}` : toolCallId;
   return `pause_${runId}_${actionIndex}_${suffix}`.slice(0, 240);
@@ -265,34 +386,12 @@ function completionTokenStatus(metrics: RecordValue | undefined): string {
 
 type ProjectionOwnership = { attempt: number; workerId: string };
 
-export async function maybeGenerateConversationTitle(
-  store: AgentRunStore,
-  client: TrueForge,
-  conversationId: string | undefined,
-  generate: typeof generateConversationTitle = generateConversationTitle,
-): Promise<"skipped" | "empty" | "updated" | "stale"> {
-  if (!conversationId) return "skipped";
-  const state = await store.getConversationTitleState(conversationId);
-  if (!state?.seedMessage.trim()) return "skipped";
-  const expectedTitle = fallbackConversationTitle(state.seedMessage);
-  // Always compare against the original admitted message, not the current run,
-  // so a transient first-attempt failure can be retried on a later turn.
-  if (state.title !== expectedTitle) return "skipped";
-  const generated = await generate(client, state.seedMessage);
-  if (!generated || generated === state.title) return "empty";
-  // The Convex mutation repeats the expected-title comparison atomically. A
-  // manual rename or competing generator that wins during the provider call is
-  // therefore never overwritten by this delayed result.
-  return await store.updateConversationTitle({ conversationId, expectedTitle, title: generated })
-    ? "updated"
-    : "stale";
-}
-
 async function project(
   store: AgentRunStore,
   run: AgentRunRecord,
   content: string,
   tools: string[],
+  parts: AssistantMessagePart[] | undefined,
   status: string,
   pauseActions?: PendingAction[],
   ownership?: ProjectionOwnership,
@@ -304,6 +403,7 @@ async function project(
     operationKey: `assistant:${run._id}`,
     content: content.slice(0, 100_000),
     tools,
+    ...(parts !== undefined ? { parts } : {}),
     status,
     ...(pauseActions ? { pauseActions } : {}),
     ...(ownership ?? {}),
@@ -358,6 +458,9 @@ export async function processDurableOrchestratorRun(store: AgentRunStore, run: A
   const messages = new Map<string, RecordValue>();
   let fallbackDelta = "";
   let tools: string[] = [];
+  let messageParts: AssistantMessagePart[] = [];
+  let projectionPartsBaseline: AssistantMessagePart[] = [];
+  const toolStates = new Map<string, string>();
   // Keep the prior Convex content separate from this subscription's text
   // delta. This is important when reconnecting after a provider cursor: each
   // retry candidate must be merged against the same stable prefix.
@@ -439,6 +542,8 @@ export async function processDurableOrchestratorRun(store: AgentRunStore, run: A
         projectionBaseline = existing.content;
         projectedText = projectionBaseline;
         tools = existing.tools;
+        projectionPartsBaseline = existing.parts;
+        messageParts = projectionPartsBaseline;
       }
     }
     if (run.conversationId) {
@@ -486,19 +591,31 @@ export async function processDurableOrchestratorRun(store: AgentRunStore, run: A
       if (type !== "turn.done" && projectedText.startsWith(previousProjectedText)) {
         await deltaStream?.addText(projectedText.slice(previousProjectedText.length));
       }
-      await deltaStream?.syncToolCalls(streamingToolCalls(messages));
+      const streamingCalls = streamingToolCalls(messages);
+      for (const call of streamingCalls) {
+        if (!toolStates.has(call.toolCallId)) toolStates.set(call.toolCallId, "input-available");
+      }
+      await deltaStream?.syncToolCalls(streamingCalls);
       if (type === "tool.response" && typeof event.toolCallId === "string") {
         // The component only needs the lifecycle transition. TrueForge remains
         // authoritative for the potentially large or sensitive result body.
+        toolStates.set(event.toolCallId, "output-available");
         await deltaStream?.completeToolCall(event.toolCallId);
-      } else if (type === "tool.approval_required" && typeof event.id === "string") {
+      } else if ((type === "tool.approval_required" || type === "tool.response_required") && typeof event.id === "string") {
         for (const value of (Array.isArray(event.toolCalls) ? event.toolCalls : [])) {
           const ref = record(value);
           if (typeof ref?.id === "string") {
-            await deltaStream?.requestToolApproval(ref.id, `trueforge:${event.id}:${ref.id}`);
+            toolStates.set(ref.id, type === "tool.approval_required" ? "approval-requested" : "response-required");
+            if (type === "tool.approval_required") {
+              await deltaStream?.requestToolApproval(ref.id, `trueforge:${event.id}:${ref.id}`);
+            }
           }
         }
       }
+      messageParts = mergeAssistantPartProjection(
+        projectionPartsBaseline,
+        orderedAssistantParts(messages, fallbackDelta, toolStates),
+      );
 
       if (type !== "turn.done") continue;
 
@@ -515,24 +632,30 @@ export async function processDurableOrchestratorRun(store: AgentRunStore, run: A
       if (streamedTerminalText.startsWith(beforeTerminalText)) {
         await deltaStream?.addText(streamedTerminalText.slice(beforeTerminalText.length));
       }
-      // The component stream retains the transient narration in its first text
-      // segment for realtime continuity. The durable row keeps only the actual
-      // response after the final tool call, so reloads never restore the prose
-      // the UI intentionally hid.
+      // `content` remains the concise final answer used by older clients. The
+      // ordered `parts` projection separately preserves narration around tools.
       mergedText = tools.length > 0
         ? textAfterLastToolCall(messages, fallbackDelta)
         : streamedTerminalText;
+      const finalVisibleText = outputContent || textAfterLastToolCall(messages, fallbackDelta);
+      messageParts = withFinalTextPart(messageParts, finalVisibleText);
       if (stateStatus === "done") {
         const actions = enrichPendingActions(run._id, Array.isArray(state.requiredActions) ? state.requiredActions : [], messages);
         if (actions.length > 0) {
           for (const action of actions) {
-            if (action.type !== "tool.approval_required") continue;
             for (const ref of action.toolCalls) {
-              await deltaStream?.requestToolApproval(ref.id, action.selector ?? `trueforge:${run._id}:${ref.id}`);
+              toolStates.set(ref.id, action.type === "tool.approval_required" ? "approval-requested" : "response-required");
+              if (action.type === "tool.approval_required") {
+                await deltaStream?.requestToolApproval(ref.id, action.selector ?? `trueforge:${run._id}:${ref.id}`);
+              }
             }
           }
           const waitingStatus = actions.some((action) => action.type === "tool.approval_required") ? "waiting_for_approval" : "waiting_for_user";
-          await project(store, run, mergedText, tools, waitingStatus, actions, { attempt, workerId: context.workerId });
+          messageParts = withFinalTextPart(mergeAssistantPartProjection(
+            projectionPartsBaseline,
+            orderedAssistantParts(messages, fallbackDelta, toolStates),
+          ), finalVisibleText);
+          await project(store, run, mergedText, tools, messageParts, waitingStatus, actions, { attempt, workerId: context.workerId });
           const pendingActionSelector = actions.length === 1 ? actions[0].selector : undefined;
           const paused = actions.some((action) => action.type === "tool.approval_required")
             ? await store.waitForApproval({ runId: run._id, attempt, workerId: context.workerId, turnId, pendingActions: actions, pendingActionSelector, ...(providerSequence !== null ? { providerSequence } : {}) })
@@ -542,23 +665,13 @@ export async function processDurableOrchestratorRun(store: AgentRunStore, run: A
           workerLog("run.orchestrator_paused", { runId: run._id, attempt, turnId, actionCount: actions.length });
           return;
         }
-        await project(store, run, mergedText, tools, completionTokenStatus(metrics), [], { attempt, workerId: context.workerId });
+        await project(store, run, mergedText, tools, messageParts, completionTokenStatus(metrics), [], { attempt, workerId: context.workerId });
         if (!await store.complete({ runId: run._id, attempt, workerId: context.workerId, turnId, output: { content: mergedText, status: stateStatus, tools, ...(metrics ? { metrics } : {}) }, ...(providerSequence !== null ? { providerSequence } : {}) })) return;
         await deltaStream?.finish();
-        try {
-          workerLog("run.title_generation_started", { runId: run._id });
-          const titleResult = await maybeGenerateConversationTitle(store, client, run.conversationId);
-          workerLog("run.title_generation_completed", { runId: run._id, result: titleResult });
-        } catch (error) {
-          workerLog("run.title_generation_failed", {
-            runId: run._id,
-            message: error instanceof Error ? error.message.slice(0, 200) : "unknown",
-          });
-        }
         return;
       }
       if (stateStatus === "cancelled") {
-        await project(store, run, mergedText, tools, "cancelled", [], { attempt, workerId: context.workerId });
+        await project(store, run, mergedText, tools, messageParts, "cancelled", [], { attempt, workerId: context.workerId });
         if (!await store.cancel({ runId: run._id, attempt, workerId: context.workerId, turnId, ...(providerSequence !== null ? { providerSequence } : {}) })) return;
         await deltaStream?.finish();
         return;
@@ -566,7 +679,7 @@ export async function processDurableOrchestratorRun(store: AgentRunStore, run: A
       const message = typeof state.message === "string" ? state.message : "TrueForge turn returned an error state";
       if (recoverableTerminal(message)) throw new RecoverableRunError("trueforge_terminal_transient", message);
       mergedText = mergedText || message;
-      await project(store, run, mergedText, tools, "failed", [], { attempt, workerId: context.workerId });
+      await project(store, run, mergedText, tools, messageParts, "failed", [], { attempt, workerId: context.workerId });
       if (await store.fail({ runId: run._id, attempt, workerId: context.workerId, turnId, errorCode: "trueforge_terminal", errorMessage: message, ...(providerSequence !== null ? { providerSequence } : {}) })) {
         await deltaStream?.finish();
       }
@@ -627,7 +740,7 @@ export async function processDurableOrchestratorRun(store: AgentRunStore, run: A
       const projectionStatus = retryable ? "retrying" : "failed";
       try {
         await deltaStream?.fail(retryable ? retryable.message : message).catch(() => undefined);
-        await project(store, run, mergedText || message, tools, projectionStatus, [], { attempt, workerId: context.workerId });
+        await project(store, run, mergedText || message, tools, undefined, projectionStatus, [], { attempt, workerId: context.workerId });
       } catch (flushFailure) {
         projectionError = flushFailure;
         workerLog("run.assistant_projection_failed", {

@@ -234,14 +234,8 @@ Plan before creating anything:
 - Run independent tasks in parallel. Add depends_on only when a task cannot produce a correct result without a predecessor's output. Never create self-dependencies, cycles, or dependencies on tasks from another mission.
 - Create predecessor tasks before successors so you have real task IDs for depends_on.
 
-Write every task as a complete contract. Its detail must state:
-1. Outcome: the concrete result this agent owns.
-2. Inputs: supplied facts, document IDs, predecessor outputs, and assumptions it may use.
-3. Work: the bounded actions it should perform and tools it should use.
-4. Deliverable: the exact saved document, external action, code change, or concise answer expected.
-5. Constraints: facts it must not assume, scope limits, approval requirements, and failure behavior.
-6. Done when: objective acceptance checks the agent can verify.
-7. Downstream handoff: name every later task that needs this output. Require create_doc with kind="handoff" when substantial context must pass forward. If no later task needs the output, say that no handoff document is required.
+You just need to tell the specialist agent on what to do. They have their own instructions that have their constraints defined.
+Just tell what you expect from them, and if docs need to be created for handoff.
 
 Dependency and document rules:
 - When a successor depends on a predecessor, say so in both task contracts. Tell the predecessor what the successor needs and tell the successor to read every attached DOC_ID with get_doc before starting.
@@ -294,3 +288,14 @@ export const ORCHESTRATOR_SPEC: TrueForgeApi.AgentSpec = {
     },
   ],
 };
+
+
+export const removed = `Write every task as a complete contract. Its detail must state:
+1. Outcome: the concrete result this agent owns.
+2. Inputs: supplied facts, document IDs, predecessor outputs, and assumptions it may use.
+3. Work: the bounded actions it should perform and tools it should use.
+4. Deliverable: the exact saved document, external action, code change, or concise answer expected.
+5. Constraints: facts it must not assume, scope limits, approval requirements, and failure behavior.
+6. Done when: objective acceptance checks the agent can verify.
+7. Downstream handoff: name every later task that needs this output. Require create_doc with kind="handoff" when substantial context must pass forward. If no later task needs the output, say that no handoff document is required.
+`

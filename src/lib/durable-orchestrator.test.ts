@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { fallbackConversationTitle } from "./conversation-title";
-import { maybeGenerateConversationTitle, mergeStreamingCandidate, streamingToolCalls, textAfterLastToolCall, toolNamesFromMessages } from "./durable-orchestrator";
-import type { AgentRunStore } from "./queue/types";
+import { mergeAssistantPartProjection, mergeStreamingCandidate, orderedAssistantParts, streamingToolCalls, textAfterLastToolCall, toolNamesFromMessages } from "./durable-orchestrator";
 
 test("ignores replayed cumulative prefixes until they pass the durable baseline", () => {
   const baseline = "Hello";
@@ -68,7 +67,70 @@ test("marks complete tool arguments available to the UI stream", () => {
   }]);
 });
 
-test("drops transient narration from the durable response after a tool call", () => {
+test("preserves narration around tools in the durable ordered parts", () => {
+  const messages = new Map<string, Record<string, unknown>>([
+    ["message-1", {
+      threadId: "main",
+      content: "I'll check the Mission Control board for you.",
+      toolCalls: [{ id: "call-1", function: { name: "list_board", arguments: "{}" } }],
+    }],
+    ["message-2", { threadId: "main", content: "The board is currently empty." }],
+  ]);
+
+  assert.deepEqual(orderedAssistantParts(messages, "", new Map([["call-1", "output-available"]])), [
+    { type: "text", text: "I'll check the Mission Control board for you." },
+    { type: "tool", toolCallId: "call-1", toolName: "list_board", state: "output-available" },
+    { type: "text", text: "The board is currently empty." },
+  ]);
+});
+
+test("deduplicates replayed ordered parts while preserving terminal tool state", () => {
+  const baseline = [
+    { type: "text" as const, text: "I'll inspect the board." },
+    { type: "tool" as const, toolCallId: "call-1", toolName: "list_board", state: "output-available" },
+    { type: "text" as const, text: "The board is empty." },
+  ];
+  const replayed = [
+    { type: "text" as const, text: "I'll inspect the board." },
+    { type: "tool" as const, toolCallId: "call-1", toolName: "list_board", state: "input-available" },
+    { type: "text" as const, text: "The board is empty." },
+    { type: "tool" as const, toolCallId: "call-2", toolName: "list_board", state: "input-available" },
+  ];
+
+  assert.deepEqual(mergeAssistantPartProjection(baseline, replayed), [
+    ...baseline,
+    replayed[3],
+  ]);
+});
+
+test("merges an overlapping replay suffix and preserves repeated tools with distinct call IDs", () => {
+  const baseline = [
+    { type: "tool" as const, toolCallId: "call-1", toolName: "get_task", state: "output-available" },
+    { type: "text" as const, text: "First result." },
+  ];
+  const suffix = [
+    { type: "text" as const, text: "First result." },
+    { type: "tool" as const, toolCallId: "call-2", toolName: "get_task", state: "input-available" },
+  ];
+
+  assert.deepEqual(mergeAssistantPartProjection(baseline, suffix), [
+    ...baseline,
+    suffix[1],
+  ]);
+});
+
+test("keeps a durable projection while an early replay text segment is still partial", () => {
+  const baseline = [
+    { type: "text" as const, text: "I'll inspect the board." },
+    { type: "tool" as const, toolCallId: "call-1", toolName: "list_board", state: "output-available" },
+  ];
+
+  assert.deepEqual(mergeAssistantPartProjection(baseline, [
+    { type: "text", text: "I'll inspect" },
+  ]), baseline);
+});
+
+test("drops transient narration from the legacy durable response after a tool call", () => {
   const messages = new Map<string, Record<string, unknown>>([
     ["message-1", {
       threadId: "main",
@@ -109,42 +171,8 @@ test("preserves every tool call in provider order, including repeated tools", ()
   assert.deepEqual(toolNamesFromMessages(messages), ["get_task", "get_task", "list_board"]);
 });
 
-test("retries title generation from the original seed after an empty attempt", async () => {
-  const seedMessage = "Research durable queue recovery";
-  let title = fallbackConversationTitle(seedMessage);
-  const store = {
-    getConversationTitleState: async () => ({ title, seedMessage }),
-    updateConversationTitle: async (input: { expectedTitle: string; title: string }) => {
-      if (title !== input.expectedTitle) return false;
-      title = input.title;
-      return true;
-    },
-  } as unknown as AgentRunStore;
-
-  assert.equal(await maybeGenerateConversationTitle(store, {} as never, "conversation-1", async () => null), "empty");
-  assert.equal(await maybeGenerateConversationTitle(store, {} as never, "conversation-1", async (_client, prompt) => {
-    assert.equal(prompt, seedMessage);
-    return "Durable Queue Recovery";
-  }), "updated");
-  assert.equal(title, "Durable Queue Recovery");
-});
-
-test("does not overwrite a title changed while generation is in flight", async () => {
-  const seedMessage = "Inspect the mission board";
-  let title = fallbackConversationTitle(seedMessage);
-  const store = {
-    getConversationTitleState: async () => ({ title, seedMessage }),
-    updateConversationTitle: async (input: { expectedTitle: string; title: string }) => {
-      if (title !== input.expectedTitle) return false;
-      title = input.title;
-      return true;
-    },
-  } as unknown as AgentRunStore;
-
-  const result = await maybeGenerateConversationTitle(store, {} as never, "conversation-1", async () => {
-    title = "Manually Renamed";
-    return "Generated Board Title";
-  });
-  assert.equal(result, "stale");
-  assert.equal(title, "Manually Renamed");
+test("uses the normalized first 20 characters as the conversation title", () => {
+  assert.equal(fallbackConversationTitle("  Research   durable queue recovery  "), "Research durable que");
+  assert.equal(fallbackConversationTitle("Short title"), "Short title");
+  assert.equal(fallbackConversationTitle("   \n\t  "), "New conversation");
 });

@@ -3,6 +3,7 @@ import { trueForgeBaseUrl } from "./queue/env";
 import { workerLog } from "./queue/log";
 import { RecoverableRunError } from "./queue/types";
 import type { AgentRunRecord, AgentRunStore, PendingAction } from "./queue/types";
+import { SpecialistActivityProjector, type SpecialistActivityMessage } from "./specialist-activity";
 
 type Value = Record<string, unknown>;
 type WorkerContext = { workerId: string; signal: AbortSignal };
@@ -43,6 +44,13 @@ function providerPayload(value: unknown): Value {
 }
 
 function toolName(call: Value): string | undefined {
+  const info = record(call.toolInfo);
+  const resolvedName = typeof info?.name === "string" ? info.name : undefined;
+  if (resolvedName) {
+    return info?.type === "mcp" && typeof info.serverName === "string"
+      ? `${info.serverName}.${resolvedName}`
+      : resolvedName;
+  }
   const fn = record(call.function);
   const direct = typeof fn?.name === "string" ? fn.name : typeof call.name === "string" ? call.name : undefined;
   if (!direct || direct !== "call_tool") return direct;
@@ -86,6 +94,29 @@ function namesFromMessages(messages: Map<string, Value>): string[] {
     }
   }
   return [...names];
+}
+
+function activityMessages(messages: Map<string, Value>): SpecialistActivityMessage[] {
+  const result: SpecialistActivityMessage[] = [];
+  for (const [id, message] of messages) {
+    const toolCalls: SpecialistActivityMessage["toolCalls"] = [];
+    for (const rawCall of Array.isArray(message.toolCalls) ? message.toolCalls : []) {
+      const call = record(rawCall);
+      const name = call ? toolName(call) : undefined;
+      if (call && typeof call.id === "string" && name) toolCalls.push({ id: call.id, name });
+    }
+    result.push({
+      id,
+      ...(typeof message.threadId === "string" ? { threadId: message.threadId } : {}),
+      ...(typeof message.content === "string" ? { content: message.content } : {}),
+      toolCalls,
+    });
+  }
+  return result;
+}
+
+function hasCompletionSignal(tools: string[]): boolean {
+  return tools.some((name) => name === "mark_done" || name.endsWith(".mark_done"));
 }
 
 function stableSelector(runId: string, index: number, id: string, sourceEventId?: string): string {
@@ -220,10 +251,10 @@ export async function processDurableSpecialistRun(store: AgentRunStore, run: Age
     }
     if (!turnId) throw new Error("Specialist turn was not established");
 
-    // TrueForge replays the provider turn after the last terminal cursor; no
-    // raw provider events need to round-trip through Convex while streaming.
+    // TrueForge remains the replay authority for raw provider events. Convex
+    // receives only durable narration/tool boundaries for the task activity UI.
     const stream = await client.sessions.subscribeToTurn(sessionId, turnId, hasResume ? {} : (run.providerSequence === undefined ? {} : { afterSequenceNumber: run.providerSequence }), { abortSignal: context.signal });
-    let fallbackEventSequence = 0;
+    const activityProjector = new SpecialistActivityProjector();
     for await (const metadata of stream.withMetadata()) {
       if (context.signal.aborted) throw new RecoverableRunError("worker_shutdown", "Worker shutdown interrupted specialist subscription");
       const event = providerPayload(metadata.data);
@@ -237,22 +268,19 @@ export async function processDurableSpecialistRun(store: AgentRunStore, run: Age
         }
         if (event.threadId === "main" && typeof event.content === "string") fallbackText += event.content;
       }
-      if (type === "model.message" || type.startsWith("tool.")) {
-        tools = namesFromMessages(messages);
-        const toolInfo = record(event.toolInfo);
-        const directName = typeof event.name === "string"
-          ? event.name
-          : typeof event.toolName === "string"
-            ? event.toolName
-            : typeof toolInfo?.name === "string" ? toolInfo.name : undefined;
-        if (directName || tools.length > 0) {
-          const eventKey = providerSequence !== null
-            ? String(providerSequence)
-            : typeof event.id === "string" ? event.id : `${type}:${fallbackEventSequence++}`;
-          await semantic(store, taskId, run._id, "activity.tool", { name: directName ?? tools[tools.length - 1], runId: run._id }, `tool:${eventKey}`);
+      const specialistActivity = activityMessages(messages);
+      for (const update of activityProjector.sync(specialistActivity)) {
+        await semantic(store, taskId, run._id, update.type, { ...update.payload, runId: run._id }, update.operationSuffix);
+      }
+      if (type === "tool.response" && typeof event.toolCallId === "string") {
+        for (const update of activityProjector.complete(event.toolCallId)) {
+          await semantic(store, taskId, run._id, update.type, { ...update.payload, runId: run._id }, update.operationSuffix);
         }
       }
       if (type !== "turn.done") continue;
+      for (const update of activityProjector.flush(specialistActivity)) {
+        await semantic(store, taskId, run._id, update.type, { ...update.payload, runId: run._id }, update.operationSuffix);
+      }
 
       const state = record(event.state) ?? {};
       const status = typeof state.status === "string" ? state.status : "error";
@@ -275,6 +303,28 @@ export async function processDurableSpecialistRun(store: AgentRunStore, run: Age
           const finalized = await store.finalizeSpecialist({ taskId, runId: run._id, attempt, workerId: context.workerId, status: waitingStatus, sessionId, turnId, pendingActions: actions, pendingActionSelector: selector, ...(providerSequence !== null ? { providerSequence } : {}), operationKey: `worker:${run._id}:pause:${selector ?? "multiple"}` });
           if (!finalized || !["created", "idempotent"].includes(String((finalized as Value).kind))) return;
           workerLog("run.specialist_paused", { runId: run._id, taskId, turnId, actionCount: actions.length });
+          return;
+        }
+        // A clean provider turn is not task completion. Specialists must call
+        // the Mission Control mark_done tool after producing their deliverable;
+        // otherwise a preamble-only turn (or an incomplete answer) would be
+        // incorrectly projected to Settled.
+        if (!hasCompletionSignal(tools)) {
+          const finalized = await store.finalizeSpecialist({
+            taskId,
+            runId: run._id,
+            attempt,
+            workerId: context.workerId,
+            status: "failed",
+            sessionId,
+            turnId,
+            errorCode: "missing_completion_signal",
+            errorMessage: "Agent turn ended without calling mark_done; the task was not completed.",
+            ...(providerSequence !== null ? { providerSequence } : {}),
+            operationKey: `worker:${run._id}:missing_completion_signal`,
+          });
+          if (!finalized || !["created", "idempotent"].includes(String((finalized as Value).kind))) return;
+          workerLog("run.specialist_missing_completion_signal", { runId: run._id, taskId, turnId });
           return;
         }
         const finalized = await store.finalizeSpecialist({ taskId, runId: run._id, attempt, workerId: context.workerId, status: "completed", sessionId, turnId, output: content.slice(0, 8_000), ...(providerSequence !== null ? { providerSequence } : {}), operationKey: `worker:${run._id}:completed` });

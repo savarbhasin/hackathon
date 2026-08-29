@@ -102,6 +102,14 @@ export type AdmissionResult<T = unknown> =
   | { kind: "selector_mismatch"; conversationId?: string; runId?: string; selector?: string }
   | { kind: "invalid_state"; conversationId?: string; runId?: string; reason?: string };
 
+export type AssistantMessagePart = {
+  type: "text" | "tool";
+  text?: string;
+  toolCallId?: string;
+  toolName?: string;
+  state?: string;
+};
+
 export type AssistantToolCall = {
   toolCallId: string;
   toolName: string;
@@ -182,7 +190,7 @@ export interface AgentRunStore {
   }): Promise<AssistantDeltaStream>;
   /** Existing assistant projection, used to resume a stream without replacing
    * previously persisted content when the worker is retried mid-turn. */
-  getAssistantMessage?(conversationId: string, operationKey: string): Promise<{ content: string; tools: string[] } | null>;
+  getAssistantMessage?(conversationId: string, operationKey: string): Promise<{ content: string; tools: string[]; parts: AssistantMessagePart[] } | null>;
   checkpointConversationSession(input: { conversationId: string; sessionId: string; expectedSessionId?: string }): Promise<boolean>;
   upsertAssistantMessage(input: {
     conversationId: string;
@@ -190,6 +198,7 @@ export interface AgentRunStore {
     operationKey: string;
     content: string;
     tools: string[];
+    parts?: AssistantMessagePart[];
     status: string;
     pauseActions?: PendingAction[];
     /** Optimistic ownership guard for retry-safe worker projections. */
