@@ -344,6 +344,17 @@ export const taskCore = query({
   },
 });
 
+/** Narrow worker check for an authoritative mark_done result owned by this run. */
+export const specialistCompletionRecorded = query({
+  args: { taskId, runId },
+  returns: v.boolean(),
+  handler: async (ctx, args) => {
+    const task = await ctx.db.get(args.taskId);
+    if (!task || !taskLinkedToRun(task, args.runId)) return false;
+    return task.output != null && Boolean(String(task.output).trim());
+  },
+});
+
 export const taskActivity = query({
   args: { taskId, limit: v.optional(v.number()) },
   returns: v.any(),
