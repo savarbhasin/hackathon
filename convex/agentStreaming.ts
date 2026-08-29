@@ -196,7 +196,17 @@ export const list = query({
   returns: v.any(),
   handler: async (ctx, args) => {
     const conversation = await ctx.db.get(args.conversationId);
-    if (!conversation || conversation.agentThreadId !== args.threadId) throw new Error("Conversation stream access denied");
+    // Conversation and thread state are separate reactive queries in the
+    // client. During selection changes they can briefly belong to different
+    // conversations; return no data for that stale pair rather than surfacing
+    // an expected transition race as an application error.
+    if (!conversation || conversation.agentThreadId !== args.threadId) {
+      return {
+        streams: args.streamArgs?.kind === "deltas"
+          ? { kind: "deltas" as const, deltas: [] }
+          : { kind: "list" as const, messages: [] },
+      };
+    }
     const streams = await syncStreams(ctx, components.agent, {
       threadId: args.threadId,
       streamArgs: args.streamArgs,

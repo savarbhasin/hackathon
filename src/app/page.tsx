@@ -6,7 +6,7 @@ import { useStreamingUIMessages } from "@convex-dev/agent/react";
 import { api } from "../../convex/_generated/api";
 import { ChatMarkdown } from "@/components/chat-markdown";
 import { ConfirmDialog } from "@/components/confirm-dialog";
-import { orderedStreamParts, type StreamingMessagePart } from "@/lib/stream-display";
+import { groupStreamParts, orderedStreamParts, type StreamingMessagePart } from "@/lib/stream-display";
 
 interface PauseAction {
   selector: string;
@@ -403,6 +403,12 @@ export default function Home() {
     : null;
   const selectedBusy = isActiveStatus(selectedStatus) || Boolean(conversationId && submitting[conversationId]);
   const selectedWorkerProcessing = isWorkerProcessingStatus(selectedStatus) || Boolean(conversationId && submitting[conversationId]);
+  const streamingGrowthKey = useMemo(() => {
+    const active = [...messages].reverse().find((message) => message.role === "assistant" && message.pending);
+    if (!active) return "";
+    const parts = active.parts?.map((part) => `${part.type ?? ""}:${part.text?.length ?? 0}:${part.toolCallId ?? ""}:${part.state ?? ""}`).join("|") ?? "";
+    return `${active.runId ?? active.id ?? "active"}:${active.content.length}:${parts}`;
+  }, [messages]);
   const loadingConversation = Boolean(conversationId && (selectedConversationState === undefined || selectedMessages === undefined));
   const loadingConversationId = loadingConversation ? conversationId : null;
 
@@ -503,6 +509,18 @@ export default function Home() {
     atLatestRef.current = true;
     setShowJumpToLatest(false);
   }, [conversationId, latestUserIndex, loadingConversation, pinLatestTurn, scrollViewportHeight, selectedWorkerProcessing]);
+
+  // During generation, every text delta or tool-state transition keeps the
+  // active turn pinned to its bottom. Use an immediate layout scroll so smooth
+  // animations cannot lag behind a fast provider stream.
+  useLayoutEffect(() => {
+    if (!selectedWorkerProcessing || !streamingGrowthKey) return;
+    const scrollArea = scrollAreaRef.current;
+    if (!scrollArea) return;
+    scrollArea.scrollTo({ top: scrollArea.scrollHeight, behavior: "auto" });
+    atLatestRef.current = true;
+    setShowJumpToLatest(false);
+  }, [selectedWorkerProcessing, streamingGrowthKey, scrollViewportHeight]);
 
   function jumpToLatest() {
     atLatestRef.current = true;
@@ -1271,26 +1289,21 @@ function Message({ message, busy, onAnswer }: { message: Msg; busy: boolean; onA
 }
 
 function AssistantExecution({ parts, pending }: { parts: StreamingMessagePart[]; pending: boolean }) {
+  const groups = groupStreamParts(parts);
   return (
     <div className="max-w-3xl space-y-3">
-      {parts.map((part, index) => {
-        if (part.type === "text" && part.text) {
-          return <ChatMarkdown key={`text-${index}`}>{part.text}</ChatMarkdown>;
+      {groups.map((group, index) => {
+        if (group.type === "text") {
+          return <ChatMarkdown key={`text-${index}`}>{group.part.text!}</ChatMarkdown>;
         }
-        if (!part.toolName) return null;
-        const terminal = part.state === "output-available"
-          || part.state === "output-error"
-          || part.state === "output-denied"
-          || part.state === "approval-requested"
-          || part.state === "response-required";
-        const live = pending && !terminal;
+        const latest = group.parts[group.parts.length - 1];
         return (
-          <div key={part.toolCallId ?? `tool-${index}`} className="flex min-w-0 items-center gap-2 font-mono text-[10px] leading-relaxed text-ink-faint">
-            <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${live ? "bg-signal led-live" : "border border-line-strong bg-deck"}`} aria-hidden="true" />
-            <span className={`min-w-0 truncate ${live ? "tool-activity-live" : ""}`}>
-              {toolActivityLabel(part.toolName, live, part.state)}
-            </span>
-          </div>
+          <ToolActivity
+            key={latest.toolCallId ?? `tools-${index}`}
+            tools={group.parts.map((part) => part.toolName!).filter(Boolean)}
+            active={pending}
+            state={latest.state}
+          />
         );
       })}
     </div>
@@ -1300,7 +1313,7 @@ function AssistantExecution({ parts, pending }: { parts: StreamingMessagePart[];
 function ToolActivity({ tools, active, state }: { tools: string[]; active: boolean; state?: string }) {
   const latest = tools[tools.length - 1];
   const extra = tools.length > 1 ? ` + ${tools.length - 1}` : "";
-  const terminal = state === "output-available" || state === "output-error" || state === "output-denied" || state === "approval-requested";
+  const terminal = state === "output-available" || state === "output-error" || state === "output-denied" || state === "approval-requested" || state === "response-required";
   const live = active && !terminal;
   return (
     <details className="group mb-3 max-w-xl">
