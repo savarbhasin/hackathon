@@ -7,6 +7,7 @@ import { use, useEffect, useMemo, useRef, useState, type ReactNode } from "react
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { ChatMarkdown } from "@/components/chat-markdown";
+import { groupConsecutiveSpecialistTools } from "@/lib/specialist-activity-display";
 
 const convexApi = anyApi as any;
 
@@ -881,6 +882,7 @@ function DocumentsSection({ documents }: { documents: TaskDocument[] }) {
 
 function ActivitySection({ items, liveTool }: { items: ActivityItem[]; liveTool: LiveTool | null }) {
   const feedRef = useRef<HTMLDivElement>(null);
+  const groups = groupConsecutiveSpecialistTools(items);
 
   useEffect(() => {
     const feed = feedRef.current;
@@ -893,16 +895,22 @@ function ActivitySection({ items, liveTool }: { items: ActivityItem[]; liveTool:
       {liveTool && <LiveToolActivity tool={liveTool} />}
       <div className={`${liveTool ? "mt-3" : "mt-4"} rounded-lg border border-line bg-panel/40`}>
         <div ref={feedRef} className="h-80 overflow-y-auto overscroll-contain px-4 sm:px-5">
-          {items.length > 0 ? (
+          {groups.length > 0 ? (
             <ol>
-              {items.map((item, index) => (
-                <ActivityEvent
-                  key={item.id}
-                  item={item}
-                  connected={index < items.length - 1}
-                  live={Boolean(item.kind === "tool" && item.toolPhase === "started" && item.toolCallId && item.toolCallId === liveTool?.toolCallId)}
-                />
-              ))}
+              {groups.map((group, index) => {
+                const connected = index < groups.length - 1;
+                if (group.type === "tools") {
+                  return (
+                    <ActivityToolGroup
+                      key={group.items[0].id}
+                      items={group.items}
+                      connected={connected}
+                      liveTool={liveTool}
+                    />
+                  );
+                }
+                return <ActivityEvent key={group.item.id} item={group.item} connected={connected} />;
+              })}
             </ol>
           ) : (
             <p className="py-5 text-sm text-ink-faint">No human-readable activity has been recorded yet.</p>
@@ -913,19 +921,15 @@ function ActivitySection({ items, liveTool }: { items: ActivityItem[]; liveTool:
   );
 }
 
-function ActivityEvent({ item, connected, live }: { item: ActivityItem; connected: boolean; live: boolean }) {
+function ActivityEvent({ item, connected }: { item: ActivityItem; connected: boolean }) {
   return (
     <li className="relative grid grid-cols-[14px_minmax(0,1fr)] gap-3 border-b border-line/70 py-4 last:border-b-0">
       {connected && <span className="absolute left-[6px] top-6 h-[calc(100%-12px)] w-px bg-line-strong" />}
-      <span className={`relative z-10 mt-1 h-3 w-3 rounded-full border-2 border-panel ${activityDot(item.tone)} ${live ? "led-live" : ""}`} />
+      <span className={`relative z-10 mt-1 h-3 w-3 rounded-full border-2 border-panel ${activityDot(item.tone)}`} />
       <div className="min-w-0">
         <div className="flex flex-wrap items-baseline justify-between gap-2">
           {item.kind === "narration" ? (
             <p className="font-mono text-[8px] font-semibold uppercase tracking-[0.16em] text-state-working">Agent update</p>
-          ) : item.kind === "tool" ? (
-            <p className={`break-all font-mono text-[10px] text-ink-soft ${live ? "tool-activity-live" : ""}`}>
-              {item.toolPhase === "completed" ? "Used" : "Using"} {item.toolName ?? "tool"}
-            </p>
           ) : (
             <p className="text-sm font-semibold text-ink">{item.title}</p>
           )}
@@ -939,6 +943,45 @@ function ActivityEvent({ item, connected, live }: { item: ActivityItem; connecte
           <p className="mt-1 whitespace-pre-wrap text-xs leading-6 text-ink-soft">{item.detail}</p>
         ))}
       </div>
+    </li>
+  );
+}
+
+function ActivityToolGroup({ items, connected, liveTool }: { items: ActivityItem[]; connected: boolean; liveTool: LiveTool | null }) {
+  const latest = items[items.length - 1];
+  const liveItem = items.find((item) => Boolean(
+    item.toolPhase === "started" && item.toolCallId && item.toolCallId === liveTool?.toolCallId,
+  ));
+  const display = liveItem ?? latest;
+  const live = Boolean(liveItem);
+  const extra = items.length > 1 ? ` + ${items.length - 1}` : "";
+
+  return (
+    <li className="relative grid grid-cols-[14px_minmax(0,1fr)] gap-3 border-b border-line/70 py-4 last:border-b-0">
+      {connected && <span className="absolute left-[6px] top-6 h-[calc(100%-12px)] w-px bg-line-strong" />}
+      <span className={`relative z-10 mt-1 h-3 w-3 rounded-full border-2 border-panel ${activityDot("working")} ${live ? "led-live" : ""}`} />
+      <details className="group min-w-0">
+        <summary className="flex cursor-pointer list-none items-baseline gap-2 marker:content-none [&::-webkit-details-marker]:hidden">
+          <span className={`min-w-0 flex-1 truncate font-mono text-[10px] text-ink-soft ${live ? "tool-activity-live" : ""}`}>
+            {live ? "Using" : "Used"} {toolLabel(display.toolName ?? "tool")}{extra}
+          </span>
+          <time className="shrink-0 font-mono text-[8px] uppercase tracking-[0.1em] text-ink-faint">{formatEventTime(latest.at)}</time>
+          <svg className="h-3 w-3 shrink-0 text-ink-faint transition-transform group-open:rotate-180" viewBox="0 0 12 12" fill="none" aria-hidden="true">
+            <path d="m3 4.5 3 3 3-3" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        </summary>
+        <ul className="mt-3 space-y-2 border-l border-line pl-3">
+          {items.map((item) => {
+            const itemLive = Boolean(item.toolPhase === "started" && item.toolCallId && item.toolCallId === liveTool?.toolCallId);
+            return (
+              <li key={item.id} className="flex min-w-0 items-start gap-2 font-mono text-[10px] leading-relaxed text-ink-soft">
+                <span className={`mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full ${itemLive ? "bg-signal led-live" : "border border-line-strong bg-deck"}`} aria-hidden="true" />
+                <code className={`min-w-0 break-all ${itemLive ? "tool-activity-live" : ""}`}>{item.toolName ?? "tool"}</code>
+              </li>
+            );
+          })}
+        </ul>
+      </details>
     </li>
   );
 }
