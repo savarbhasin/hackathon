@@ -80,8 +80,17 @@ async function insertTaskEvent(ctx: any, id: any, type: string, payload: unknown
   const now = Date.now();
   const patch: Record<string, unknown> = { lastSeq: seq, updatedAt: now };
   if (type === "activity.tool" && payload && typeof payload === "object" && !Array.isArray(payload)) {
-    const tool = payload as { name?: unknown; phase?: unknown; toolCallId?: unknown; runId?: unknown };
-    if (typeof tool.name === "string" && tool.name.trim()) {
+    const tool = payload as { name?: unknown; phase?: unknown; toolCallId?: unknown; runId?: unknown; attempt?: unknown; workerId?: unknown };
+    const activeRun = task.activeRunId === undefined ? null : await ctx.db.get(task.activeRunId);
+    const belongsToActiveRun = activeRun !== null
+      && activeRun.kind === "specialist"
+      && typeof tool.runId === "string"
+      && String(task.activeRunId) === tool.runId
+      && typeof tool.attempt === "number"
+      && activeRun.attempt === tool.attempt
+      && typeof tool.workerId === "string"
+      && activeRun.claimedBy === tool.workerId;
+    if (belongsToActiveRun && typeof tool.name === "string" && tool.name.trim()) {
       const phase = tool.phase === "completed" ? "completed" : "started";
       const current = task.currentTool as { toolCallId?: unknown } | undefined;
       const sameCall = typeof tool.toolCallId !== "string" || typeof current?.toolCallId !== "string" || current.toolCallId === tool.toolCallId;
@@ -90,7 +99,7 @@ async function insertTaskEvent(ctx: any, id: any, type: string, payload: unknown
           name: tool.name,
           phase,
           ...(typeof tool.toolCallId === "string" ? { toolCallId: tool.toolCallId } : {}),
-          ...(typeof tool.runId === "string" ? { runId: tool.runId } : {}),
+          runId: tool.runId,
         };
       } else if (sameCall) {
         // Keep a short-lived tool label between calls so the card can show a
@@ -99,7 +108,7 @@ async function insertTaskEvent(ctx: any, id: any, type: string, payload: unknown
           name: tool.name,
           phase,
           ...(typeof tool.toolCallId === "string" ? { toolCallId: tool.toolCallId } : {}),
-          ...(typeof tool.runId === "string" ? { runId: tool.runId } : {}),
+          runId: tool.runId,
         };
       }
     }
