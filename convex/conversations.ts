@@ -421,7 +421,11 @@ export const update = mutation({
   handler: async (ctx, args) => {
     const existing = await ctx.db.get(args.conversationId);
     if (!existing) return null;
-    if (args.title !== undefined && args.expectedTitle !== undefined && existing.title !== args.expectedTitle) return null;
+    // Roll back model-generated conversation titles without restarting the
+    // worker. The worker still sends `expectedTitle` for its delayed title
+    // update, while user-initiated renames (which omit the guard) continue to
+    // work normally.
+    if (args.title !== undefined && args.expectedTitle !== undefined) return null;
     const now = Date.now();
     const patch: Record<string, unknown> = { updatedAt: now };
     if (args.title !== undefined) {
