@@ -75,11 +75,16 @@ interface ActivityItem {
   title: string;
   detail?: string;
   tone?: "working" | "blocked" | "approval" | "settled";
+  kind?: "status" | "narration" | "tool";
+  toolCallId?: string;
+  toolName?: string;
+  toolPhase?: "started" | "completed";
 }
 
 interface LiveTool {
   name: string;
   at: string;
+  toolCallId?: string;
   phase?: "started" | "completed";
 }
 
@@ -338,10 +343,7 @@ export default function TaskPage({ params }: { params: Promise<{ id: string }> }
   }
 
   const pendingActions = parsePendingActions(task.pendingActions);
-  const activity = task.events.filter((event) => event.type.startsWith("activity.")).flatMap((event) => {
-    const item = semanticActivityFromEvent(event);
-    return item ? [item] : [];
-  });
+  const activity = activityItemsFromEvents(task.events);
   const liveTool = task.column === "working" ? latestSpecialistTool(task.events, task.runId) : null;
   const status = STATUS[task.column] ?? STATUS.backlog;
 
@@ -878,26 +880,28 @@ function DocumentsSection({ documents }: { documents: TaskDocument[] }) {
 }
 
 function ActivitySection({ items, liveTool }: { items: ActivityItem[]; liveTool: LiveTool | null }) {
+  const feedRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const feed = feedRef.current;
+    if (feed) feed.scrollTo({ top: feed.scrollHeight, behavior: "smooth" });
+  }, [items.length, liveTool?.phase, liveTool?.toolCallId]);
+
   return (
     <section>
       <SectionHeading eyebrow={`${items.length} meaningful events`} title="Activity" />
       {liveTool && <LiveToolActivity tool={liveTool} />}
       <div className={`${liveTool ? "mt-3" : "mt-4"} rounded-lg border border-line bg-panel/40`}>
-        <div className="h-80 overflow-y-auto overscroll-contain px-4 sm:px-5">
+        <div ref={feedRef} className="h-80 overflow-y-auto overscroll-contain px-4 sm:px-5">
           {items.length > 0 ? (
             <ol>
               {items.map((item, index) => (
-                <li key={item.id} className="relative grid grid-cols-[14px_minmax(0,1fr)] gap-3 border-b border-line/70 py-4 last:border-b-0">
-                  {index < items.length - 1 && <span className="absolute left-[6px] top-6 h-[calc(100%-12px)] w-px bg-line-strong" />}
-                  <span className={`relative z-10 mt-1 h-3 w-3 rounded-full border-2 border-panel ${activityDot(item.tone)}`} />
-                  <div className="min-w-0">
-                    <div className="flex flex-wrap items-baseline justify-between gap-2">
-                      <p className="text-sm font-semibold text-ink">{item.title}</p>
-                      <time className="font-mono text-[8px] uppercase tracking-[0.1em] text-ink-faint">{formatEventTime(item.at)}</time>
-                    </div>
-                    {item.detail && <p className="mt-1 whitespace-pre-wrap text-xs leading-6 text-ink-soft">{item.detail}</p>}
-                  </div>
-                </li>
+                <ActivityEvent
+                  key={item.id}
+                  item={item}
+                  connected={index < items.length - 1}
+                  live={Boolean(item.kind === "tool" && item.toolPhase === "started" && item.toolCallId && item.toolCallId === liveTool?.toolCallId)}
+                />
               ))}
             </ol>
           ) : (
@@ -906,6 +910,36 @@ function ActivitySection({ items, liveTool }: { items: ActivityItem[]; liveTool:
         </div>
       </div>
     </section>
+  );
+}
+
+function ActivityEvent({ item, connected, live }: { item: ActivityItem; connected: boolean; live: boolean }) {
+  return (
+    <li className="relative grid grid-cols-[14px_minmax(0,1fr)] gap-3 border-b border-line/70 py-4 last:border-b-0">
+      {connected && <span className="absolute left-[6px] top-6 h-[calc(100%-12px)] w-px bg-line-strong" />}
+      <span className={`relative z-10 mt-1 h-3 w-3 rounded-full border-2 border-panel ${activityDot(item.tone)} ${live ? "led-live" : ""}`} />
+      <div className="min-w-0">
+        <div className="flex flex-wrap items-baseline justify-between gap-2">
+          {item.kind === "narration" ? (
+            <p className="font-mono text-[8px] font-semibold uppercase tracking-[0.16em] text-state-working">Agent update</p>
+          ) : item.kind === "tool" ? (
+            <p className={`break-all font-mono text-[10px] text-ink-soft ${live ? "tool-activity-live" : ""}`}>
+              {item.toolPhase === "completed" ? "Used" : "Using"} {item.toolName ?? "tool"}
+            </p>
+          ) : (
+            <p className="text-sm font-semibold text-ink">{item.title}</p>
+          )}
+          <time className="font-mono text-[8px] uppercase tracking-[0.1em] text-ink-faint">{formatEventTime(item.at)}</time>
+        </div>
+        {item.detail && (item.kind === "narration" ? (
+          <div className="mt-2">
+            <ChatMarkdown>{item.detail}</ChatMarkdown>
+          </div>
+        ) : (
+          <p className="mt-1 whitespace-pre-wrap text-xs leading-6 text-ink-soft">{item.detail}</p>
+        ))}
+      </div>
+    </li>
   );
 }
 
@@ -972,17 +1006,53 @@ function parsePendingActions(raw: string | null): PendingAction[] {
   }
 }
 
+function activityItemsFromEvents(events: TaskEvent[]): ActivityItem[] {
+  const items: ActivityItem[] = [];
+  const toolIndexes = new Map<string, number>();
+  for (const event of events) {
+    if (!event.type.startsWith("activity.")) continue;
+    const item = semanticActivityFromEvent(event);
+    if (!item) continue;
+    if (item.kind === "tool" && item.toolCallId) {
+      const existingIndex = toolIndexes.get(item.toolCallId);
+      if (existingIndex !== undefined) {
+        const existing = items[existingIndex];
+        items[existingIndex] = { ...existing, ...item, id: existing.id, at: existing.at };
+        continue;
+      }
+      toolIndexes.set(item.toolCallId, items.length);
+    }
+    items.push(item);
+  }
+  return items;
+}
+
 function semanticActivityFromEvent(event: TaskEvent): ActivityItem | null {
   const payload = parsePayload(event.payload);
-  if (event.type === "activity.tool") {
-    const name = typeof payload?.name === "string" ? payload.name : "tool";
-    const phase = payload?.phase === "started" ? "Using" : "Used";
+  if (event.type === "activity.narration") {
+    if (typeof payload?.content !== "string" || !payload.content.trim()) return null;
     return {
       id: event.id,
       at: event.createdAt,
-      title: `${phase} ${toolLabel(name)}`,
+      title: "Agent update",
+      detail: concise(payload.content, 1_200),
+      tone: "working",
+      kind: "narration",
+    };
+  }
+  if (event.type === "activity.tool") {
+    const name = typeof payload?.name === "string" ? payload.name : "tool";
+    const phase = payload?.phase === "completed" ? "completed" : "started";
+    return {
+      id: event.id,
+      at: event.createdAt,
+      title: `${phase === "completed" ? "Used" : "Using"} ${toolLabel(name)}`,
       detail: typeof payload?.message === "string" ? concise(payload.message) : undefined,
       tone: "working",
+      kind: "tool",
+      toolCallId: typeof payload?.toolCallId === "string" ? payload.toolCallId : undefined,
+      toolName: name,
+      toolPhase: phase,
     };
   }
   const defaults: Record<string, { title: string; tone: ActivityItem["tone"] }> = {
@@ -1020,6 +1090,7 @@ function semanticActivityFromEvent(event: TaskEvent): ActivityItem | null {
     title,
     detail: details.length > 0 ? details.join("\n") : undefined,
     tone: fallback.tone,
+    kind: "status",
   };
 }
 
@@ -1040,19 +1111,21 @@ function parsePayload(raw: string): Record<string, unknown> | null {
 }
 
 function latestSpecialistTool(events: TaskEvent[], runId?: string | null): LiveTool | null {
-  for (let index = events.length - 1; index >= 0; index -= 1) {
-    const event = events[index];
+  const active = new Map<string, LiveTool>();
+  let latest: LiveTool | null = null;
+  for (const event of events) {
     if (event.type !== "activity.tool") continue;
     const payload = parsePayload(event.payload);
     if (!payload || typeof payload.name !== "string") continue;
     if (runId && payload.runId !== runId) continue;
-    return {
-      name: payload.name,
-      at: event.createdAt,
-      phase: payload.phase === "completed" ? "completed" : "started",
-    };
+    const toolCallId = typeof payload.toolCallId === "string" ? payload.toolCallId : undefined;
+    const phase = payload.phase === "completed" ? "completed" : "started";
+    latest = { name: payload.name, at: event.createdAt, toolCallId, phase };
+    if (!toolCallId) continue;
+    if (phase === "completed") active.delete(toolCallId);
+    else active.set(toolCallId, latest);
   }
-  return null;
+  return [...active.values()].at(-1) ?? latest;
 }
 
 function LiveToolActivity({ tool }: { tool: LiveTool }) {
