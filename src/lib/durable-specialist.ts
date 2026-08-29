@@ -309,7 +309,13 @@ export async function processDurableSpecialistRun(store: AgentRunStore, run: Age
         // the Mission Control mark_done tool after producing their deliverable;
         // otherwise a preamble-only turn (or an incomplete answer) would be
         // incorrectly projected to Settled.
-        if (!hasCompletionSignal(tools)) {
+        // The MCP completion mutation is authoritative. Some TrueForge tool
+        // routes execute MCP calls through a generic wrapper (for example
+        // `exec`), so the provider tool list may not contain `mark_done` even
+        // though Mission Control recorded the completion successfully.
+        const completionRecorded = hasCompletionSignal(tools)
+          || (await store.getSpecialistCompletion?.({ taskId, runId: run._id }) ?? false);
+        if (!completionRecorded) {
           const finalized = await store.finalizeSpecialist({
             taskId,
             runId: run._id,
