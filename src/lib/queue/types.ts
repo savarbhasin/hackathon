@@ -206,6 +206,8 @@ export interface AgentRunStore {
     workerId?: string;
   }): Promise<unknown>;
   checkpointSpecialist(input: { taskId: string; runId: string; sessionId?: string; turnId?: string }): Promise<boolean>;
+  /** Authoritative completion check for mark_done calls routed through wrappers. */
+  getSpecialistCompletion?(input: { taskId: string; runId: string }): Promise<boolean>;
   appendTaskEvent(input: { taskId: string; type: string; payload: unknown; operationKey: string }): Promise<unknown>;
   finalizeSpecialist(input: {
     taskId: string;
