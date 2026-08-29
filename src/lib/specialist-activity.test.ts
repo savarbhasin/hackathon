@@ -62,6 +62,37 @@ test("records later narration and tools without overwriting prior steps", () => 
   ]);
 });
 
+test("persists narration-only messages at stable message and turn boundaries", () => {
+  const projector = new SpecialistActivityProjector();
+  const standalone = {
+    id: "message-1",
+    threadId: "main",
+    content: "I found the relevant sources.",
+    toolCalls: [],
+  };
+
+  // The current message can still receive token deltas, so it is not frozen yet.
+  assert.deepEqual(projector.sync([standalone]), []);
+
+  const final = {
+    id: "message-2",
+    threadId: "main",
+    content: "The report is ready.",
+    toolCalls: [],
+  };
+  assert.deepEqual(projector.sync([standalone, final]), [{
+    type: "activity.narration",
+    operationSuffix: "narration:message-1",
+    payload: { content: "I found the relevant sources.", messageId: "message-1" },
+  }]);
+  assert.deepEqual(projector.flush([standalone, final]), [{
+    type: "activity.narration",
+    operationSuffix: "narration:message-2",
+    payload: { content: "The report is ready.", messageId: "message-2" },
+  }]);
+  assert.deepEqual(projector.flush([standalone, final]), []);
+});
+
 test("completes known tools once and ignores hidden subagent narration", () => {
   const projector = new SpecialistActivityProjector();
   assert.deepEqual(projector.sync([{

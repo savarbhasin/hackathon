@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { fallbackConversationTitle } from "./conversation-title";
-import { mergeStreamingCandidate, orderedAssistantParts, streamingToolCalls, textAfterLastToolCall, toolNamesFromMessages } from "./durable-orchestrator";
+import { mergeAssistantPartProjection, mergeStreamingCandidate, orderedAssistantParts, streamingToolCalls, textAfterLastToolCall, toolNamesFromMessages } from "./durable-orchestrator";
 
 test("ignores replayed cumulative prefixes until they pass the durable baseline", () => {
   const baseline = "Hello";
@@ -82,6 +82,52 @@ test("preserves narration around tools in the durable ordered parts", () => {
     { type: "tool", toolCallId: "call-1", toolName: "list_board", state: "output-available" },
     { type: "text", text: "The board is currently empty." },
   ]);
+});
+
+test("deduplicates replayed ordered parts while preserving terminal tool state", () => {
+  const baseline = [
+    { type: "text" as const, text: "I'll inspect the board." },
+    { type: "tool" as const, toolCallId: "call-1", toolName: "list_board", state: "output-available" },
+    { type: "text" as const, text: "The board is empty." },
+  ];
+  const replayed = [
+    { type: "text" as const, text: "I'll inspect the board." },
+    { type: "tool" as const, toolCallId: "call-1", toolName: "list_board", state: "input-available" },
+    { type: "text" as const, text: "The board is empty." },
+    { type: "tool" as const, toolCallId: "call-2", toolName: "list_board", state: "input-available" },
+  ];
+
+  assert.deepEqual(mergeAssistantPartProjection(baseline, replayed), [
+    ...baseline,
+    replayed[3],
+  ]);
+});
+
+test("merges an overlapping replay suffix and preserves repeated tools with distinct call IDs", () => {
+  const baseline = [
+    { type: "tool" as const, toolCallId: "call-1", toolName: "get_task", state: "output-available" },
+    { type: "text" as const, text: "First result." },
+  ];
+  const suffix = [
+    { type: "text" as const, text: "First result." },
+    { type: "tool" as const, toolCallId: "call-2", toolName: "get_task", state: "input-available" },
+  ];
+
+  assert.deepEqual(mergeAssistantPartProjection(baseline, suffix), [
+    ...baseline,
+    suffix[1],
+  ]);
+});
+
+test("keeps a durable projection while an early replay text segment is still partial", () => {
+  const baseline = [
+    { type: "text" as const, text: "I'll inspect the board." },
+    { type: "tool" as const, toolCallId: "call-1", toolName: "list_board", state: "output-available" },
+  ];
+
+  assert.deepEqual(mergeAssistantPartProjection(baseline, [
+    { type: "text", text: "I'll inspect" },
+  ]), baseline);
 });
 
 test("drops transient narration from the legacy durable response after a tool call", () => {

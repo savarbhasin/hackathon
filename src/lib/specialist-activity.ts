@@ -35,20 +35,16 @@ export class SpecialistActivityProjector {
 
   sync(messages: SpecialistActivityMessage[]): SpecialistActivityUpdate[] {
     const updates: SpecialistActivityUpdate[] = [];
-    for (const message of messages) {
-      if (message.threadId !== undefined && message.threadId !== "main") continue;
+    const visibleMessages = messages.filter((message) => message.threadId === undefined || message.threadId === "main");
+    for (let index = 0; index < visibleMessages.length; index += 1) {
+      const message = visibleMessages[index];
       const newCalls = message.toolCalls.filter((call) => call.id && call.name && !this.startedTools.has(call.id));
-      if (newCalls.length === 0) continue;
 
-      const narration = message.content?.trim();
-      if (narration && !this.narratedMessages.has(message.id)) {
-        const content = narration.length <= 4_000 ? narration : `${narration.slice(0, 3_999)}…`;
-        updates.push({
-          type: "activity.narration",
-          operationSuffix: `narration:${message.id}`,
-          payload: { content, messageId: message.id },
-        });
-        this.narratedMessages.add(message.id);
+      // A tool start freezes narration in its own message. Once a later message
+      // exists, earlier narration-only messages are also stable and safe to
+      // persist without writing token deltas to Convex.
+      if (newCalls.length > 0 || index < visibleMessages.length - 1) {
+        updates.push(...this.narrate(message));
       }
 
       for (const call of newCalls) {
@@ -62,6 +58,28 @@ export class SpecialistActivityProjector {
       }
     }
     return updates;
+  }
+
+  /** Persist final narration-only messages once turn.done proves them stable. */
+  flush(messages: SpecialistActivityMessage[]): SpecialistActivityUpdate[] {
+    const updates: SpecialistActivityUpdate[] = [];
+    for (const message of messages) {
+      if (message.threadId !== undefined && message.threadId !== "main") continue;
+      updates.push(...this.narrate(message));
+    }
+    return updates;
+  }
+
+  private narrate(message: SpecialistActivityMessage): SpecialistActivityUpdate[] {
+    const narration = message.content?.trim();
+    if (!narration || this.narratedMessages.has(message.id)) return [];
+    const content = narration.length <= 4_000 ? narration : `${narration.slice(0, 3_999)}…`;
+    this.narratedMessages.add(message.id);
+    return [{
+      type: "activity.narration",
+      operationSuffix: `narration:${message.id}`,
+      payload: { content, messageId: message.id },
+    }];
   }
 
   complete(toolCallId: string): SpecialistActivityUpdate[] {

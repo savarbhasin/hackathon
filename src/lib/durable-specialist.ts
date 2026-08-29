@@ -268,7 +268,8 @@ export async function processDurableSpecialistRun(store: AgentRunStore, run: Age
         }
         if (event.threadId === "main" && typeof event.content === "string") fallbackText += event.content;
       }
-      for (const update of activityProjector.sync(activityMessages(messages))) {
+      const specialistActivity = activityMessages(messages);
+      for (const update of activityProjector.sync(specialistActivity)) {
         await semantic(store, taskId, run._id, update.type, { ...update.payload, runId: run._id }, update.operationSuffix);
       }
       if (type === "tool.response" && typeof event.toolCallId === "string") {
@@ -277,6 +278,9 @@ export async function processDurableSpecialistRun(store: AgentRunStore, run: Age
         }
       }
       if (type !== "turn.done") continue;
+      for (const update of activityProjector.flush(specialistActivity)) {
+        await semantic(store, taskId, run._id, update.type, { ...update.payload, runId: run._id }, update.operationSuffix);
+      }
 
       const state = record(event.state) ?? {};
       const status = typeof state.status === "string" ? state.status : "error";

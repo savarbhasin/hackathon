@@ -222,6 +222,78 @@ export function orderedAssistantParts(
   return parts;
 }
 
+function isTerminalToolState(state?: string): boolean {
+  return state === "output-available"
+    || state === "output-error"
+    || state === "output-denied"
+    || state === "approval-requested"
+    || state === "response-required";
+}
+
+function compatibleAssistantParts(left: AssistantMessagePart, right: AssistantMessagePart): boolean {
+  if (left.type !== right.type) return false;
+  if (left.type === "tool") {
+    return Boolean(left.toolCallId && right.toolCallId && left.toolCallId === right.toolCallId);
+  }
+  const leftText = left.text ?? "";
+  const rightText = right.text ?? "";
+  return leftText.startsWith(rightText) || rightText.startsWith(leftText);
+}
+
+function mergeCompatibleAssistantParts(left: AssistantMessagePart, right: AssistantMessagePart): AssistantMessagePart {
+  if (left.type === "text" && right.type === "text") {
+    return (right.text?.length ?? 0) >= (left.text?.length ?? 0) ? right : left;
+  }
+  if (left.type === "tool" && right.type === "tool") {
+    if (!right.state || (isTerminalToolState(left.state) && !isTerminalToolState(right.state))) {
+      return { ...right, state: left.state };
+    }
+    return right;
+  }
+  return right;
+}
+
+/**
+ * Reconcile a persisted projection with a replayed provider snapshot. TrueForge
+ * may replay the whole turn or only an overlapping suffix after a retry; match
+ * text prefixes and tool-call IDs so already durable cards are not appended a
+ * second time. Distinct tool-call IDs remain distinct even when names repeat.
+ */
+export function mergeAssistantPartProjection(
+  baseline: readonly AssistantMessagePart[],
+  candidate: readonly AssistantMessagePart[],
+): AssistantMessagePart[] {
+  if (baseline.length === 0) return [...candidate];
+  if (candidate.length === 0) return [...baseline];
+
+  let bestOffset = -1;
+  let bestOverlap = 0;
+  for (let offset = 0; offset < baseline.length; offset += 1) {
+    let overlap = 0;
+    while (
+      offset + overlap < baseline.length
+      && overlap < candidate.length
+      && compatibleAssistantParts(baseline[offset + overlap], candidate[overlap])
+    ) {
+      overlap += 1;
+    }
+    if (overlap > bestOverlap) {
+      bestOffset = offset;
+      bestOverlap = overlap;
+    }
+  }
+
+  if (bestOffset < 0) return [...baseline, ...candidate];
+
+  const merged = [...baseline];
+  for (let index = 0; index < bestOverlap; index += 1) {
+    const baselineIndex = bestOffset + index;
+    merged[baselineIndex] = mergeCompatibleAssistantParts(merged[baselineIndex], candidate[index]);
+  }
+  merged.push(...candidate.slice(bestOverlap));
+  return merged;
+}
+
 function withFinalTextPart(parts: AssistantMessagePart[], finalText: string): AssistantMessagePart[] {
   if (!finalText) return parts;
   let lastToolIndex = -1;
@@ -540,10 +612,10 @@ export async function processDurableOrchestratorRun(store: AgentRunStore, run: A
           }
         }
       }
-      messageParts = [
-        ...projectionPartsBaseline,
-        ...orderedAssistantParts(messages, fallbackDelta, toolStates),
-      ];
+      messageParts = mergeAssistantPartProjection(
+        projectionPartsBaseline,
+        orderedAssistantParts(messages, fallbackDelta, toolStates),
+      );
 
       if (type !== "turn.done") continue;
 
@@ -579,10 +651,10 @@ export async function processDurableOrchestratorRun(store: AgentRunStore, run: A
             }
           }
           const waitingStatus = actions.some((action) => action.type === "tool.approval_required") ? "waiting_for_approval" : "waiting_for_user";
-          messageParts = withFinalTextPart([
-            ...projectionPartsBaseline,
-            ...orderedAssistantParts(messages, fallbackDelta, toolStates),
-          ], finalVisibleText);
+          messageParts = withFinalTextPart(mergeAssistantPartProjection(
+            projectionPartsBaseline,
+            orderedAssistantParts(messages, fallbackDelta, toolStates),
+          ), finalVisibleText);
           await project(store, run, mergedText, tools, messageParts, waitingStatus, actions, { attempt, workerId: context.workerId });
           const pendingActionSelector = actions.length === 1 ? actions[0].selector : undefined;
           const paused = actions.some((action) => action.type === "tool.approval_required")
