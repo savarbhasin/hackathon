@@ -34,6 +34,7 @@ interface ChatEvent {
 
 interface Msg {
   id?: string;
+  operationKey?: string;
   runId?: string;
   role: "user" | "assistant";
   content: string;
@@ -68,6 +69,7 @@ interface ConvexConversationSummary {
 interface ConvexMessage {
   _id?: string;
   conversationId?: string;
+  operationKey?: string;
   role?: string;
   content?: string;
   tools?: unknown;
@@ -148,6 +150,7 @@ function messageFromConvex(message: ConvexMessage): Msg {
   const status = message.status ?? undefined;
   return {
     id,
+    operationKey: message.operationKey,
     runId: message.runId,
     role,
     content: message.content ?? "",
@@ -197,6 +200,11 @@ export default function Home() {
   const [deleting, setDeleting] = useState(false);
   const [, setPendingPlaceholders] = useState<Record<string, Msg>>({});
   const pendingPlaceholdersRef = useRef<Record<string, Msg>>({});
+  // Convex subscriptions can briefly deliver the pre-admission message list
+  // after the optimistic send has rendered. Keep the local user bubble until
+  // its operation-keyed durable row arrives, rather than flashing the prior
+  // turn back into view.
+  const pendingUserMessagesRef = useRef<Record<string, Msg[]>>({});
   const scrollAreaRef = useRef<HTMLDivElement>(null);
   const latestTurnRef = useRef<HTMLDivElement>(null);
   const [scrollViewportHeight, setScrollViewportHeight] = useState(0);
@@ -263,6 +271,19 @@ export default function Home() {
       .filter((message) => message.role === "user" || message.role === "assistant")
       .map(messageFromConvex);
     const placeholder = pendingPlaceholdersRef.current[conversationId];
+    const pendingUsers = pendingUserMessagesRef.current[conversationId] ?? [];
+    const persistedPendingUsers = pendingUsers.filter((pending) =>
+      pending.operationKey && durableMessages.some((message) => message.operationKey === pending.operationKey),
+    );
+    if (persistedPendingUsers.length > 0) {
+      const persistedKeys = new Set(persistedPendingUsers.map((message) => message.operationKey));
+      const nextPendingUsers = pendingUsers.filter((message) => !persistedKeys.has(message.operationKey));
+      if (nextPendingUsers.length > 0) pendingUserMessagesRef.current[conversationId] = nextPendingUsers;
+      else delete pendingUserMessagesRef.current[conversationId];
+    }
+    const optimisticUsers = pendingUsers.filter((pending) =>
+      !persistedPendingUsers.some((persisted) => persisted.operationKey === pending.operationKey),
+    );
     const activeRun = selectedRunState?.active;
     const activeRunId = typeof activeRun?._id === "string" ? activeRun._id : undefined;
     const activeStatus = typeof activeRun?.status === "string" ? activeRun.status : undefined;
@@ -304,7 +325,7 @@ export default function Home() {
       message.role !== "assistant" || !message.runId || !liveStreamRunIds.has(message.runId));
     const visibleStreams = componentStreams.filter((stream) =>
       stream.pending || !durableMessages.some((message) => message.role === "assistant" && message.runId === stream.runId));
-    const authoritative = [...loaded, ...visibleStreams];
+    const authoritative = [...loaded, ...optimisticUsers, ...visibleStreams];
     const hasActiveAssistant = !!activeRunId && authoritative.some((message) => message.role === "assistant" && message.runId === activeRunId);
     const latestUserIndex = authoritative.reduce((latest, message, index) => message.role === "user" ? index : latest, -1);
     const hasAssistantAfterLatestUser = latestUserIndex >= 0
@@ -542,12 +563,24 @@ export default function Home() {
       && (selectedRef.current === requestSelection
         || (requestSelection === null && streamConversationId !== undefined && selectedRef.current === streamConversationId));
     const placeholderId = `pending:${key}`;
+    const messageOperationKey = `chat:${isResume ? "resume" : "start"}:${key}:message`;
+    let admitted = false;
     setSubmitting((current) => ({ ...current, [targetKey]: true }));
     if (userBubble !== undefined && requestSelection === selectedRef.current) {
+      const optimisticUser: Msg = {
+        id: `user:${key}`,
+        operationKey: messageOperationKey,
+        role: "user",
+        content: userBubble,
+      };
+      pendingUserMessagesRef.current[targetKey] = [
+        ...(pendingUserMessagesRef.current[targetKey] ?? []),
+        optimisticUser,
+      ];
       pendingLatestScrollRef.current = true;
       pinLatestTurnRef.current = true;
       setPinLatestTurn(true);
-      setMessages((current) => [...current, { role: "user", content: userBubble }]);
+      setMessages((current) => [...current, optimisticUser]);
     }
     if (requestSelection === selectedRef.current) {
       const placeholder: Msg = { id: placeholderId, role: "assistant", content: "", tools: [], pending: true, status: "queued" };
@@ -582,6 +615,7 @@ export default function Home() {
       if (!contentType.includes("text/event-stream")) {
         const admission = await response.json().catch(() => ({})) as DurableAdmission;
         const accepted = admission.admissionKind === "accepted" || admission.admissionKind === "already_accepted";
+        admitted = accepted;
         if (!response.ok && !accepted) throw new Error(admission.message ?? admission.error ?? `chat request failed (${response.status})`);
         const returnedConversationId = admission.conversationId;
         const returnedRunId = admission.runId;
@@ -593,7 +627,20 @@ export default function Home() {
               delete next[submissionKey];
               return next;
             });
+            const pendingUsers = pendingUserMessagesRef.current[submissionKey];
+            if (pendingUsers) {
+              pendingUserMessagesRef.current[returnedConversationId] = pendingUsers.map((message) => ({
+                ...message,
+                runId: returnedRunId ?? message.runId,
+              }));
+              delete pendingUserMessagesRef.current[submissionKey];
+            }
             submissionKey = returnedConversationId;
+          } else if (returnedRunId) {
+            pendingUserMessagesRef.current[submissionKey] = (pendingUserMessagesRef.current[submissionKey] ?? []).map((message) => ({
+              ...message,
+              runId: returnedRunId,
+            }));
           }
           setPlaceholderMap((current) => {
             const next = { ...current, [returnedConversationId]: { id: placeholderId, runId: returnedRunId, role: "assistant" as const, content: "", tools: [], pending: true, status: admission.status ?? "queued" } };
@@ -637,6 +684,10 @@ export default function Home() {
           : message));
       }
     } finally {
+      if (!admitted) {
+        delete pendingUserMessagesRef.current[targetKey];
+        if (submissionKey !== targetKey) delete pendingUserMessagesRef.current[submissionKey];
+      }
       setSubmitting((current) => { const next = { ...current }; delete next[submissionKey]; return next; });
       setPlaceholderMap((current) => {
         const next = { ...current };
