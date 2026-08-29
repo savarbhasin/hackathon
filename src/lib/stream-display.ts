@@ -1,25 +1,22 @@
 export interface StreamingMessagePart {
   type?: string;
   text?: string;
+  toolCallId?: string;
   toolName?: string;
   state?: string;
 }
 
 /**
- * Text before the latest tool part is transient model narration. It remains
- * visible until the tool starts, then only text produced after that tool is
- * shown as the answer.
+ * Keep every visible text/tool segment in provider order. The fallback is used
+ * only for legacy durable messages or before the component exposes its parts.
  */
-export function visibleStreamText(parts: StreamingMessagePart[] | undefined, fallback: string): string {
-  if (!parts) return fallback;
-  let lastToolPart = -1;
-  for (let index = 0; index < parts.length; index += 1) {
-    if (typeof parts[index].toolName === "string") lastToolPart = index;
-  }
-  if (lastToolPart < 0) return fallback;
-  return parts
-    .slice(lastToolPart + 1)
-    .filter((part) => part.type === "text" && typeof part.text === "string")
-    .map((part) => part.text as string)
-    .join("");
+export function orderedStreamParts(
+  parts: StreamingMessagePart[] | undefined,
+  fallback: string,
+): StreamingMessagePart[] {
+  const visible = (parts ?? []).filter((part) =>
+    part.type === "text" && typeof part.text === "string" && part.text.length > 0
+    || typeof part.toolName === "string" && part.toolName.length > 0);
+  if (visible.length > 0) return visible;
+  return fallback ? [{ type: "text", text: fallback }] : [];
 }

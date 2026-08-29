@@ -507,6 +507,7 @@ const messageFields = {
   role: v.string(),
   content: v.string(),
   tools: v.optional(v.any()),
+  parts: v.optional(v.any()),
   status: v.optional(v.string()),
   pauseActions: v.optional(v.any()),
   runId: v.optional(v.id("agentRuns")),
@@ -530,6 +531,7 @@ export const appendMessage = mutation({
       role: args.role,
       content: args.content,
       tools: args.tools ?? [],
+      ...(args.parts !== undefined ? { parts: args.parts } : {}),
       ...(args.operationKey ? { operationKey: args.operationKey } : {}),
       ...(args.status !== undefined ? { status: args.status } : {}),
       ...(args.pauseActions !== undefined ? { pauseActions: args.pauseActions } : {}),
@@ -550,6 +552,7 @@ export const updateMessage = mutation({
     messageId,
     content: v.optional(v.string()),
     tools: v.optional(v.any()),
+    parts: v.optional(v.any()),
     status: v.optional(v.string()),
     pauseActions: v.optional(v.any()),
     runId: v.optional(v.id("agentRuns")),
@@ -559,7 +562,7 @@ export const updateMessage = mutation({
     const existing = await ctx.db.get(args.messageId);
     if (!existing) return null;
     const patch: Record<string, unknown> = { updatedAt: Date.now() };
-    for (const key of ["content", "tools", "status", "pauseActions", "runId"] as const) {
+    for (const key of ["content", "tools", "parts", "status", "pauseActions", "runId"] as const) {
       if (args[key] !== undefined) patch[key] = args[key];
     }
     await ctx.db.patch(args.messageId, patch as any);
@@ -601,6 +604,7 @@ export const upsertMessage = mutation({
         role: args.role,
         content: args.content,
         tools: args.tools ?? [],
+        ...(args.parts !== undefined ? { parts: args.parts } : {}),
         ...(args.status !== undefined ? { status: args.status } : {}),
         ...(args.pauseActions !== undefined ? { pauseActions: args.pauseActions } : {}),
         ...(args.runId !== undefined ? { runId: args.runId } : {}),
@@ -616,6 +620,7 @@ export const upsertMessage = mutation({
     const patch: Record<string, unknown> = {
       content: args.content,
       tools: args.tools ?? existing.tools,
+      parts: args.parts ?? existing.parts,
       status: args.status ?? existing.status,
       pauseActions: args.pauseActions ?? existing.pauseActions,
       runId: args.runId ?? existing.runId,

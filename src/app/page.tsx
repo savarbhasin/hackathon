@@ -6,7 +6,7 @@ import { useStreamingUIMessages } from "@convex-dev/agent/react";
 import { api } from "../../convex/_generated/api";
 import { ChatMarkdown } from "@/components/chat-markdown";
 import { ConfirmDialog } from "@/components/confirm-dialog";
-import { visibleStreamText, type StreamingMessagePart } from "@/lib/stream-display";
+import { orderedStreamParts, type StreamingMessagePart } from "@/lib/stream-display";
 
 interface PauseAction {
   selector: string;
@@ -38,6 +38,7 @@ interface Msg {
   role: "user" | "assistant";
   content: string;
   tools?: string[];
+  parts?: StreamingMessagePart[];
   toolState?: string;
   status?: string;
   pending?: boolean;
@@ -71,6 +72,7 @@ interface ConvexMessage {
   role?: string;
   content?: string;
   tools?: unknown;
+  parts?: unknown;
   status?: string;
   pauseActions?: unknown;
   runId?: string;
@@ -142,6 +144,25 @@ function parseMessagePause(raw: unknown): PauseAction[] | undefined {
   return Array.isArray(raw) ? parsePauseArray(raw) : undefined;
 }
 
+function parseMessageParts(raw: unknown): StreamingMessagePart[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const parts = raw.flatMap((value) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return [];
+    const part = value as Record<string, unknown>;
+    const text = typeof part.text === "string" ? part.text : undefined;
+    const toolName = typeof part.toolName === "string" ? part.toolName : undefined;
+    if (!text && !toolName) return [];
+    return [{
+      ...(typeof part.type === "string" ? { type: part.type } : {}),
+      ...(text ? { text } : {}),
+      ...(typeof part.toolCallId === "string" ? { toolCallId: part.toolCallId } : {}),
+      ...(toolName ? { toolName } : {}),
+      ...(typeof part.state === "string" ? { state: part.state } : {}),
+    }];
+  });
+  return parts.length > 0 ? parts : undefined;
+}
+
 function messageFromConvex(message: ConvexMessage): Msg {
   const id = message._id ?? `message-${message.runId ?? "unknown"}`;
   const role = message.role === "user" ? "user" : "assistant";
@@ -152,6 +173,7 @@ function messageFromConvex(message: ConvexMessage): Msg {
     role,
     content: message.content ?? "",
     tools: parseMessageTools(message.tools),
+    parts: parseMessageParts(message.parts),
     status,
     pending: role === "assistant" && isPendingMessageStatus(status),
     pause: parseMessagePause(message.pauseActions),
@@ -273,6 +295,7 @@ export default function Home() {
       .filter((stream) => typeof stream.agentName === "string" && stream.agentName.length > 0)
       .map((stream) => {
         const runId = stream.agentName as string;
+        const durable = durableMessages.find((message) => message.role === "assistant" && message.runId === runId);
         // A component stream may remain marked "streaming" briefly after its
         // durable run completes. Only the current active run can be pending;
         // otherwise the stale stream would keep the UI on "Thinking" forever.
@@ -288,22 +311,31 @@ export default function Home() {
           id: stream.id,
           runId,
           role: "assistant" as const,
-          content: visibleStreamText(stream.parts, stream.text ?? ""),
+          content: stream.text ?? "",
           tools,
+          parts: orderedStreamParts(stream.parts, stream.text ?? ""),
           toolState: latestToolPart?.state,
           pending,
-          status: pending ? activeStatus ?? "running" : "completed",
+          status: pending ? activeStatus ?? "running" : durable?.status ?? "completed",
+          pause: durable?.pause,
         };
       });
 
-    // While an official component stream is live it supersedes a retry/final
-    // app-table projection for the same run. Once the component stream is
-    // finished, the durable chat message wins and prevents any duplicate row.
-    const liveStreamRunIds = new Set(componentStreams.filter((message) => message.pending).map((message) => message.runId));
+    // The official component stream wins while live. It also backfills older
+    // durable rows that predate ordered parts, provided the finished component
+    // still has a structured tool timeline. New durable rows own reloads.
+    const preferredStreamRunIds = new Set(componentStreams
+      .filter((stream) => {
+        if (stream.pending) return true;
+        const durable = durableMessages.find((message) => message.role === "assistant" && message.runId === stream.runId);
+        return (stream.tools?.length ?? 0) > 0 && (stream.parts?.length ?? 0) > 0 && (durable?.parts?.length ?? 0) === 0;
+      })
+      .map((message) => message.runId));
     const loaded = durableMessages.filter((message) =>
-      message.role !== "assistant" || !message.runId || !liveStreamRunIds.has(message.runId));
+      message.role !== "assistant" || !message.runId || !preferredStreamRunIds.has(message.runId));
     const visibleStreams = componentStreams.filter((stream) =>
-      stream.pending || !durableMessages.some((message) => message.role === "assistant" && message.runId === stream.runId));
+      preferredStreamRunIds.has(stream.runId)
+      || !durableMessages.some((message) => message.role === "assistant" && message.runId === stream.runId));
     const authoritative = [...loaded, ...visibleStreams];
     const hasActiveAssistant = !!activeRunId && authoritative.some((message) => message.role === "assistant" && message.runId === activeRunId);
     const latestUserIndex = authoritative.reduce((latest, message, index) => message.role === "user" ? index : latest, -1);
@@ -1212,14 +1244,20 @@ function Message({ message, busy, onAnswer }: { message: Msg; busy: boolean; onA
         {message.pending && <span className="tool-activity-live text-ink-faint">{message.status === RETRYING_STATUS ? "Retrying" : "Thinking"}</span>}
         {!message.pending && message.pause?.length ? <span className="text-state-blocked">paused, input needed</span> : null}
       </p>
-      {(message.tools?.length ?? 0) > 0 && (
-        <ToolActivity tools={message.tools!} active={Boolean(message.pending)} state={message.toolState} />
-      )}
       {failed ? (
         <div role="alert" className="mt-2 rounded-md border border-error/60 bg-error/10 px-3 py-2.5 text-sm leading-relaxed text-error">
           {message.content || "The response could not be completed."}
         </div>
-      ) : message.content ? <ChatMarkdown>{message.content}</ChatMarkdown> : null}
+      ) : (message.parts?.length ?? 0) > 0 ? (
+        <AssistantExecution parts={message.parts!} pending={Boolean(message.pending)} />
+      ) : (
+        <>
+          {(message.tools?.length ?? 0) > 0 && (
+            <ToolActivity tools={message.tools!} active={Boolean(message.pending)} state={message.toolState} />
+          )}
+          {message.content ? <ChatMarkdown>{message.content}</ChatMarkdown> : null}
+        </>
+      )}
       {!message.pending && (message.pause?.length ?? 0) > 0 && onAnswer && (
         <PauseBlock actions={message.pause!} busy={busy} onAnswer={onAnswer} />
       )}
@@ -1228,6 +1266,33 @@ function Message({ message, busy, onAnswer }: { message: Msg; busy: boolean; onA
           {completion.text}
         </div>
       )}
+    </div>
+  );
+}
+
+function AssistantExecution({ parts, pending }: { parts: StreamingMessagePart[]; pending: boolean }) {
+  return (
+    <div className="max-w-3xl space-y-3">
+      {parts.map((part, index) => {
+        if (part.type === "text" && part.text) {
+          return <ChatMarkdown key={`text-${index}`}>{part.text}</ChatMarkdown>;
+        }
+        if (!part.toolName) return null;
+        const terminal = part.state === "output-available"
+          || part.state === "output-error"
+          || part.state === "output-denied"
+          || part.state === "approval-requested"
+          || part.state === "response-required";
+        const live = pending && !terminal;
+        return (
+          <div key={part.toolCallId ?? `tool-${index}`} className="flex min-w-0 items-center gap-2 font-mono text-[10px] leading-relaxed text-ink-faint">
+            <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${live ? "bg-signal led-live" : "border border-line-strong bg-deck"}`} aria-hidden="true" />
+            <span className={`min-w-0 truncate ${live ? "tool-activity-live" : ""}`}>
+              {toolActivityLabel(part.toolName, live, part.state)}
+            </span>
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -1281,6 +1346,7 @@ function toolActivityLabel(tool: string, active: boolean, state?: string): strin
   const base = tool.split(".").pop() ?? tool;
   const readable = base.replace(/[_-]+/g, " ").replace(/\s+/g, " ").trim();
   if (state === "approval-requested") return `Waiting for approval · ${readable || "tool action"}`;
+  if (state === "response-required") return `Waiting for response · ${readable || "tool action"}`;
   if (state === "output-error") return `${readable || "Tool action"} failed`;
   if (state === "output-denied") return `${readable || "Tool action"} denied`;
   const known = TOOL_ACTIVITY[base];

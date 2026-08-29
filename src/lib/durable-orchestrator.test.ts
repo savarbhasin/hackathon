@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { fallbackConversationTitle } from "./conversation-title";
-import { maybeGenerateConversationTitle, mergeStreamingCandidate, streamingToolCalls, textAfterLastToolCall, toolNamesFromMessages } from "./durable-orchestrator";
+import { maybeGenerateConversationTitle, mergeStreamingCandidate, orderedAssistantParts, streamingToolCalls, textAfterLastToolCall, toolNamesFromMessages } from "./durable-orchestrator";
 import type { AgentRunStore } from "./queue/types";
 
 test("ignores replayed cumulative prefixes until they pass the durable baseline", () => {
@@ -68,7 +68,24 @@ test("marks complete tool arguments available to the UI stream", () => {
   }]);
 });
 
-test("drops transient narration from the durable response after a tool call", () => {
+test("preserves narration around tools in the durable ordered parts", () => {
+  const messages = new Map<string, Record<string, unknown>>([
+    ["message-1", {
+      threadId: "main",
+      content: "I'll check the Mission Control board for you.",
+      toolCalls: [{ id: "call-1", function: { name: "list_board", arguments: "{}" } }],
+    }],
+    ["message-2", { threadId: "main", content: "The board is currently empty." }],
+  ]);
+
+  assert.deepEqual(orderedAssistantParts(messages, "", new Map([["call-1", "output-available"]])), [
+    { type: "text", text: "I'll check the Mission Control board for you." },
+    { type: "tool", toolCallId: "call-1", toolName: "list_board", state: "output-available" },
+    { type: "text", text: "The board is currently empty." },
+  ]);
+});
+
+test("drops transient narration from the legacy durable response after a tool call", () => {
   const messages = new Map<string, Record<string, unknown>>([
     ["message-1", {
       threadId: "main",

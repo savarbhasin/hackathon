@@ -101,6 +101,7 @@ export default defineSchema({
     role: v.string(),
     content: v.string(),
     tools: v.any(),
+    parts: v.optional(v.any()),
     status: v.optional(v.string()),
     pauseActions: v.optional(v.any()),
     runId: v.optional(v.id("agentRuns")),

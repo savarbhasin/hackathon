@@ -10,6 +10,7 @@ import type {
   AgentRunRecord,
   AgentRunStore,
   AssistantDeltaStream,
+  AssistantMessagePart,
   PendingAction,
   ScheduleReconciliationSnapshot,
 } from "./types";
@@ -318,16 +319,29 @@ export class ConvexAgentRunStore implements AgentRunStore {
     };
   }
 
-  async getAssistantMessage(conversationId: string, operationKey: string): Promise<{ content: string; tools: string[] } | null> {
+  async getAssistantMessage(conversationId: string, operationKey: string): Promise<{ content: string; tools: string[]; parts: AssistantMessagePart[] } | null> {
     const value = await this.client.query(anyApi.conversations.getMessageByOperationKey, {
       conversationId: runId(conversationId),
       operationKey,
     });
     if (!value || typeof value !== "object") return null;
-    const row = value as { content?: unknown; tools?: unknown };
+    const row = value as { content?: unknown; tools?: unknown; parts?: unknown };
+    const parts = Array.isArray(row.parts) ? row.parts.flatMap((rawPart): AssistantMessagePart[] => {
+      if (!rawPart || typeof rawPart !== "object" || Array.isArray(rawPart)) return [];
+      const part = rawPart as Record<string, unknown>;
+      if (part.type !== "text" && part.type !== "tool") return [];
+      return [{
+        type: part.type,
+        ...(typeof part.text === "string" ? { text: part.text } : {}),
+        ...(typeof part.toolCallId === "string" ? { toolCallId: part.toolCallId } : {}),
+        ...(typeof part.toolName === "string" ? { toolName: part.toolName } : {}),
+        ...(typeof part.state === "string" ? { state: part.state } : {}),
+      }];
+    }) : [];
     return {
       content: typeof row.content === "string" ? row.content : "",
       tools: Array.isArray(row.tools) ? row.tools.filter((tool): tool is string => typeof tool === "string") : [],
+      parts,
     };
   }
 
@@ -345,6 +359,7 @@ export class ConvexAgentRunStore implements AgentRunStore {
     operationKey: string;
     content: string;
     tools: string[];
+    parts?: AssistantMessagePart[];
     status: string;
     pauseActions?: PendingAction[];
     attempt?: number;
@@ -357,6 +372,7 @@ export class ConvexAgentRunStore implements AgentRunStore {
       role: "assistant",
       content: input.content,
       tools: input.tools,
+      ...(input.parts !== undefined ? { parts: input.parts } : {}),
       status: input.status,
       ...(input.pauseActions !== undefined ? { pauseActions: input.pauseActions } : {}),
       ...(input.attempt !== undefined ? { attempt: input.attempt } : {}),
