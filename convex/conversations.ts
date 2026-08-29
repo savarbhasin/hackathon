@@ -59,7 +59,7 @@ async function touchConversationSummary(ctx: any, id: any, now: number, incremen
 function fallbackTitle(message: string): string {
   const singleLine = message.replace(/\s+/g, " ").trim();
   if (!singleLine) return "New conversation";
-  return singleLine.length <= 72 ? singleLine : `${singleLine.slice(0, 69)}...`;
+  return Array.from(singleLine).slice(0, 20).join("").trimEnd();
 }
 
 function selectorsIn(value: unknown): string[] {

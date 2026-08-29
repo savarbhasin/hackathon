@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { fallbackConversationTitle } from "./conversation-title";
-import { maybeGenerateConversationTitle, mergeStreamingCandidate, orderedAssistantParts, streamingToolCalls, textAfterLastToolCall, toolNamesFromMessages } from "./durable-orchestrator";
-import type { AgentRunStore } from "./queue/types";
+import { mergeStreamingCandidate, orderedAssistantParts, streamingToolCalls, textAfterLastToolCall, toolNamesFromMessages } from "./durable-orchestrator";
 
 test("ignores replayed cumulative prefixes until they pass the durable baseline", () => {
   const baseline = "Hello";
@@ -126,42 +125,8 @@ test("preserves every tool call in provider order, including repeated tools", ()
   assert.deepEqual(toolNamesFromMessages(messages), ["get_task", "get_task", "list_board"]);
 });
 
-test("retries title generation from the original seed after an empty attempt", async () => {
-  const seedMessage = "Research durable queue recovery";
-  let title = fallbackConversationTitle(seedMessage);
-  const store = {
-    getConversationTitleState: async () => ({ title, seedMessage }),
-    updateConversationTitle: async (input: { expectedTitle: string; title: string }) => {
-      if (title !== input.expectedTitle) return false;
-      title = input.title;
-      return true;
-    },
-  } as unknown as AgentRunStore;
-
-  assert.equal(await maybeGenerateConversationTitle(store, {} as never, "conversation-1", async () => null), "empty");
-  assert.equal(await maybeGenerateConversationTitle(store, {} as never, "conversation-1", async (_client, prompt) => {
-    assert.equal(prompt, seedMessage);
-    return "Durable Queue Recovery";
-  }), "updated");
-  assert.equal(title, "Durable Queue Recovery");
-});
-
-test("does not overwrite a title changed while generation is in flight", async () => {
-  const seedMessage = "Inspect the mission board";
-  let title = fallbackConversationTitle(seedMessage);
-  const store = {
-    getConversationTitleState: async () => ({ title, seedMessage }),
-    updateConversationTitle: async (input: { expectedTitle: string; title: string }) => {
-      if (title !== input.expectedTitle) return false;
-      title = input.title;
-      return true;
-    },
-  } as unknown as AgentRunStore;
-
-  const result = await maybeGenerateConversationTitle(store, {} as never, "conversation-1", async () => {
-    title = "Manually Renamed";
-    return "Generated Board Title";
-  });
-  assert.equal(result, "stale");
-  assert.equal(title, "Manually Renamed");
+test("uses the normalized first 20 characters as the conversation title", () => {
+  assert.equal(fallbackConversationTitle("  Research   durable queue recovery  "), "Research durable que");
+  assert.equal(fallbackConversationTitle("Short title"), "Short title");
+  assert.equal(fallbackConversationTitle("   \n\t  "), "New conversation");
 });

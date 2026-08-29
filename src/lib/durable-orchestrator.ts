@@ -1,7 +1,6 @@
 import { isEventDelta, mergeEventDelta, TrueForge } from "@truefoundry/trueforge-sdk";
 import type { TrueForgeApi } from "@truefoundry/trueforge-sdk";
 import { ORCHESTRATOR_INSTRUCTIONS, ORCHESTRATOR_SPEC } from "./fleet";
-import { fallbackConversationTitle, generateConversationTitle } from "./conversation-title";
 import type { AgentRunRecord, AgentRunStore, AssistantDeltaStream, AssistantMessagePart, AssistantToolCall, PendingAction } from "./queue/types";
 import { RecoverableRunError } from "./queue/types";
 import { trueForgeBaseUrl } from "./queue/env";
@@ -315,29 +314,6 @@ function completionTokenStatus(metrics: RecordValue | undefined): string {
 
 type ProjectionOwnership = { attempt: number; workerId: string };
 
-export async function maybeGenerateConversationTitle(
-  store: AgentRunStore,
-  client: TrueForge,
-  conversationId: string | undefined,
-  generate: typeof generateConversationTitle = generateConversationTitle,
-): Promise<"skipped" | "empty" | "updated" | "stale"> {
-  if (!conversationId) return "skipped";
-  const state = await store.getConversationTitleState(conversationId);
-  if (!state?.seedMessage.trim()) return "skipped";
-  const expectedTitle = fallbackConversationTitle(state.seedMessage);
-  // Always compare against the original admitted message, not the current run,
-  // so a transient first-attempt failure can be retried on a later turn.
-  if (state.title !== expectedTitle) return "skipped";
-  const generated = await generate(client, state.seedMessage);
-  if (!generated || generated === state.title) return "empty";
-  // The Convex mutation repeats the expected-title comparison atomically. A
-  // manual rename or competing generator that wins during the provider call is
-  // therefore never overwritten by this delayed result.
-  return await store.updateConversationTitle({ conversationId, expectedTitle, title: generated })
-    ? "updated"
-    : "stale";
-}
-
 async function project(
   store: AgentRunStore,
   run: AgentRunRecord,
@@ -620,16 +596,6 @@ export async function processDurableOrchestratorRun(store: AgentRunStore, run: A
         await project(store, run, mergedText, tools, messageParts, completionTokenStatus(metrics), [], { attempt, workerId: context.workerId });
         if (!await store.complete({ runId: run._id, attempt, workerId: context.workerId, turnId, output: { content: mergedText, status: stateStatus, tools, ...(metrics ? { metrics } : {}) }, ...(providerSequence !== null ? { providerSequence } : {}) })) return;
         await deltaStream?.finish();
-        try {
-          workerLog("run.title_generation_started", { runId: run._id });
-          const titleResult = await maybeGenerateConversationTitle(store, client, run.conversationId);
-          workerLog("run.title_generation_completed", { runId: run._id, result: titleResult });
-        } catch (error) {
-          workerLog("run.title_generation_failed", {
-            runId: run._id,
-            message: error instanceof Error ? error.message.slice(0, 200) : "unknown",
-          });
-        }
         return;
       }
       if (stateStatus === "cancelled") {
