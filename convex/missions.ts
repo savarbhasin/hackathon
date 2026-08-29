@@ -373,6 +373,8 @@ export const taskCore = query({
       output: task.output,
       error: task.error,
       pendingActions: task.pendingActions,
+      specialistRunId: task.specialistRunId,
+      activeRunId: task.activeRunId,
       position: task.position,
       createdAt: task.createdAt,
       updatedAt: task.updatedAt,
