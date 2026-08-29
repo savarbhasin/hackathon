@@ -88,6 +88,10 @@ function namesFromMessages(messages: Map<string, Value>): string[] {
   return [...names];
 }
 
+function hasCompletionSignal(tools: string[]): boolean {
+  return tools.some((name) => name === "mark_done" || name.endsWith(".mark_done"));
+}
+
 function stableSelector(runId: string, index: number, id: string, sourceEventId?: string): string {
   return `pause_${runId}_${index}_${sourceEventId ? `${sourceEventId}_${id}` : id}`.slice(0, 240);
 }
@@ -249,7 +253,12 @@ export async function processDurableSpecialistRun(store: AgentRunStore, run: Age
           const eventKey = providerSequence !== null
             ? String(providerSequence)
             : typeof event.id === "string" ? event.id : `${type}:${fallbackEventSequence++}`;
-          await semantic(store, taskId, run._id, "activity.tool", { name: directName ?? tools[tools.length - 1], runId: run._id }, `tool:${eventKey}`);
+          await semantic(store, taskId, run._id, "activity.tool", {
+            name: directName ?? tools[tools.length - 1],
+            phase: type === "tool.response" ? "completed" : "started",
+            ...(typeof event.toolCallId === "string" ? { toolCallId: event.toolCallId } : {}),
+            runId: run._id,
+          }, `tool:${eventKey}`);
         }
       }
       if (type !== "turn.done") continue;
@@ -275,6 +284,28 @@ export async function processDurableSpecialistRun(store: AgentRunStore, run: Age
           const finalized = await store.finalizeSpecialist({ taskId, runId: run._id, attempt, workerId: context.workerId, status: waitingStatus, sessionId, turnId, pendingActions: actions, pendingActionSelector: selector, ...(providerSequence !== null ? { providerSequence } : {}), operationKey: `worker:${run._id}:pause:${selector ?? "multiple"}` });
           if (!finalized || !["created", "idempotent"].includes(String((finalized as Value).kind))) return;
           workerLog("run.specialist_paused", { runId: run._id, taskId, turnId, actionCount: actions.length });
+          return;
+        }
+        // A clean provider turn is not task completion. Specialists must call
+        // the Mission Control mark_done tool after producing their deliverable;
+        // otherwise a preamble-only turn (or an incomplete answer) would be
+        // incorrectly projected to Settled.
+        if (!hasCompletionSignal(tools)) {
+          const finalized = await store.finalizeSpecialist({
+            taskId,
+            runId: run._id,
+            attempt,
+            workerId: context.workerId,
+            status: "failed",
+            sessionId,
+            turnId,
+            errorCode: "missing_completion_signal",
+            errorMessage: "Agent turn ended without calling mark_done; the task was not completed.",
+            ...(providerSequence !== null ? { providerSequence } : {}),
+            operationKey: `worker:${run._id}:missing_completion_signal`,
+          });
+          if (!finalized || !["created", "idempotent"].includes(String((finalized as Value).kind))) return;
+          workerLog("run.specialist_missing_completion_signal", { runId: run._id, taskId, turnId });
           return;
         }
         const finalized = await store.finalizeSpecialist({ taskId, runId: run._id, attempt, workerId: context.workerId, status: "completed", sessionId, turnId, output: content.slice(0, 8_000), ...(providerSequence !== null ? { providerSequence } : {}), operationKey: `worker:${run._id}:completed` });

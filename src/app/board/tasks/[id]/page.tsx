@@ -77,6 +77,12 @@ interface ActivityItem {
   tone?: "working" | "blocked" | "approval" | "settled";
 }
 
+interface LiveTool {
+  name: string;
+  at: string;
+  phase?: "started" | "completed";
+}
+
 const STATUS: Record<string, { label: string; description: string; color: string; dot: string }> = {
   backlog: {
     label: "Backlog",
@@ -336,6 +342,7 @@ export default function TaskPage({ params }: { params: Promise<{ id: string }> }
     const item = semanticActivityFromEvent(event);
     return item ? [item] : [];
   });
+  const liveTool = task.column === "working" ? latestSpecialistTool(task.events, task.runId) : null;
   const status = STATUS[task.column] ?? STATUS.backlog;
 
   return (
@@ -408,7 +415,7 @@ export default function TaskPage({ params }: { params: Promise<{ id: string }> }
             )}
 
             <DocumentsSection documents={task.documents} />
-            <ActivitySection items={activity} />
+            <ActivitySection items={activity} liveTool={liveTool} />
             <TaskChat taskId={id} events={task.events} column={task.column} hasSession={Boolean(task.sessionId)} />
           </div>
 
@@ -870,11 +877,12 @@ function DocumentsSection({ documents }: { documents: TaskDocument[] }) {
   );
 }
 
-function ActivitySection({ items }: { items: ActivityItem[] }) {
+function ActivitySection({ items, liveTool }: { items: ActivityItem[]; liveTool: LiveTool | null }) {
   return (
     <section>
       <SectionHeading eyebrow={`${items.length} meaningful events`} title="Activity" />
-      <div className="mt-4 rounded-lg border border-line bg-panel/40">
+      {liveTool && <LiveToolActivity tool={liveTool} />}
+      <div className={`${liveTool ? "mt-3" : "mt-4"} rounded-lg border border-line bg-panel/40`}>
         <div className="h-80 overflow-y-auto overscroll-contain px-4 sm:px-5">
           {items.length > 0 ? (
             <ol>
@@ -966,6 +974,17 @@ function parsePendingActions(raw: string | null): PendingAction[] {
 
 function semanticActivityFromEvent(event: TaskEvent): ActivityItem | null {
   const payload = parsePayload(event.payload);
+  if (event.type === "activity.tool") {
+    const name = typeof payload?.name === "string" ? payload.name : "tool";
+    const phase = payload?.phase === "started" ? "Using" : "Used";
+    return {
+      id: event.id,
+      at: event.createdAt,
+      title: `${phase} ${toolLabel(name)}`,
+      detail: typeof payload?.message === "string" ? concise(payload.message) : undefined,
+      tone: "working",
+    };
+  }
   const defaults: Record<string, { title: string; tone: ActivityItem["tone"] }> = {
     "activity.started": { title: "Agent started work", tone: "working" },
     "activity.completed": { title: "Task completed", tone: "settled" },
@@ -1018,6 +1037,31 @@ function parsePayload(raw: string): Record<string, unknown> | null {
   } catch {
     return null;
   }
+}
+
+function latestSpecialistTool(events: TaskEvent[], runId?: string | null): LiveTool | null {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (event.type !== "activity.tool") continue;
+    const payload = parsePayload(event.payload);
+    if (!payload || typeof payload.name !== "string") continue;
+    if (runId && payload.runId !== runId) continue;
+    return {
+      name: payload.name,
+      at: event.createdAt,
+      phase: payload.phase === "completed" ? "completed" : "started",
+    };
+  }
+  return null;
+}
+
+function LiveToolActivity({ tool }: { tool: LiveTool }) {
+  return (
+    <div aria-live="polite" className="flex items-center gap-2 px-1 py-2 font-mono text-[10px] uppercase tracking-[0.12em] text-ink-faint">
+      <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-signal led-live" aria-hidden="true" />
+      <span className="tool-activity-live">{tool.phase === "completed" ? "Working" : `Using ${tool.name}`}</span>
+    </div>
+  );
 }
 
 function questionFromArgs(raw?: string): string | null {

@@ -9,7 +9,7 @@ const guardArgs = {
 };
 
 const runSnapshot = v.object({
-  _id: v.id("agentRuns"), _creationTime: v.number(), externalId: v.string(), kind: v.string(), status: v.string(),
+  _id: v.id("agentRuns"), _creationTime: v.number(), externalId: v.string(), operationKey: v.optional(v.string()), kind: v.string(), status: v.string(),
   conversationId: v.optional(v.id("conversations")), taskId: v.optional(v.id("tasks")), scheduleId: v.optional(v.id("schedules")),
   scheduleFireKey: v.optional(v.string()), intendedFireAt: v.optional(v.number()),
   input: v.any(), createdAt: v.number(), output: v.optional(v.any()), errorCode: v.optional(v.string()), errorMessage: v.optional(v.string()),
