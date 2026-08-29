@@ -390,11 +390,10 @@ export class ConvexAgentRunStore implements AgentRunStore {
   }
 
   async getSpecialistCompletion(input: { taskId: string; runId: string }): Promise<boolean> {
-    const task = await this.client.query(anyApi.missions.taskCore, { taskId: runId(input.taskId) }) as unknown;
-    if (!task || typeof task !== "object") return false;
-    const row = task as { output?: unknown; activeRunId?: unknown; specialistRunId?: unknown };
-    if (typeof row.output !== "string" || !row.output.trim()) return false;
-    return String(row.activeRunId ?? row.specialistRunId ?? "") === input.runId;
+    return await this.client.query(anyApi.missions.specialistCompletionRecorded, {
+      taskId: runId(input.taskId),
+      runId: runId(input.runId),
+    }) as boolean;
   }
 
   async appendTaskEvent(input: { taskId: string; type: string; payload: unknown; operationKey: string }): Promise<unknown> {
