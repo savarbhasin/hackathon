@@ -1,6 +1,6 @@
-# Mission Control
+# The Squad
 
-Mission Control runs a fleet of specialist agents on TrueForge. Give the orchestrator a goal and it turns that goal into tasks, assigns the right agent, tracks the work on a live board, and pauses before any external action that needs human approval.
+The Squad runs a fleet of specialist agents on TrueForge. Give the orchestrator a goal and it turns that goal into tasks, assigns the right agent, tracks the work on a live board, and pauses before any external action that needs human approval.
 
 This is built for work that is too large or risky for one chat thread. Research can feed a written brief. The brief can feed a Linear issue. Each step has its own agent, context, tools, and completion record.
 
@@ -27,13 +27,13 @@ The board columns map to runtime state:
 backlog -> working -> blocked -> approval -> settled
 ```
 
-A blocked task needs an answer. A task in approval has a pending action that a person must approve or deny. A settled task has completed its contract, and Mission Control dispatches any successor whose dependencies are now complete.
+A blocked task needs an answer. A task in approval has a pending action that a person must approve or deny. A settled task has completed its contract, and The Squad dispatches any successor whose dependencies are now complete.
 
 ## Why TrueForge is the core
 
-TrueForge runs every orchestrator and specialist turn. Mission Control does not call a model provider directly. It creates TrueForge sessions, submits turns, consumes the event stream, and stores the TrueForge session and turn IDs so work can survive process restarts.
+TrueForge runs every orchestrator and specialist turn. The Squad does not call a model provider directly. It creates TrueForge sessions, submits turns, consumes the event stream, and stores the TrueForge session and turn IDs so work can survive process restarts.
 
-TrueForge also supplies the agent configuration and connector boundary. Each specialist gets its model, instructions, MCP tools, and connectors through TrueForge. Tool approval and response events become board state in Mission Control. When someone approves an action or answers a question, the worker starts a new TrueForge turn with the matching tool response instead of flattening the interaction into a chat message.
+TrueForge also supplies the agent configuration and connector boundary. Each specialist gets its model, instructions, MCP tools, and connectors through TrueForge. Tool approval and response events become board state in The Squad. When someone approves an action or answers a question, the worker starts a new TrueForge turn with the matching tool response instead of flattening the interaction into a chat message.
 
 This matters most during failure and resume paths. Provider deltas can repeat after a reconnect, so the worker merges TrueForge event deltas, checkpoints the provider cursor in Convex, and writes terminal state only after the run owner passes its guards. The UI can reload without losing the agent's place or showing a stale run as active.
 
@@ -57,7 +57,7 @@ Convex is the application source of truth. It stores missions, tasks, conversati
 
 Redis and BullMQ only deliver work. Next.js admits a run, Convex claims its ownership, and BullMQ wakes the background worker. The worker owns long-running TrueForge turns, merges streamed deltas, checkpoints progress, and projects each event into Convex. If the web process restarts, the run does not move into the browser or disappear with the request.
 
-The MCP server gives TrueForge agents controlled access to Mission Control. Its tools create missions and tasks, inspect the board, dispatch ready work, manage schedules, save documents, and record `mark_done`. Connector calls such as filing a Linear issue stay inside the specialist's TrueForge tool policy.
+The MCP server gives TrueForge agents controlled access to The Squad. Its tools create missions and tasks, inspect the board, dispatch ready work, manage schedules, save documents, and record `mark_done`. Connector calls such as filing a Linear issue stay inside the specialist's TrueForge tool policy.
 
 ## Main routes
 
@@ -73,7 +73,7 @@ The MCP server gives TrueForge agents controlled access to Mission Control. Its 
 
 ### Prerequisites
 
-Install these before starting Mission Control:
+Install these before starting The Squad:
 
 - Node.js 22.14 or newer
 - npm
@@ -135,7 +135,7 @@ Run TrueForge in another terminal:
 npx @truefoundry/trueforge
 ```
 
-Open [localhost:8790](http://localhost:8790) and configure a model provider. Mission Control reads and reconciles its managed agent profiles through the TrueForge SDK.
+Open [localhost:8790](http://localhost:8790) and configure a model provider. The Squad reads and reconciles its managed agent profiles through the TrueForge SDK.
 
 After the MCP process starts in the next step, register a TrueForge MCP connector named `mission-control` with this URL:
 
@@ -145,7 +145,7 @@ http://localhost:3100/mcp
 
 Add Exa and Linear connectors in TrueForge if the selected specialist needs them. The filer role requires approval for Linear's `save_issue` tool.
 
-### 5. Start Mission Control
+### 5. Start The Squad
 
 Keep Convex, Redis, and TrueForge running. Open three more terminals from the repository root:
 
@@ -184,7 +184,7 @@ Qodo reviewed the project throughout the hackathon, starting with the first merg
 | [#19, Preserve and group agent execution activity](https://github.com/savarbhasin/hackathon/pull/19) | [Streaming projection and task activity review](https://github.com/savarbhasin/hackathon/pull/19#pullrequestreview-5058029339) |
 | [#22, Fix specialist completion ownership](https://github.com/savarbhasin/hackathon/pull/22) | [Run ownership and completion review](https://github.com/savarbhasin/hackathon/pull/22#pullrequestreview-5059032545) |
 
-PR #19 is the representative completed review. Qodo found that replayed TrueForge events could duplicate durable assistant parts and that narration without a tool call could vanish from the task feed. I fixed both in [commit `27f9c409`](https://github.com/savarbhasin/hackathon/commit/27f9c40942caed04b1968afe531e129a3d020014) and added replay coverage. I dismissed one suggestion to settle every clean `turn.done` because Mission Control requires specialists to call `mark_done`. A model stopping is not proof that its task contract is complete.
+PR #19 is the representative completed review. Qodo found that replayed TrueForge events could duplicate durable assistant parts and that narration without a tool call could vanish from the task feed. I fixed both in [commit `27f9c409`](https://github.com/savarbhasin/hackathon/commit/27f9c40942caed04b1968afe531e129a3d020014) and added replay coverage. I dismissed one suggestion to settle every clean `turn.done` because The Squad requires specialists to call `mark_done`. A model stopping is not proof that its task contract is complete.
 
 That pull request keeps the decisions and final review together:
 
