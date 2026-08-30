@@ -1,56 +1,199 @@
 # Mission Control
 
-A control center for running agent fleets on TrueForge. Instead of chatting with one agent at a time, you hand a mission to an orchestrator that decomposes it into a board of tasks, delegates each task to a specialist agent, and keeps every irreversible action behind a human approval gate.
+Mission Control runs a fleet of specialist agents on TrueForge. Give the orchestrator a goal and it turns that goal into tasks, assigns the right agent, tracks the work on a live board, and pauses before any external action that needs human approval.
+
+This is built for work that is too large or risky for one chat thread. Research can feed a written brief. The brief can feed a Linear issue. Each step has its own agent, context, tools, and completion record.
+
+## Submission links
+
+- Source code: [github.com/savarbhasin/hackathon](https://github.com/savarbhasin/hackathon)
+- Live app: [hackathon-five-amber.vercel.app](https://hackathon-five-amber.vercel.app)
+- Demo video: **Add the three-minute demo video link before submission**
+- Blog post: **Add the blog post link here if entering the blog prize**
 
 ## What it does
 
-- **Mission intake through chat.** You describe an outcome; the orchestrator decides whether to answer directly or split the work into a dependency graph of specialist tasks.
-- **Specialists that own one job each.** Every task is assigned to an agent configured with its own model, tools, and connector access. No agent wanders outside its assignment.
-- **Approvals before irreversible actions.** Filing issues, sending messages, anything external pauses the task and waits for a yes from a human.
-- **Questions instead of guesses.** When an agent is missing information it stops and asks from the board rather than inventing facts.
-- **Documents as handoffs.** Research, briefs, and finished artifacts get saved as versioned Markdown so downstream agents inherit real material, not lossy chat summaries.
-- **Recurring missions.** Cron-driven schedules kick off prompts on an interval — morning digests, periodic research sweeps.
+- You describe an outcome in the orchestrator chat.
+- The orchestrator creates a mission and a dependency graph of specialist tasks.
+- Specialist agents research, write, file issues, or handle custom roles with their own models and tool access.
+- The kanban board updates while agents work. It shows narration, tool calls, questions, failures, and completion state.
+- Irreversible connector calls pause for approval. The worker resumes the same TrueForge thread after a person approves, denies, or answers.
+- Completed tasks pass summaries and versioned Markdown documents to dependent tasks.
+- Schedules can run the same agent workflow on a cron expression.
+
+The board columns map to runtime state:
+
+```text
+backlog -> working -> blocked -> approval -> settled
+```
+
+A blocked task needs an answer. A task in approval has a pending action that a person must approve or deny. A settled task has completed its contract, and Mission Control dispatches any successor whose dependencies are now complete.
+
+## Why TrueForge is the core
+
+TrueForge runs every orchestrator and specialist turn. Mission Control does not call a model provider directly. It creates TrueForge sessions, submits turns, consumes the event stream, and stores the TrueForge session and turn IDs so work can survive process restarts.
+
+TrueForge also supplies the agent configuration and connector boundary. Each specialist gets its model, instructions, MCP tools, and connectors through TrueForge. Tool approval and response events become board state in Mission Control. When someone approves an action or answers a question, the worker starts a new TrueForge turn with the matching tool response instead of flattening the interaction into a chat message.
+
+This matters most during failure and resume paths. Provider deltas can repeat after a reconnect, so the worker merges TrueForge event deltas, checkpoints the provider cursor in Convex, and writes terminal state only after the run owner passes its guards. The UI can reload without losing the agent's place or showing a stale run as active.
 
 ## Architecture
 
+```mermaid
+flowchart LR
+    Browser <--> |live subscriptions| Convex[Convex real-time database]
+    Browser --> |admit a run| Next[Next.js API]
+    Next --> Convex
+    Next --> Queue[Redis and BullMQ]
+    Queue --> Worker[Background worker]
+    Worker <--> |run state and checkpoints| Convex
+    Worker <--> |sessions, turns, event stream| TrueForge
+    TrueForge --> |board tools| MCP[MCP server]
+    MCP --> Convex
+    MCP --> Queue
 ```
-Browser
-  ├─ /            Orchestrator chat (streamed turns)
-  ├─ /board       Kanban of tasks with per-task drawer
-  ├─ /agents      Specialist registry (model + tool access per role)
-  └─ /schedules   Recurring prompts
-        │ Convex subscriptions
-        ▼
-Next.js  ── Convex ── TrueForge server (sessions, turns, events)
-   │                   │
-   └─ BullMQ/Redis ── worker
-                       │
-                MCP server exposing board tools to agents
+
+Convex is the application source of truth. It stores missions, tasks, conversations, schedules, agent runs, provider checkpoints, pending approvals, and task activity. Browser subscriptions update the chat and board as soon as Convex changes.
+
+Redis and BullMQ only deliver work. Next.js admits a run, Convex claims its ownership, and BullMQ wakes the background worker. The worker owns long-running TrueForge turns, merges streamed deltas, checkpoints progress, and projects each event into Convex. If the web process restarts, the run does not move into the browser or disappear with the request.
+
+The MCP server gives TrueForge agents controlled access to Mission Control. Its tools create missions and tasks, inspect the board, dispatch ready work, manage schedules, save documents, and record `mark_done`. Connector calls such as filing a Linear issue stay inside the specialist's TrueForge tool policy.
+
+## Main routes
+
+| Route | Purpose |
+| --- | --- |
+| `/` | Orchestrator chat and live execution stream |
+| `/board` | Mission kanban with approval and question handling |
+| `/agents` | Specialist models, instructions, connectors, and tools |
+| `/docs` | Versioned Markdown outputs and handoff documents |
+| `/schedules` | Recurring prompts and run history |
+
+## Local setup
+
+### Prerequisites
+
+Install these before starting Mission Control:
+
+- Node.js 22.14 or newer
+- npm
+- Docker with Docker Compose
+- A Convex account and deployment
+- TrueForge running locally
+- At least one model provider configured in TrueForge
+
+Exa and Linear are optional for the basic app, but the included researcher and filer flows use them. Add those connectors in TrueForge if you want to run the full research to Linear demo.
+
+### 1. Install dependencies
+
+```bash
+git clone https://github.com/savarbhasin/hackathon.git
+cd hackathon
+npm ci
 ```
 
-Convex is the source of truth for the board and run state. BullMQ and Redis deliver work to the worker, which owns the long-lived TrueForge stream. Live assistant text is batched into the official Convex Agent streaming component and consumed through Convex subscriptions; the application’s `chatMessages` table remains the final durable record.
+### 2. Configure Convex and environment variables
 
-## The board
+Copy the example file:
 
-Tasks move through `backlog → working → blocked → approval → settled`. The columns are harness state, not manual labels:
+```bash
+cp .env.example .env.local
+```
 
-- **approval** — an action needs sign-off; approve or deny straight from the card
-- **blocked** — the agent asked a question; answer resumes the same thread
-- **settled** — done, and any successor whose dependencies just cleared gets dispatched automatically
-
-## Local development
-
-Copy `.env.example` to `.env.local`, start Redis with `docker compose up redis`, and run these processes:
+Start Convex and select or create a deployment:
 
 ```bash
 npx convex dev
-npm run dev
-npm run dev:worker
+```
+
+Put your deployment values in `.env.local`. Do not commit this file.
+
+| Variable | Example | Used by |
+| --- | --- | --- |
+| `NEXT_PUBLIC_CONVEX_URL` | `https://your-deployment.convex.cloud` | Browser |
+| `CONVEX_URL` | `https://your-deployment.convex.cloud` | Next.js, MCP, worker |
+| `CONVEX_SITE_URL` | `https://your-deployment.convex.site` | Convex HTTP actions |
+| `REDIS_URL` | `redis://127.0.0.1:6390` | BullMQ producer, worker, MCP |
+| `TRUEFORGE_BASE_URL` | `http://localhost:8790` | Next.js and worker |
+| `WORKER_CONCURRENCY` | `2` | Worker |
+
+Leave `npx convex dev` running during local development so schema and function changes reach the selected deployment.
+
+### 3. Start Redis
+
+```bash
+docker compose up -d redis
+```
+
+The compose file binds Redis to port `6390` on localhost.
+
+### 4. Start and configure TrueForge
+
+Run TrueForge in another terminal:
+
+```bash
+npx @truefoundry/trueforge
+```
+
+Open [localhost:8790](http://localhost:8790) and configure a model provider. Mission Control reads and reconciles its managed agent profiles through the TrueForge SDK.
+
+After the MCP process starts in the next step, register a TrueForge MCP connector named `mission-control` with this URL:
+
+```text
+http://localhost:3100/mcp
+```
+
+Add Exa and Linear connectors in TrueForge if the selected specialist needs them. The filer role requires approval for Linear's `save_issue` tool.
+
+### 5. Start Mission Control
+
+Keep Convex, Redis, and TrueForge running. Open three more terminals from the repository root:
+
+```bash
 npm run dev:mcp
 ```
 
-The web app uses `NEXT_PUBLIC_CONVEX_URL`. Next.js, the MCP server, and the worker use `CONVEX_URL`. Redis carries BullMQ delivery only. TrueForge owns agent sessions and turns.
+```bash
+npm run dev:worker
+```
+
+```bash
+npm run dev
+```
+
+Open [localhost:3000](http://localhost:3000). Send a mission from the home page, then watch its tasks move on [localhost:3000/board](http://localhost:3000/board).
+
+## Useful checks
+
+```bash
+npm run lint
+npx tsc --noEmit
+npm run build
+find src server worker convex -name '*.test.ts' -print0 | xargs -0 node --import tsx --test
+```
+
+## Qodo Code Review Evidence
+
+Qodo reviewed the project throughout the hackathon, starting with the first merged build PR. These reviews cover the main architecture changes rather than a final cleanup pass.
+
+| Merged pull request | Qodo review |
+| --- | --- |
+| [#3, Build the mission control console](https://github.com/savarbhasin/hackathon/pull/3) | [Initial control plane, task lifecycle, approval, and scheduling review](https://github.com/savarbhasin/hackathon/pull/3#pullrequestreview-5021703659) |
+| [#10, Bring in Convex, workers, and queues](https://github.com/savarbhasin/hackathon/pull/10) | [Durable runtime and data ownership review](https://github.com/savarbhasin/hackathon/pull/10#pullrequestreview-5034331044) |
+| [#12, Optimize durable streaming and recovery](https://github.com/savarbhasin/hackathon/pull/12) | [Replay, recovery, and concurrency review](https://github.com/savarbhasin/hackathon/pull/12#pullrequestreview-5052405009) |
+| [#19, Preserve and group agent execution activity](https://github.com/savarbhasin/hackathon/pull/19) | [Streaming projection and task activity review](https://github.com/savarbhasin/hackathon/pull/19#pullrequestreview-5058029339) |
+| [#22, Fix specialist completion ownership](https://github.com/savarbhasin/hackathon/pull/22) | [Run ownership and completion review](https://github.com/savarbhasin/hackathon/pull/22#pullrequestreview-5059032545) |
+
+PR #19 is the representative completed review. Qodo found that replayed TrueForge events could duplicate durable assistant parts and that narration without a tool call could vanish from the task feed. I fixed both in [commit `27f9c409`](https://github.com/savarbhasin/hackathon/commit/27f9c40942caed04b1968afe531e129a3d020014) and added replay coverage. I dismissed one suggestion to settle every clean `turn.done` because Mission Control requires specialists to call `mark_done`. A model stopping is not proof that its task contract is complete.
+
+That pull request keeps the decisions and final review together:
+
+- [Qodo's initial review](https://github.com/savarbhasin/hackathon/pull/19#pullrequestreview-5058029339)
+- [Decision and fix for replayed assistant parts](https://github.com/savarbhasin/hackathon/pull/19#discussion_r3886551175)
+- [Decision and fix for narration-only activity](https://github.com/savarbhasin/hackathon/pull/19#discussion_r3886551232)
+- [Reason for dismissing the `turn.done` suggestion](https://github.com/savarbhasin/hackathon/pull/19#discussion_r3886551256)
+- [Qodo's follow-up review against the final commit](https://github.com/savarbhasin/hackathon/pull/19#issuecomment-5462297871)
 
 ## Stack
 
-Next.js (App Router) · TypeScript · Convex · Redis/BullMQ · TrueForge SDK · Model Context Protocol
+Next.js 16, React 19, TypeScript, Convex, Redis, BullMQ, TrueForge SDK, Model Context Protocol
