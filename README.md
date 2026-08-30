@@ -33,6 +33,10 @@ A blocked task needs an answer. A task in approval has a pending action that a p
 
 TrueForge runs every orchestrator and specialist turn. The Squad does not call a model provider directly. It creates TrueForge sessions, submits turns, consumes the event stream, and stores the TrueForge session and turn IDs so work can survive process restarts.
 
+The fleet model depends on TrueForge's approval boundary. Its harness stops irreversible or destructive tool calls before they run and waits for your approval. An agent cannot approve its own action. You stay in control of anything consequential.
+
+That makes unattended work practical. Long-running specialists can keep working, pass results to one another, and make progress while you are away. Routine work continues without supervision. A tool call that could file, send, delete, or change something outside The Squad pauses on the board until you approve or deny it.
+
 TrueForge also supplies the agent configuration and connector boundary. Each specialist gets its model, instructions, MCP tools, and connectors through TrueForge. Tool approval and response events become board state in The Squad. When someone approves an action or answers a question, the worker starts a new TrueForge turn with the matching tool response instead of flattening the interaction into a chat message.
 
 This matters most during failure and resume paths. Provider deltas can repeat after a reconnect, so the worker merges TrueForge event deltas, checkpoints the provider cursor in Convex, and writes terminal state only after the run owner passes its guards. The UI can reload without losing the agent's place or showing a stale run as active.
@@ -178,7 +182,7 @@ Qodo reviewed the project throughout the hackathon, starting with the first merg
 
 | Merged pull request | Qodo review |
 | --- | --- |
-| [#3, Build the mission control console](https://github.com/savarbhasin/hackathon/pull/3) | [Initial control plane, task lifecycle, approval, and scheduling review](https://github.com/savarbhasin/hackathon/pull/3#pullrequestreview-5021703659) |
+| [#3, Build The Squad console](https://github.com/savarbhasin/hackathon/pull/3) | [Initial control plane, task lifecycle, approval, and scheduling review](https://github.com/savarbhasin/hackathon/pull/3#pullrequestreview-5021703659) |
 | [#10, Bring in Convex, workers, and queues](https://github.com/savarbhasin/hackathon/pull/10) | [Durable runtime and data ownership review](https://github.com/savarbhasin/hackathon/pull/10#pullrequestreview-5034331044) |
 | [#12, Optimize durable streaming and recovery](https://github.com/savarbhasin/hackathon/pull/12) | [Replay, recovery, and concurrency review](https://github.com/savarbhasin/hackathon/pull/12#pullrequestreview-5052405009) |
 | [#19, Preserve and group agent execution activity](https://github.com/savarbhasin/hackathon/pull/19) | [Streaming projection and task activity review](https://github.com/savarbhasin/hackathon/pull/19#pullrequestreview-5058029339) |
