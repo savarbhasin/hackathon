@@ -1,8 +1,8 @@
 # The Squad
 
-The Squad runs a fleet of specialist agents on TrueForge. Give the orchestrator a goal and it turns that goal into tasks, assigns the right agent, tracks the work on a live board, and pauses before any external action that needs human approval.
+The Squad runs a fleet of specialist agents on TrueForge. Give the orchestrator a goal, and it turns that goal into tasks, assigns the right agent, tracks the work on a live board, and pauses before any external action that requires human approval.
 
-This is built for work that is too large or risky for one chat thread. Research can feed a written brief. The brief can feed a Linear issue. Each step has its own agent, context, tools, and completion record.
+The Squad is designed for work that is too large or risky for a single chat thread. Research can inform a written brief, which can then become a Linear issue. Each step has its own agent, context, tools, and completion record.
 
 ## Submission links
 
@@ -16,10 +16,10 @@ This is built for work that is too large or risky for one chat thread. Research 
 - You describe an outcome in the orchestrator chat.
 - The orchestrator creates a mission and a dependency graph of specialist tasks.
 - Specialist agents research, write, file issues, or handle custom roles with their own models and tool access.
-- The kanban board updates while agents work. It shows narration, tool calls, questions, failures, and completion state.
-- Irreversible connector calls pause for approval. The worker resumes the same TrueForge thread after a person approves, denies, or answers.
+- The Kanban board updates as agents work, showing narration, tool calls, questions, failures, and completion states.
+- Irreversible connector calls pause for approval. The worker resumes the same TrueForge thread after a person approves or denies an action, or answers a question.
 - Completed tasks pass summaries and versioned Markdown documents to dependent tasks.
-- Schedules can run the same agent workflow on a cron expression.
+- Schedules can run the same agent workflow according to a cron schedule.
 
 The board columns map to runtime state:
 
@@ -27,15 +27,15 @@ The board columns map to runtime state:
 backlog -> working -> blocked -> approval -> settled
 ```
 
-A blocked task needs an answer. A task in approval has a pending action that a person must approve or deny. A settled task has completed its contract, and The Squad dispatches any successor whose dependencies are now complete.
+A blocked task needs an answer. A task in the approval column has a pending action that a person must approve or deny. A settled task has completed its contract, and The Squad dispatches any successor once its dependencies are complete.
 
 ## Why TrueForge is the core
 
 TrueForge runs every orchestrator and specialist turn. The Squad does not call a model provider directly. It creates TrueForge sessions, submits turns, consumes the event stream, and stores the TrueForge session and turn IDs so work can survive process restarts.
 
-TrueForge also supplies the agent configuration and connector boundary. Each specialist gets its model, instructions, MCP tools, and connectors through TrueForge. Tool approval and response events become board state in The Squad. When someone approves an action or answers a question, the worker starts a new TrueForge turn with the matching tool response instead of flattening the interaction into a chat message.
+TrueForge also supplies the agent configuration and connector boundary. Each specialist gets its model, instructions, MCP tools, and connectors through TrueForge. Tool approval and response events are reflected in The Squad's board state. When someone approves an action or answers a question, the worker starts a new TrueForge turn with the matching tool response instead of flattening the interaction into a chat message.
 
-This matters most during failure and resume paths. Provider deltas can repeat after a reconnect, so the worker merges TrueForge event deltas, checkpoints the provider cursor in Convex, and writes terminal state only after the run owner passes its guards. The UI can reload without losing the agent's place or showing a stale run as active.
+This matters most during failure and recovery. Provider deltas can repeat after a reconnect, so the worker merges TrueForge event deltas, checkpoints the provider cursor in Convex, and writes terminal state only after the run owner passes its guards. The UI can reload without losing the agent's place or incorrectly showing a stale run as active.
 
 ## Architecture
 
@@ -57,7 +57,7 @@ Convex is the application source of truth. It stores missions, tasks, conversati
 
 Redis and BullMQ only deliver work. Next.js admits a run, Convex claims its ownership, and BullMQ wakes the background worker. The worker owns long-running TrueForge turns, merges streamed deltas, checkpoints progress, and projects each event into Convex. If the web process restarts, the run does not move into the browser or disappear with the request.
 
-The MCP server gives TrueForge agents controlled access to The Squad. Its tools create missions and tasks, inspect the board, dispatch ready work, manage schedules, save documents, and record `mark_done`. Connector calls such as filing a Linear issue stay inside the specialist's TrueForge tool policy.
+The MCP server gives TrueForge agents controlled access to The Squad. Its tools create missions and tasks, inspect the board, dispatch ready work, manage schedules, save documents, and record task completion through `mark_done`. Connector calls, such as filing a Linear issue, remain subject to the specialist's TrueForge tool policy.
 
 ## Main routes
 
@@ -82,7 +82,7 @@ Install these before starting The Squad:
 - TrueForge running locally
 - At least one model provider configured in TrueForge
 
-Exa and Linear are optional for the basic app, but the included researcher and filer flows use them. Add those connectors in TrueForge if you want to run the full research to Linear demo.
+Exa and Linear are optional for the basic app, but the included researcher and filer flows use them. Add those connectors in TrueForge if you want to run the full research-to-Linear demo.
 
 ### 1. Install dependencies
 
@@ -135,7 +135,7 @@ Run TrueForge in another terminal:
 npx @truefoundry/trueforge
 ```
 
-Open [localhost:8790](http://localhost:8790) and configure a model provider. The Squad reads and reconciles its managed agent profiles through the TrueForge SDK.
+Open [localhost:8790](http://localhost:8790) and configure a model provider. The Squad reads and reconciles TrueForge-managed agent profiles through the TrueForge SDK.
 
 After the MCP process starts in the next step, register a TrueForge MCP connector named `mission-control` with this URL:
 
@@ -143,7 +143,7 @@ After the MCP process starts in the next step, register a TrueForge MCP connecto
 http://localhost:3100/mcp
 ```
 
-Add Exa and Linear connectors in TrueForge if the selected specialist needs them. The filer role requires approval for Linear's `save_issue` tool.
+Add the Exa and Linear connectors in TrueForge if your selected specialists need them. The filer role requires approval for Linear's `save_issue` tool.
 
 ### 5. Start The Squad
 
@@ -186,7 +186,7 @@ Qodo reviewed the project throughout the hackathon, starting with the first merg
 
 PR #19 is the representative completed review. Qodo found that replayed TrueForge events could duplicate durable assistant parts and that narration without a tool call could vanish from the task feed. I fixed both in [commit `27f9c409`](https://github.com/savarbhasin/hackathon/commit/27f9c40942caed04b1968afe531e129a3d020014) and added replay coverage. I dismissed one suggestion to settle every clean `turn.done` because The Squad requires specialists to call `mark_done`. A model stopping is not proof that its task contract is complete.
 
-That pull request keeps the decisions and final review together:
+That pull request keeps the decisions and final review in one place:
 
 - [Qodo's initial review](https://github.com/savarbhasin/hackathon/pull/19#pullrequestreview-5058029339)
 - [Decision and fix for replayed assistant parts](https://github.com/savarbhasin/hackathon/pull/19#discussion_r3886551175)
