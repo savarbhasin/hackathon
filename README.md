@@ -8,8 +8,7 @@ This is built for work that is too large or risky for one chat thread. Research 
 
 - Source code: [github.com/savarbhasin/hackathon](https://github.com/savarbhasin/hackathon)
 - Live app: [hackathon-five-amber.vercel.app](https://hackathon-five-amber.vercel.app)
-- Demo video: **Add the three-minute demo video link before submission**
-- Blog post: **Add the blog post link here if entering the blog prize**
+- Demo video: [video](https://youtu.be/v7xE1u3lt2g)
 
 ## What it does
 
