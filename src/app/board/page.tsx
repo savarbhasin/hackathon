@@ -17,6 +17,7 @@ interface Task {
   dependsOn: string[];
   error?: string;
   pendingActions?: unknown;
+  currentTool?: { name?: string; phase?: string };
   updatedAt: number;
 }
 
@@ -159,6 +160,7 @@ function Card({
   const gated = task.column === "approval";
   const blocked = task.column === "blocked";
   const toolName = gated || blocked ? firstPendingTool(task.pendingActions) : null;
+  const liveTool = task.column === "working" && task.currentTool?.name ? task.currentTool : null;
   const dependencyCount = safeDependencyCount(task.dependsOn);
 
   return (
@@ -176,6 +178,13 @@ function Card({
       </div>
 
       <p className="font-sans text-[13px] font-medium leading-snug text-ink">{task.title}</p>
+
+      {liveTool && (
+        <div aria-live="polite" className="mt-3 flex items-center gap-2 border-t border-line/70 pt-2.5 font-mono text-[8px] font-medium uppercase tracking-[0.12em] text-ink-faint">
+          <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-signal led-live" aria-hidden="true" />
+          <span className="tool-activity-live">{liveTool.phase === "completed" ? "Working" : `Using ${liveTool.name}`}</span>
+        </div>
+      )}
 
       {dependencyCount > 0 && (
         <p className="mt-3 border-t border-line/70 pt-2.5 font-mono text-[8px] uppercase tracking-[0.1em] text-ink-faint">

@@ -270,16 +270,16 @@ export async function processDurableSpecialistRun(store: AgentRunStore, run: Age
       }
       const specialistActivity = activityMessages(messages);
       for (const update of activityProjector.sync(specialistActivity)) {
-        await semantic(store, taskId, run._id, update.type, { ...update.payload, runId: run._id }, update.operationSuffix);
+        await semantic(store, taskId, run._id, update.type, { ...update.payload, runId: run._id, attempt, workerId: context.workerId }, update.operationSuffix);
       }
       if (type === "tool.response" && typeof event.toolCallId === "string") {
         for (const update of activityProjector.complete(event.toolCallId)) {
-          await semantic(store, taskId, run._id, update.type, { ...update.payload, runId: run._id }, update.operationSuffix);
+          await semantic(store, taskId, run._id, update.type, { ...update.payload, runId: run._id, attempt, workerId: context.workerId }, update.operationSuffix);
         }
       }
       if (type !== "turn.done") continue;
       for (const update of activityProjector.flush(specialistActivity)) {
-        await semantic(store, taskId, run._id, update.type, { ...update.payload, runId: run._id }, update.operationSuffix);
+        await semantic(store, taskId, run._id, update.type, { ...update.payload, runId: run._id, attempt, workerId: context.workerId }, update.operationSuffix);
       }
 
       const state = record(event.state) ?? {};

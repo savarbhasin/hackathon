@@ -31,6 +31,8 @@ export default defineSchema({
     output: v.optional(v.any()),
     error: v.optional(v.string()),
     pendingActions: v.optional(v.any()),
+    // Latest specialist tool activity, projected for live board cards.
+    currentTool: v.optional(v.any()),
     position: v.number(),
     claimedBy: v.optional(v.string()),
     claimCount: v.number(),

@@ -23,6 +23,17 @@ async function guardedRun(ctx: any, args: { runId: any; attempt: number; workerI
   return run;
 }
 
+async function clearSpecialistToolProjection(ctx: any, run: any, now: number): Promise<void> {
+  if (run.kind !== "specialist" || run.taskId === undefined) return;
+  const task = await ctx.db.get(run.taskId);
+  if (!task) return;
+  const linked = task.activeRunId === run._id
+    || (task.activeRunId === undefined && task.specialistRunId === run._id);
+  if (linked && task.currentTool !== undefined) {
+    await ctx.db.patch(task._id, { currentTool: undefined, updatedAt: now });
+  }
+}
+
 export const get = query({
   args: { runId: v.id("agentRuns") },
   returns: v.union(runSnapshot, v.null()),
@@ -192,7 +203,9 @@ export const claim = mutation({
     if (activeRecovery && (args.expectedAttempt === undefined || run.attempt !== args.expectedAttempt)) return null;
     if (args.expectedAttempt !== undefined && run.attempt !== args.expectedAttempt) return null;
     const attempt = run.attempt + 1;
-    await ctx.db.patch(args.runId, { status: "connecting", attempt, claimedBy: args.workerId, startedAt: run.startedAt ?? Date.now(), updatedAt: Date.now() });
+    const now = Date.now();
+    await clearSpecialistToolProjection(ctx, run, now);
+    await ctx.db.patch(args.runId, { status: "connecting", attempt, claimedBy: args.workerId, startedAt: run.startedAt ?? now, updatedAt: now });
     const updated = await ctx.db.get(args.runId);
     if (!updated) return null;
     return {
@@ -210,7 +223,9 @@ export const releaseForRetry = mutation({
   handler: async (ctx, args) => {
     const run = await guardedRun(ctx, args);
     if (!run || (run.status !== "connecting" && run.status !== "running")) return false;
-    await ctx.db.patch(args.runId, { status: "queued", errorCode: args.errorCode, errorMessage: args.errorMessage, claimedBy: undefined, updatedAt: Date.now() });
+    const now = Date.now();
+    await clearSpecialistToolProjection(ctx, run, now);
+    await ctx.db.patch(args.runId, { status: "queued", errorCode: args.errorCode, errorMessage: args.errorMessage, claimedBy: undefined, updatedAt: now });
     return true;
   },
 });

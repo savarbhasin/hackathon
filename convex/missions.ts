@@ -77,7 +77,43 @@ async function insertTaskEvent(ctx: any, id: any, type: string, payload: unknown
   const latest = await ctx.db.query("taskEvents").withIndex("by_task", (q: any) => q.eq("taskId", id)).order("desc").first();
   const seq = Math.max(task.lastSeq, latest?.seq ?? 0) + 1;
   const event = await ctx.db.insert("taskEvents", { taskId: id, seq, type, payload, ...(operationKey ? { operationKey } : {}), createdAt: Date.now() });
-  await ctx.db.patch(id, { lastSeq: seq, updatedAt: Date.now() });
+  const now = Date.now();
+  const patch: Record<string, unknown> = { lastSeq: seq, updatedAt: now };
+  if (type === "activity.tool" && payload && typeof payload === "object" && !Array.isArray(payload)) {
+    const tool = payload as { name?: unknown; phase?: unknown; toolCallId?: unknown; runId?: unknown; attempt?: unknown; workerId?: unknown };
+    const activeRun = task.activeRunId === undefined ? null : await ctx.db.get(task.activeRunId);
+    const belongsToActiveRun = activeRun !== null
+      && activeRun.kind === "specialist"
+      && typeof tool.runId === "string"
+      && String(task.activeRunId) === tool.runId
+      && typeof tool.attempt === "number"
+      && activeRun.attempt === tool.attempt
+      && typeof tool.workerId === "string"
+      && activeRun.claimedBy === tool.workerId;
+    if (belongsToActiveRun && typeof tool.name === "string" && tool.name.trim()) {
+      const phase = tool.phase === "completed" ? "completed" : "started";
+      const current = task.currentTool as { toolCallId?: unknown } | undefined;
+      const sameCall = typeof tool.toolCallId !== "string" || typeof current?.toolCallId !== "string" || current.toolCallId === tool.toolCallId;
+      if (phase === "started") {
+        patch.currentTool = {
+          name: tool.name,
+          phase,
+          ...(typeof tool.toolCallId === "string" ? { toolCallId: tool.toolCallId } : {}),
+          runId: tool.runId,
+        };
+      } else if (sameCall) {
+        // Keep a short-lived tool label between calls so the card can show a
+        // live "Working" state instead of going blank while the model thinks.
+        patch.currentTool = {
+          name: tool.name,
+          phase,
+          ...(typeof tool.toolCallId === "string" ? { toolCallId: tool.toolCallId } : {}),
+          runId: tool.runId,
+        };
+      }
+    }
+  }
+  await ctx.db.patch(id, patch as any);
   return { event: await ctx.db.get(event), inserted: true };
 }
 
@@ -129,7 +165,7 @@ async function admitSpecialistInternal(ctx: any, args: any, enforceReady = false
   if (existingRun) {
     if (existingRun.taskId !== args.taskId) return result("conflict", { reason: "operation_key_owned_by_other_task", run: existingRun });
     if (task.activeRunId !== undefined && task.activeRunId !== existingRun._id) return result("conflict", { reason: "newer_run_already_active", run: existingRun });
-    if (task.specialistRunId !== existingRun._id || task.activeRunId !== existingRun._id) await ctx.db.patch(args.taskId, { specialistRunId: existingRun._id, activeRunId: existingRun._id, updatedAt: Date.now() });
+    if (task.specialistRunId !== existingRun._id || task.activeRunId !== existingRun._id) await ctx.db.patch(args.taskId, { specialistRunId: existingRun._id, activeRunId: existingRun._id, currentTool: undefined, updatedAt: Date.now() });
     return result("idempotent", { task: await ctx.db.get(args.taskId), run: existingRun });
   }
   if (enforceReady && !(await readySuccessor(ctx, task))) return result("dependency_blocked", { task });
@@ -155,6 +191,7 @@ async function admitSpecialistInternal(ctx: any, args: any, enforceReady = false
     sessionId: undefined,
     turnId: undefined,
     pendingActions: undefined,
+    currentTool: undefined,
     handoff: undefined,
     output: undefined,
     error: undefined,
@@ -287,6 +324,7 @@ export const boardSnapshot = query({
           dependsOn: task.dependsOn ?? [],
           ...(task.error !== undefined ? { error: task.error } : {}),
           ...(task.pendingActions !== undefined ? { pendingActions: task.pendingActions } : {}),
+          ...(task.currentTool !== undefined ? { currentTool: task.currentTool } : {}),
           ...(task.position !== undefined ? { position: task.position } : {}),
           updatedAt: task.updatedAt,
         })), 
@@ -335,6 +373,8 @@ export const taskCore = query({
       output: task.output,
       error: task.error,
       pendingActions: task.pendingActions,
+      specialistRunId: task.specialistRunId,
+      activeRunId: task.activeRunId,
       position: task.position,
       createdAt: task.createdAt,
       updatedAt: task.updatedAt,
@@ -535,6 +575,7 @@ export const admitFollowup = mutation({
       sessionId: previous.sessionId,
       turnId: undefined,
       pendingActions: undefined,
+      currentTool: undefined,
       error: undefined,
       output: undefined,
       claimedBy: args.owner,
@@ -562,7 +603,7 @@ export const resumeSpecialist = mutation({
     const op = args.operationKey ?? `resume:${args.runId}:${args.selector}:${args.decisionType}`;
     const event = await insertTaskEvent(ctx, args.taskId, args.decisionType === "approve" ? "activity.approval_resolved" : "activity.response_sent", { selector: args.selector, decisionType: args.decisionType }, op);
     await ctx.db.patch(args.runId, { status: "queued", pendingResume: args.resumeInput, claimedBy: undefined, updatedAt: Date.now() });
-    await ctx.db.patch(args.taskId, { column: "working", error: undefined, updatedAt: Date.now() });
+    await ctx.db.patch(args.taskId, { column: "working", currentTool: undefined, error: undefined, updatedAt: Date.now() });
     return result(event.inserted ? "created" : "idempotent", { task: await ctx.db.get(args.taskId), run: await ctx.db.get(args.runId), event: event.event });
   },
 });
@@ -585,24 +626,24 @@ export const finalizeSpecialist = mutation({
       const summary = task.output != null && String(task.output).trim() ? task.output : args.output;
       const event = await insertTaskEvent(ctx, args.taskId, "activity.completed", { summary: summary ?? null, runId: args.runId }, op);
       await ctx.db.patch(args.runId, { status: "completed", output: summary, ...runCursor, finishedAt: now, updatedAt: now, claimedBy: undefined });
-      await ctx.db.patch(args.taskId, { column: "settled", output: summary, sessionId: undefined, turnId: undefined, pendingActions: undefined, error: undefined, activeRunId: undefined, updatedAt: now });
+      await ctx.db.patch(args.taskId, { column: "settled", output: summary, sessionId: undefined, turnId: undefined, pendingActions: undefined, currentTool: undefined, error: undefined, activeRunId: undefined, updatedAt: now });
       return result(event.inserted ? "created" : "idempotent", { task: await ctx.db.get(args.taskId), run: await ctx.db.get(args.runId) });
     }
     if (args.status === "cancelled") {
       await ctx.db.patch(args.runId, { status: "cancelled", ...runCursor, finishedAt: now, updatedAt: now, claimedBy: undefined });
-      await ctx.db.patch(args.taskId, { column: "backlog", sessionId: undefined, turnId: undefined, pendingActions: undefined, handoff: undefined, output: undefined, error: args.errorMessage ?? "cancelled", specialistRunId: undefined, activeRunId: undefined, updatedAt: now });
+      await ctx.db.patch(args.taskId, { column: "backlog", sessionId: undefined, turnId: undefined, pendingActions: undefined, currentTool: undefined, handoff: undefined, output: undefined, error: args.errorMessage ?? "cancelled", specialistRunId: undefined, activeRunId: undefined, updatedAt: now });
       const event = await insertTaskEvent(ctx, args.taskId, "activity.cancelled", { reason: args.errorMessage ?? null, runId: args.runId }, op);
       return result(event.inserted ? "created" : "idempotent", { task: await ctx.db.get(args.taskId), run: await ctx.db.get(args.runId) });
     }
     if (args.status === "failed") {
       await ctx.db.patch(args.runId, { status: "failed", errorCode: args.errorCode, errorMessage: args.errorMessage, ...runCursor, ...(args.sessionId !== undefined ? { sessionId: args.sessionId } : {}), ...(args.turnId !== undefined ? { turnId: args.turnId } : {}), finishedAt: now, updatedAt: now, claimedBy: undefined });
-      await ctx.db.patch(args.taskId, { column: "blocked", sessionId: args.sessionId ?? run.sessionId, turnId: args.turnId ?? run.turnId, pendingActions: undefined, activeRunId: undefined, error: args.errorMessage ?? args.errorCode ?? "run_failed", updatedAt: now });
+      await ctx.db.patch(args.taskId, { column: "blocked", sessionId: args.sessionId ?? run.sessionId, turnId: args.turnId ?? run.turnId, pendingActions: undefined, currentTool: undefined, activeRunId: undefined, error: args.errorMessage ?? args.errorCode ?? "run_failed", updatedAt: now });
       const event = await insertTaskEvent(ctx, args.taskId, "activity.failed", { runId: args.runId, errorCode: args.errorCode, message: args.errorMessage }, op);
       return result(event.inserted ? "created" : "idempotent", { task: await ctx.db.get(args.taskId), run: await ctx.db.get(args.runId), event: event.event });
     }
     const waiting = args.status === "waiting_for_approval";
     await ctx.db.patch(args.runId, { status: waiting ? "waiting_for_approval" : "waiting_for_user", pendingActions: args.pendingActions, pendingActionSelector: args.pendingActionSelector, ...runCursor, ...(args.sessionId !== undefined ? { sessionId: args.sessionId } : {}), ...(args.turnId !== undefined ? { turnId: args.turnId } : {}), updatedAt: now, claimedBy: undefined });
-    await ctx.db.patch(args.taskId, { column: waiting ? "approval" : "blocked", sessionId: args.sessionId ?? run.sessionId, turnId: args.turnId ?? run.turnId, activeRunId: args.runId, pendingActions: args.pendingActions, error: args.errorMessage, updatedAt: now });
+    await ctx.db.patch(args.taskId, { column: waiting ? "approval" : "blocked", sessionId: args.sessionId ?? run.sessionId, turnId: args.turnId ?? run.turnId, currentTool: undefined, activeRunId: args.runId, pendingActions: args.pendingActions, error: args.errorMessage, updatedAt: now });
     const event = await insertTaskEvent(ctx, args.taskId, waiting ? "activity.waiting_approval" : "activity.waiting_response", { runId: args.runId, pendingActions: args.pendingActions }, op);
     return result(event.inserted ? "created" : "idempotent", { task: await ctx.db.get(args.taskId), run: await ctx.db.get(args.runId) });
   },
@@ -698,6 +739,7 @@ export const resetSpecialistForRetry = mutation({
       specialistRunId: undefined,
       activeRunId: undefined,
       pendingActions: undefined,
+      currentTool: undefined,
       claimedBy: undefined,
       error: undefined,
       updatedAt: now,
